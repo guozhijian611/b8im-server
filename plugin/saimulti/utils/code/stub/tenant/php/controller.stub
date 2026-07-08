@@ -1,0 +1,213 @@
+<?php
+// +----------------------------------------------------------------------
+// | saithink [ saithink快速开发框架 ]
+// +----------------------------------------------------------------------
+// | Author: your name
+// +----------------------------------------------------------------------
+namespace {{namespace_start}}controller{{namespace_end}};
+
+use plugin\saimulti\basic\TenantController;
+use {{namespace_start}}logic{{namespace_end}}\{{class_name}}Logic;
+use {{namespace_start}}validate{{namespace_end}}\{{class_name}}Validate;
+use plugin\saimulti\service\Permission;
+use support\Request;
+use support\Response;
+
+/**
+ * {{menu_name}}控制器
+ */
+class {{class_name}}Controller extends TenantController
+{
+    /**
+     * 构造函数
+     */
+    public function __construct()
+    {
+        $this->logic = new {{class_name}}Logic();
+        $this->validate = new {{class_name}}Validate;
+        parent::__construct();
+    }
+
+    /**
+     * 数据列表
+     * @param Request $request
+     * @return Response
+     */
+{% if package_name != '' %}
+    #[Permission('{{menu_name}}列表', '{{namespace}}:{{package_name}}:{{business_name}}:index')]
+{% else %}
+    #[Permission('{{menu_name}}列表', '{{namespace}}:{{business_name}}:index')]
+{% endif %}
+    public function index(Request $request): Response
+    {
+        $where = $request->more([
+{% for column in columns %}
+{% if column.is_query == '2' %}
+            ['{{column.column_name}}', ''],
+{% endif %}
+{% endfor %}
+        ]);
+{% if tpl_category == 'single' %}
+        $query = $this->logic->search($where);
+{% if options.relations != null %}
+        $query->with([
+{% for item in options.relations %}
+            '{{item.name}}',
+{% endfor %}
+        ]);
+{% endif %}
+        $data = $this->logic->getList($query);
+{% endif %}
+{% if tpl_category == 'tree' %}
+        $data = $this->logic->tree($where);
+{% endif %}
+        return $this->success($data);
+    }
+
+    /**
+     * 读取数据
+     * @param Request $request
+     * @return Response
+     */
+{% if package_name != '' %}
+    #[Permission('{{menu_name}}读取', '{{namespace}}:{{package_name}}:{{business_name}}:read')]
+{% else %}
+    #[Permission('{{menu_name}}读取', '{{namespace}}:{{business_name}}:read')]
+{% endif %}
+    public function read(Request $request): Response
+    {
+        $id = $request->input('id', '');
+        $model = $this->logic->read($id);
+        if ($model) {
+            $data = is_array($model) ? $model : $model->toArray();
+            return $this->success($data);
+        } else {
+            return $this->fail('未查找到信息');
+        }
+    }
+
+    /**
+     * 保存数据
+     * @param Request $request
+     * @return Response
+     */
+{% if package_name != '' %}
+    #[Permission('{{menu_name}}新增', '{{namespace}}:{{package_name}}:{{business_name}}:save')]
+{% else %}
+    #[Permission('{{menu_name}}新增', '{{namespace}}:{{business_name}}:save')]
+{% endif %}
+    public function save(Request $request): Response
+    {
+        $data = $request->post();
+        $this->validate('save', $data);
+        $result = $this->logic->add($data);
+        if ($result) {
+            return $this->success('添加成功');
+        } else {
+            return $this->fail('添加失败');
+        }
+    }
+
+    /**
+     * 更新数据
+     * @param Request $request
+     * @return Response
+     */
+{% if package_name != '' %}
+    #[Permission('{{menu_name}}更新', '{{namespace}}:{{package_name}}:{{business_name}}:update')]
+{% else %}
+    #[Permission('{{menu_name}}更新', '{{namespace}}:{{business_name}}:update')]
+{% endif %}
+    public function update(Request $request): Response
+    {
+        $data = $request->post();
+        $this->validate('update', $data);
+        $result = $this->logic->edit($data['id'], $data);
+        if ($result) {
+            return $this->success('修改成功');
+        } else {
+            return $this->fail('修改失败');
+        }
+    }
+
+    /**
+     * 删除数据
+     * @param Request $request
+     * @return Response
+     */
+{% if package_name != '' %}
+    #[Permission('{{menu_name}}删除', '{{namespace}}:{{package_name}}:{{business_name}}:destroy')]
+{% else %}
+    #[Permission('{{menu_name}}删除', '{{namespace}}:{{business_name}}:destroy')]
+{% endif %}
+    public function destroy(Request $request): Response
+    {
+        $ids = $request->post('ids', '');
+        if (empty($ids)) {
+            return $this->fail('请选择要删除的数据');
+        }
+        $result = $this->logic->destroy($ids);
+        if ($result) {
+            return $this->success('删除成功');
+        } else {
+            return $this->fail('删除失败');
+        }
+    }
+
+{% if generate_menus | str_contains('import') %}
+    /**
+     * 下载导入模板
+     * @return Response
+     */
+    public function downloadTemplate() : Response
+    {
+        $file_name = "{{menu_name}}_template.xlsx";
+        return downloadFile($file_name);
+    }
+
+    /**
+     * 导入数据
+     * @param Request $request
+     * @return Response
+     */
+{% if package_name != '' %}
+    #[Permission('{{menu_name}}导入', '{{namespace}}:{{package_name}}:{{business_name}}:import')]
+{% else %}
+    #[Permission('{{menu_name}}导入', '{{namespace}}:{{business_name}}:import')]
+{% endif %}
+    public function import(Request $request) : Response
+    {
+        $file = current($request->file());
+        if (!$file || !$file->isValid()) {
+            return $this->fail('未找到上传文件');
+        }
+        $this->logic->import($file);
+        return $this->success('导入成功');
+    }
+
+{% endif %}
+{% if generate_menus | str_contains('export') %}
+    /**
+     * 导出数据
+     * @param Request $request
+     * @return Response
+     */
+{% if package_name != '' %}
+    #[Permission('{{menu_name}}导出', '{{namespace}}:{{package_name}}:{{business_name}}:export')]
+{% else %}
+    #[Permission('{{menu_name}}导出', '{{namespace}}:{{business_name}}:export')]
+{% endif %}
+    public function export(Request $request) : Response
+    {
+        $where = $request->more([
+{% for column in columns %}
+{% if column.is_query == '2' %}
+            ['{{column.column_name}}', ''],
+{% endif %}
+{% endfor %}
+        ]);
+        return $this->logic->export($where);
+    }
+
+{% endif %}
+}

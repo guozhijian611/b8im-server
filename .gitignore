@@ -1,0 +1,6 @@
+/runtime
+/.env
+/.idea
+/.vscode
+/vendor
+*.log

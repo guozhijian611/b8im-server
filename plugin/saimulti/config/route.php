@@ -1,0 +1,212 @@
+<?php
+
+use plugin\saimulti\app\middleware\AdminLog;
+use plugin\saimulti\app\middleware\CheckAdminAuth;
+use plugin\saimulti\app\middleware\CheckAdminLogin;
+use plugin\saimulti\app\middleware\CheckTenantAuth;
+use plugin\saimulti\app\middleware\CheckTenantLogin;
+use plugin\saimulti\app\middleware\TenantLog;
+use Webman\Route;
+
+// 验证码
+Route::get("/saimulti/captcha", [plugin\saimulti\app\controller\LoginController::class, 'captcha']);
+// 管理中台登录
+Route::post('/saimulti/admin/login', [plugin\saimulti\app\controller\LoginController::class, 'adminLogin']);
+// 租户端登录
+Route::post('/saimulti/tenant/login', [plugin\saimulti\app\controller\LoginController::class, 'tenantLogin']);
+// 应用信息
+Route::get("/saimulti/appInfo", [plugin\saimulti\app\controller\LoginController::class, 'appInfo']);
+
+Route::group("/saimulti", function () {
+	// 管理中台信息
+	Route::get('/admin/user', [\plugin\saimulti\app\controller\system\AdminsController::class, 'userInfo']);
+	Route::get('/admin/menu', [\plugin\saimulti\app\controller\system\AdminsController::class, 'menu']);
+	Route::get('/admin/clearAllCache', [\plugin\saimulti\app\controller\AdminCommonController::class, 'clearAllCache']);
+	Route::post("/admin/updateInfo", [\plugin\saimulti\app\controller\system\AdminsController::class, 'updateInfo']);
+	Route::post("/admin/modifyPassword", [\plugin\saimulti\app\controller\system\AdminsController::class, 'modifyPassword']);
+	Route::get('/admin/loginList', [\plugin\saimulti\app\controller\system\AdminsController::class, 'loginList']);
+	Route::get('/admin/operList', [\plugin\saimulti\app\controller\system\AdminsController::class, 'operList']);
+
+	// 常规接口
+	Route::get("/system/dictAll", [plugin\saimulti\app\controller\AdminCommonController::class, 'dictAll']);
+	Route::get("/system/getResourceCategory", [plugin\saimulti\app\controller\AdminCommonController::class, 'getResourceCategory']);
+	Route::get("/system/getResourceList", [plugin\saimulti\app\controller\AdminCommonController::class, 'getResourceList']);
+	Route::get("/system/areaCode", [plugin\saimulti\app\controller\AdminCommonController::class, 'areaCode']);
+	Route::post("/system/uploadImage", [plugin\saimulti\app\controller\AdminCommonController::class, 'uploadImage']);
+	Route::post("/system/uploadFile", [plugin\saimulti\app\controller\AdminCommonController::class, 'uploadFile']);
+
+	//--------------------------- 系统管理 ------------------------- //
+	// 菜单管理
+	saiMultiRoute('/system/coreMenu', \plugin\saimulti\app\controller\system\MenuController::class);
+	Route::get('/system/coreMenu/accessMenu', [\plugin\saimulti\app\controller\system\MenuController::class, 'accessMenu']);
+
+	// 角色管理
+	saiMultiRoute("/system/coreRole", \plugin\saimulti\app\controller\system\RoleController::class);
+	Route::get("/system/coreRole/accessRole", [\plugin\saimulti\app\controller\system\RoleController::class, 'accessRole']);
+	Route::get("/system/coreRole/getMenuByRole", [\plugin\saimulti\app\controller\system\RoleController::class, 'getMenuByRole']);
+	Route::post("/system/coreRole/menuPermission", [\plugin\saimulti\app\controller\system\RoleController::class, 'menuPermission']);
+
+	// 部门管理
+	saiMultiRoute("/system/coreDept", \plugin\saimulti\app\controller\system\DeptController::class);
+	Route::get("/system/coreDept/accessDept", [\plugin\saimulti\app\controller\system\DeptController::class, 'accessDept']);
+
+	// 账号管理
+	saiMultiRoute("/system/admin", \plugin\saimulti\app\controller\system\AdminsController::class);
+	Route::post("/system/admin/setHomePage", [\plugin\saimulti\app\controller\system\AdminsController::class, 'setHomePage']);
+	Route::post("/system/admin/clearCache", [\plugin\saimulti\app\controller\system\AdminsController::class, 'clearCache']);
+	Route::post("/system/admin/reset", [\plugin\saimulti\app\controller\system\AdminsController::class, 'initUserPassword']);
+
+	// 数据字典
+	saiMultiRoute('/system/dictType', \plugin\saimulti\app\controller\system\SystemDictTypeController::class);
+	saiMultiRoute('/system/dictData', \plugin\saimulti\app\controller\system\SystemDictDataController::class);
+
+	// 系统设置
+	saiMultiRoute('/system/configGroup', \plugin\saimulti\app\controller\system\SystemConfigGroupController::class);
+	Route::post("/system/configGroup/email", [\plugin\saimulti\app\controller\system\SystemConfigGroupController::class, 'email']);
+	saiMultiRoute('/system/config', \plugin\saimulti\app\controller\system\SystemConfigController::class);
+	Route::post("/system/config/batchUpdate", [\plugin\saimulti\app\controller\system\SystemConfigController::class, 'batchUpdate']);
+
+	//--------------------------- 租户管理 ------------------------- //
+	// 机构管理
+	saiMultiRoute('/admin/organization', \plugin\saimulti\app\controller\admin\SystemOrganizationController::class);
+	Route::post("/admin/organization/initTenant", [\plugin\saimulti\app\controller\admin\SystemOrganizationController::class, 'initTenant']);
+
+	// 机构分组
+	saiMultiRoute('/admin/group', \plugin\saimulti\app\controller\admin\SystemGroupController::class);
+	Route::get("/admin/group/getMenuByGroup", [\plugin\saimulti\app\controller\admin\SystemGroupController::class, 'getMenuByGroup']);
+	Route::post("/admin/group/updateMenuGroup", [\plugin\saimulti\app\controller\admin\SystemGroupController::class, 'updateMenuGroup']);
+
+	// 机构账号
+	saiMultiRoute('/admin/user', \plugin\saimulti\app\controller\admin\SystemUserController::class);
+	Route::post("/admin/user/clearCache", [\plugin\saimulti\app\controller\admin\SystemUserController::class, 'clearCache']);
+	Route::post("/admin/user/reset", [\plugin\saimulti\app\controller\admin\SystemUserController::class, 'initUserPassword']);
+
+	// 菜单管理
+	saiMultiRoute('/admin/menu', \plugin\saimulti\app\controller\admin\SystemMenuController::class);
+
+	//--------------------------- 系统维护 ------------------------- //
+	// 数据表维护
+	Route::get("/tool/database/index", [\plugin\saimulti\app\controller\tool\DataBaseController::class, 'index']);
+	Route::get("/tool/database/recycle", [\plugin\saimulti\app\controller\tool\DataBaseController::class, 'recycle']);
+	Route::delete("/tool/database/delete", [\plugin\saimulti\app\controller\tool\DataBaseController::class, 'delete']);
+	Route::post("/tool/database/recovery", [\plugin\saimulti\app\controller\tool\DataBaseController::class, 'recovery']);
+	Route::get("/tool/database/detailed", [\plugin\saimulti\app\controller\tool\DataBaseController::class, 'detailed']);
+	Route::post("/tool/database/optimize", [\plugin\saimulti\app\controller\tool\DataBaseController::class, 'optimize']);
+	Route::post("/tool/database/fragment", [\plugin\saimulti\app\controller\tool\DataBaseController::class, 'fragment']);
+
+	// 附件管理
+	saiMultiRoute('/tool/attachment', \plugin\saimulti\app\controller\tool\AttachmentController::class);
+	Route::post("/tool/attachment/move", [\plugin\saimulti\app\controller\tool\AttachmentController::class, 'move']);
+	// 附件分类
+	saiMultiRoute('/tool/category', \plugin\saimulti\app\controller\system\SystemCategoryController::class);
+	// 登录日志
+	Route::get("/tool/loginLog/index", [\plugin\saimulti\app\controller\tool\LoginLogController::class, 'index']);
+	Route::delete("/tool/loginLog/destroy", [\plugin\saimulti\app\controller\tool\LoginLogController::class, 'destroy']);
+	// 操作日志
+	Route::get("/tool/operateLog/index", [\plugin\saimulti\app\controller\tool\OperLogController::class, 'index']);
+	Route::delete("/tool/operateLog/destroy", [\plugin\saimulti\app\controller\tool\OperLogController::class, 'destroy']);
+	// 邮件日志
+	Route::get("/tool/email/index", [\plugin\saimulti\app\controller\tool\MailController::class, 'index']);
+	Route::delete("/tool/email/destroy", [\plugin\saimulti\app\controller\tool\MailController::class, 'destroy']);
+	// 定时任务
+	saiMultiRoute('/tool/crontab', \plugin\saimulti\app\controller\tool\CrontabController::class);
+	Route::post("/tool/crontab/run", [\plugin\saimulti\app\controller\tool\CrontabController::class, 'run']);
+	Route::get("/tool/crontab/logPageList", [\plugin\saimulti\app\controller\tool\CrontabController::class, 'logPageList']);
+	Route::delete('/tool/crontab/deleteCrontabLog', [\plugin\saimulti\app\controller\tool\CrontabController::class, 'deleteCrontabLog']);
+
+	//--------------------------- 开发中心 ------------------------- //
+	saiMultiRoute("/develop/table", plugin\saimulti\app\controller\tool\TableController::class);
+	Route::get("/develop/table/source", [\plugin\saimulti\app\controller\tool\TableController::class, 'source']);
+	Route::get("/develop/table/sourceTable", [\plugin\saimulti\app\controller\tool\TableController::class, 'sourceTable']);
+	Route::post("/develop/table/loadTable", [\plugin\saimulti\app\controller\tool\TableController::class, 'loadTable']);
+	Route::get("/develop/table/preview", [\plugin\saimulti\app\controller\tool\TableController::class, 'preview']);
+	Route::post("/develop/table/sync", [\plugin\saimulti\app\controller\tool\TableController::class, 'sync']);
+	Route::post("/develop/table/saveDesign", [\plugin\saimulti\app\controller\tool\TableController::class, 'saveDesign']);
+	Route::post("/develop/table/saveSearchDesign", [\plugin\saimulti\app\controller\tool\TableController::class, 'saveSearchDesign']);
+	Route::get("/develop/table/getTableColumns", [\plugin\saimulti\app\controller\tool\TableController::class, 'getTableColumns']);
+	Route::post("/develop/table/generateFile", [\plugin\saimulti\app\controller\tool\TableController::class, 'generateFile']);
+	Route::post("/develop/table/generate", [\plugin\saimulti\app\controller\tool\TableController::class, 'generate']);
+
+})->middleware([
+	CheckAdminLogin::class,
+	CheckAdminAuth::class,
+	AdminLog::class
+]);
+
+
+Route::group("/saimulti", function () {
+	// 租户信息
+	Route::get('/tenant/user', [\plugin\saimulti\app\controller\tenant\SystemUserController::class, 'userInfo']);
+	Route::get('/tenant/menu', [\plugin\saimulti\app\controller\tenant\SystemUserController::class, 'menu']);
+	Route::get('/tenant/clearAllCache', [\plugin\saimulti\app\controller\TenantCommonController::class, 'clearAllCache']);
+	Route::post("/tenant/updateInfo", [\plugin\saimulti\app\controller\tenant\SystemUserController::class, 'updateInfo']);
+	Route::post("/tenant/modifyPassword", [\plugin\saimulti\app\controller\tenant\SystemUserController::class, 'modifyPassword']);
+	Route::get('/tenant/loginList', [\plugin\saimulti\app\controller\tenant\SystemUserController::class, 'loginList']);
+	Route::get('/tenant/operList', [\plugin\saimulti\app\controller\tenant\SystemUserController::class, 'operList']);
+
+	// 常规接口
+	Route::get("/tenant/dictAll", [plugin\saimulti\app\controller\TenantCommonController::class, 'dictAll']);
+	Route::get("/tenant/getResourceCategory", [plugin\saimulti\app\controller\TenantCommonController::class, 'getResourceCategory']);
+	Route::get("/tenant/getResourceList", [plugin\saimulti\app\controller\TenantCommonController::class, 'getResourceList']);
+	Route::get("/tenant/areaCode", [plugin\saimulti\app\controller\TenantCommonController::class, 'areaCode']);
+	Route::post("/tenant/uploadImage", [plugin\saimulti\app\controller\TenantCommonController::class, 'uploadImage']);
+	Route::post("/tenant/uploadFile", [plugin\saimulti\app\controller\TenantCommonController::class, 'uploadFile']);
+
+	// 菜单列表
+	Route::get("/tenant/menu/index", [plugin\saimulti\app\controller\tenant\SystemMenuController::class, 'index']);
+	//--------------------------- 权限管理 ------------------------- //
+	// 用户管理
+	saiMultiRoute("/tenant/user", \plugin\saimulti\app\controller\tenant\SystemUserController::class);
+	Route::post("/tenant/user/setHomePage", [\plugin\saimulti\app\controller\tenant\SystemUserController::class, 'setHomePage']);
+	Route::post("/tenant/user/clearCache", [\plugin\saimulti\app\controller\tenant\SystemUserController::class, 'clearCache']);
+	Route::post("/tenant/user/reset", [\plugin\saimulti\app\controller\tenant\SystemUserController::class, 'initUserPassword']);
+
+	// 部门管理
+	saiMultiRoute("/tenant/dept", \plugin\saimulti\app\controller\tenant\SystemDeptController::class);
+	Route::get("/tenant/dept/accessDept", [\plugin\saimulti\app\controller\tenant\SystemDeptController::class, 'accessDept']);
+
+	// 角色管理
+	saiMultiRoute("/tenant/role", \plugin\saimulti\app\controller\tenant\SystemRoleController::class);
+	Route::get("/tenant/role/accessRole", [\plugin\saimulti\app\controller\tenant\SystemRoleController::class, 'accessRole']);
+	Route::get("/tenant/role/getMenuByRole", [\plugin\saimulti\app\controller\tenant\SystemRoleController::class, 'getMenuByRole']);
+	Route::post("/tenant/role/menuPermission", [\plugin\saimulti\app\controller\tenant\SystemRoleController::class, 'menuPermission']);
+
+	// 岗位管理
+	saiMultiRoute('/tenant/post', \plugin\saimulti\app\controller\tenant\SystemPostController::class);
+
+	// 系统配置
+	Route::get("/tenant/config/basicConfig", [\plugin\saimulti\app\controller\tenant\SystemConfigController::class, 'basicConfig']);
+	Route::post("/tenant/config/saveBasic", [\plugin\saimulti\app\controller\tenant\SystemConfigController::class, 'saveBasic']);
+	Route::get("/tenant/config/groupConfig", [\plugin\saimulti\app\controller\tenant\SystemConfigController::class, 'groupConfig']);
+	Route::post("/tenant/config/saveGroup", [\plugin\saimulti\app\controller\tenant\SystemConfigController::class, 'saveGroup']);
+
+	// 附件管理
+	Route::get("/tenant/attachment/category", [\plugin\saimulti\app\controller\tenant\SystemCategoryController::class, 'index']);
+	saiMultiRoute('/tenant/attachment', \plugin\saimulti\app\controller\tenant\SystemAttachmentController::class);
+	Route::post("/tenant/attachment/move", [\plugin\saimulti\app\controller\tenant\SystemAttachmentController::class, 'move']);
+
+	// 登录日志
+	Route::get("/tenant/loginLog/index", [\plugin\saimulti\app\controller\tenant\SystemLogController::class, 'getLoginLogPageList']);
+	Route::delete("/tenant/loginLog/destroy", [\plugin\saimulti\app\controller\tenant\SystemLogController::class, 'deleteLoginLog']);
+	// 操作日志
+	Route::get("/tenant/operateLog/index", [\plugin\saimulti\app\controller\tenant\SystemLogController::class, 'getOperLogPageList']);
+	Route::delete("/tenant/operateLog/destroy", [\plugin\saimulti\app\controller\tenant\SystemLogController::class, 'deleteOperLog']);
+
+})->middleware([
+	CheckTenantLogin::class,
+	CheckTenantAuth::class,
+	TenantLog::class
+]);
+
+// 数据中心
+Route::group("/cms", function () {
+
+	saiMultiRoute('/Article', \plugin\saimulti\app\controller\data\ArticleController::class);
+	saiMultiRoute('/ArticleCategory', \plugin\saimulti\app\controller\data\ArticleCategoryController::class);
+	saiMultiRoute('/ArticleBanner', \plugin\saimulti\app\controller\data\ArticleBannerController::class);
+
+})->middleware([
+	CheckTenantLogin::class,
+	CheckTenantAuth::class,
+	TenantLog::class
+]);
