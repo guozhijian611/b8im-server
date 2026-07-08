@@ -36,6 +36,14 @@ db/area_code.sql.gz
 
 `area_code.sql` 原始文件超过 GitHub 单文件 100MB 限制，因此以 gzip 压缩形式保存。
 
+本机默认开发数据库：
+
+```text
+DB_NAME = nb8im
+DB_USER = root
+DB_PASSWORD = root
+```
+
 本机需要导入地区数据时先解压：
 
 ```bash
