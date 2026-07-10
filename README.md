@@ -59,3 +59,27 @@ cp .env.example .env
 ```
 
 再按本机数据库、Redis 配置修改 `.env`。
+
+## 数据库迁移
+
+数据库结构变更使用 Phinx 管理。`phinx.php` 是配置文件，默认读取 `.env` 并连接
+`DB_NAME` 指定的数据库；迁移和种子文件分别放在：
+
+```text
+database/migrations/
+database/seeds/
+```
+
+通过 webman 命令执行 Phinx：
+
+```bash
+php webman phinx:test --environment=default
+php webman phinx:status
+php webman phinx:create AddExampleTable
+php webman phinx:migrate
+php webman phinx:rollback
+php webman phinx:seed-create ExampleSeeder
+php webman phinx:seed-run
+```
+
+`phinx.php` 不是可执行入口，不要使用 `php phinx.php`。
