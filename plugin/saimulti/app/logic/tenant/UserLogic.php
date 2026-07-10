@@ -5,9 +5,13 @@ use plugin\saimulti\app\cache\TenantUserCache;
 use plugin\saimulti\app\cache\TenantAuthCache;
 use plugin\saimulti\app\model\tenant\User;
 use plugin\saimulti\app\model\tenant\Dept;
+use plugin\saimulti\app\model\tenant\Post;
 use plugin\saimulti\app\model\tenant\Role;
+use plugin\saimulti\app\model\system\SystemOrganization;
 use plugin\saimulti\basic\BaseLogic;
 use plugin\saimulti\exception\ApiException;
+use plugin\saimulti\service\TenantContext;
+use plugin\saimulti\service\TenantUserWritePolicy;
 use Tinywan\Jwt\JwtToken;
 use Webman\Event\Event;
 
@@ -59,7 +63,14 @@ class UserLogic extends BaseLogic
      */
     public function login(string $username, string $password, string $type): array
     {
-        $organization = request()->header('App-Id');
+        $organization = TenantContext::requestOrganization();
+        $organizationInfo = SystemOrganization::where('id', $organization)
+            ->where('status', 1)
+            ->findOrEmpty();
+        if ($organizationInfo->isEmpty()) {
+            throw new ApiException('当前租户不存在或已停用', 41003);
+        }
+
         $tenantInfo = $this->model->where('username', $username)->where('organization', $organization)->findOrEmpty();
         $status = 1;
         $message = '登录成功';
@@ -67,7 +78,7 @@ class UserLogic extends BaseLogic
             $message = '账号或密码错误，请重新输入!';
             throw new ApiException($message);
         }
-        if ($tenantInfo->status === 2) {
+        if ((int) $tenantInfo->status !== 1) {
             $status = 0;
             $message = '您已被禁止登录!';
         }
@@ -89,9 +100,12 @@ class UserLogic extends BaseLogic
         $token = JwtToken::generateToken([
             'access_exp' => $access_exp,
             'id' => $tenantInfo->id,
+            'organization' => $organization,
             'username' => $tenantInfo->username,
             'user_type' => $tenantInfo->user_type,
             'plat' => 'tenant',
+            'aud' => 'tenant-api',
+            'deployment_id' => env('DEPLOYMENT_ID', 'b8im-local'),
             'type' => $type
         ]);
         // 登录事件
@@ -106,13 +120,19 @@ class UserLogic extends BaseLogic
      */
     public function add($data): mixed
     {
+        $data = TenantUserWritePolicy::forCreate($data);
+        $this->assertUsernameAvailable($data['username']);
         $data['password'] = password_hash($data['password'], PASSWORD_DEFAULT);
+
         return $this->transaction(function () use ($data) {
-            $role_ids = $data['role_ids'] ?? [];
-            $post_ids = $data['post_ids'] ?? [];
+            $role_ids = $this->normalizeIds($data['role_ids'] ?? []);
+            $post_ids = $this->normalizeIds($data['post_ids'] ?? []);
+            $deptId = (int) ($data['dept_id'] ?? 0);
+            $this->assertAssignments($deptId, $role_ids, $post_ids);
+
             if ($this->tenantInfo['user_type'] != 100) {
                 // 部门保护
-                if (!$this->deptProtect($this->tenantInfo['deptList'], $data['dept_id'])) {
+                if (!$this->deptProtect($this->tenantInfo['deptList'], $deptId)) {
                     throw new ApiException('没有权限操作该部门数据');
                 }
                 // 越权保护
@@ -120,7 +140,9 @@ class UserLogic extends BaseLogic
                     throw new ApiException('没有权限操作该角色数据');
                 }
             }
-            $user = User::create($data);
+            $writeData = $data;
+            unset($writeData['role_ids'], $writeData['post_ids']);
+            $user = User::create($writeData);
             $user->roles()->detach();
             $user->roles()->saveAll($role_ids);
             $user->posts()->detach();
@@ -133,10 +155,14 @@ class UserLogic extends BaseLogic
 
     public function edit($id, $data): mixed
     {
-        unset($data['password']);
+        $data = TenantUserWritePolicy::forUpdate($data);
+        $this->assertUsernameAvailable($data['username'], (int) $id);
+
         return $this->transaction(function () use ($data, $id) {
-            $role_ids = $data['role_ids'] ?? [];
-            $post_ids = $data['post_ids'] ?? [];
+            $role_ids = $this->normalizeIds($data['role_ids'] ?? []);
+            $post_ids = $this->normalizeIds($data['post_ids'] ?? []);
+            $deptId = (int) ($data['dept_id'] ?? 0);
+            $this->assertAssignments($deptId, $role_ids, $post_ids);
 
             // 仅可修改当前部门和子部门的用户
             $query = $this->model->where('id', $id);
@@ -145,9 +171,12 @@ class UserLogic extends BaseLogic
             if ($user->isEmpty()) {
                 throw new ApiException('没有权限操作该数据');
             }
+            if ((int) $user->user_type === 100) {
+                throw new ApiException('超级管理员不允许通过用户管理修改', 403);
+            }
             if ($this->tenantInfo['user_type'] != 100) {
                 // 部门保护
-                if (!$this->deptProtect($this->tenantInfo['deptList'], $data['dept_id'])) {
+                if (!$this->deptProtect($this->tenantInfo['deptList'], $deptId)) {
                     throw new ApiException('没有权限操作该部门数据');
                 }
                 // 越权保护
@@ -155,7 +184,9 @@ class UserLogic extends BaseLogic
                     throw new ApiException('没有权限操作该角色数据');
                 }
             }
-            $result = parent::edit($id, $data);
+            $writeData = $data;
+            unset($writeData['id'], $writeData['role_ids'], $writeData['post_ids']);
+            $result = parent::edit($id, $writeData);
             if ($result && !$user->isEmpty()) {
                 $user->roles()->detach();
                 $user->posts()->detach();
@@ -225,6 +256,25 @@ class UserLogic extends BaseLogic
     }
 
     /**
+     * 由用户管理功能重置普通管理员密码。
+     */
+    public function resetPassword(int $id, string $password): bool
+    {
+        $model = $this->model->findOrEmpty($id);
+        if ($model->isEmpty()) {
+            throw new ApiException('用户不存在', 404);
+        }
+        if ((int) $model->user_type === 100) {
+            throw new ApiException('超级管理员不允许重置密码', 403);
+        }
+
+        $model->password = password_hash($password, PASSWORD_DEFAULT);
+        $result = $model->save();
+        TenantUserCache::clearUserInfo($id);
+        return $result;
+    }
+
+    /**
      * 修改数据
      */
     public function authEdit($id, $data)
@@ -276,6 +326,43 @@ class UserLogic extends BaseLogic
             return false;
         }
         return true;
+    }
+
+    private function assertUsernameAvailable(string $username, ?int $excludeId = null): void
+    {
+        $query = User::where('username', $username);
+        if ($excludeId !== null) {
+            $query->where('id', '<>', $excludeId);
+        }
+        if ($query->count() > 0) {
+            throw new ApiException('用户名已存在', 400);
+        }
+    }
+
+    private function assertAssignments(int $deptId, array $roleIds, array $postIds): void
+    {
+        if ($deptId <= 0 || Dept::where('id', $deptId)->where('status', 1)->count() !== 1) {
+            throw new ApiException('部门不存在或不属于当前租户', 400);
+        }
+        if ($roleIds === [] || Role::whereIn('id', $roleIds)->where('status', 1)->count() !== count($roleIds)) {
+            throw new ApiException('角色不存在或不属于当前租户', 400);
+        }
+        if ($postIds !== [] && Post::whereIn('id', $postIds)->where('status', 1)->count() !== count($postIds)) {
+            throw new ApiException('岗位不存在或不属于当前租户', 400);
+        }
+    }
+
+    private function normalizeIds(mixed $ids): array
+    {
+        if (!is_array($ids)) {
+            throw new ApiException('关联编号参数格式错误', 400);
+        }
+
+        $normalized = array_values(array_unique(array_map('intval', $ids)));
+        if (array_filter($normalized, static fn (int $id): bool => $id <= 0) !== []) {
+            throw new ApiException('关联编号必须为正整数', 400);
+        }
+        return $normalized;
     }
 
 }

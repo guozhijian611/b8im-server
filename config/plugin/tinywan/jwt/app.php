@@ -1,5 +1,20 @@
 <?php
 
+$jwtSecret = static function (string $environmentKey, string $purpose): string {
+    $secret = (string) env($environmentKey, '');
+    if ($secret !== '') {
+        return $secret;
+    }
+
+    $debug = filter_var(env('APP_DEBUG', false), FILTER_VALIDATE_BOOL);
+    if ($debug) {
+        // 仅供本机开发；不把可共享的固定密钥提交到 Git。
+        return hash('sha256', base_path() . '|' . php_uname('n') . '|' . $purpose);
+    }
+
+    throw new RuntimeException($environmentKey . ' must be configured when APP_DEBUG=false');
+};
+
 return [
     'enable' => true,
     'jwt' => [
@@ -7,13 +22,13 @@ return [
         'algorithms' => 'HS256',
 
         /** access令牌秘钥（安装时自动生成64位随机值） */
-        'access_secret_key' => '39ad4d547f24e8c44cb29e66adcc5c7dcd2c3a4aa02aa51dd5a5886cabcd9c2a',
+        'access_secret_key' => $jwtSecret('JWT_ACCESS_SECRET_KEY', 'access'),
 
         /** access令牌过期时间，单位：秒。默认 2 小时 */
         'access_exp' => 7200,
 
         /** refresh令牌秘钥（安装时自动生成64位随机值） */
-        'refresh_secret_key' => '3ad0eb14c19ac45be73d87882e0f48a623893fee98ca078ccefa60f477dffa05',
+        'refresh_secret_key' => $jwtSecret('JWT_REFRESH_SECRET_KEY', 'refresh'),
 
         /** refresh令牌过期时间，单位：秒。默认 7 天 */
         'refresh_exp' => 604800,
@@ -22,7 +37,7 @@ return [
         'refresh_disable' => false,
 
         /** 令牌签发者 */
-        'iss' => 'webman.tinywan.cn',
+        'iss' => env('DEPLOYMENT_ID', 'b8im-local'),
 
         /** 某个时间点后才能访问，单位秒。（如：30 表示当前时间30秒后才能使用） */
         'nbf' => 0,

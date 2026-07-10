@@ -8,6 +8,7 @@ use plugin\saimulti\app\logic\tenant\MenuLogic;
 use plugin\saimulti\app\logic\tool\LoginLogLogic;
 use plugin\saimulti\app\logic\tool\OperLogLogic;
 use plugin\saimulti\app\model\tenant\UserRole;
+use plugin\saimulti\app\validate\system\TenantUserValidate;
 use plugin\saimulti\basic\TenantController;
 use plugin\saimulti\utils\Arr;
 use plugin\saimulti\service\Permission;
@@ -23,6 +24,7 @@ class SystemUserController extends TenantController
     public function __construct()
     {
         $this->logic = new UserLogic();
+        $this->validate = new TenantUserValidate();
         parent::__construct();
     }
 
@@ -242,14 +244,13 @@ class SystemUserController extends TenantController
     #[Permission('修改用户密码', 'saimulti:tenant:user:password')]
     public function initUserPassword(Request $request): Response
     {
-        $id = $request->post('id', '');
-        $password = $request->post('password', 'sai123456');
-        if ($id == 1) {
-            return $this->fail('超级管理员不允许重置密码');
+        $id = (int) $request->post('id', 0);
+        $password = (string) $request->post('password', '');
+        if ($id <= 0 || mb_strlen($password) < 8 || mb_strlen($password) > 72) {
+            return $this->fail('请填写用户编号和 8 至 72 个字符的新密码');
         }
-        $data = ['password' => password_hash($password, PASSWORD_DEFAULT)];
-        $this->logic->update($data, ['id' => $id]);
-        TenantUserCache::clearUserInfo($id);
+
+        $this->logic->resetPassword($id, $password);
         return $this->success('操作成功');
     }
 

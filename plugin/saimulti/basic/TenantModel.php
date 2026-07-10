@@ -9,6 +9,7 @@ namespace plugin\saimulti\basic;
 use think\Model;
 use think\model\concern\SoftDelete;
 use plugin\saimulti\exception\ApiException;
+use plugin\saimulti\service\TenantContext;
 
 /**
  * 租户软删除模型基类
@@ -32,8 +33,10 @@ class TenantModel extends Model
 
     public function scopeOrganization($query)
     {
-        $organization = request()->header('App-Id');
-        $organization && $query->where('organization', $organization);
+        $organization = self::resolveOrganization();
+        if ($organization !== null) {
+            $query->where('organization', $organization);
+        }
     }
 
     /**
@@ -44,37 +47,55 @@ class TenantModel extends Model
         $query->whereTime('create_time', 'between', $value);
     }
 
-    public static function onBeforeDelete($model) {
-        $organization = request()->header('App-Id');
-        if (!empty($organization)) {
-            if ($model->getAttr('organization') != $organization) {
-                throw new ApiException('非法操作');
-            }
-        }
-
+    public static function onBeforeDelete($model)
+    {
+        self::assertModelOrganization($model);
     }
 
-    public static function onBeforeRestore($model) {
-        $organization = request()->header('App-Id');
-        if (!empty($organization)) {
-            if ($model->getAttr('organization') != $organization) {
-                throw new ApiException('非法操作');
-            }
-        }
+    public static function onBeforeRestore($model)
+    {
+        self::assertModelOrganization($model);
     }
 
-    public static function onBeforeInsert($model) {
-        $organization = request()->header('App-Id');
-        $organization && $model->setAttr('organization', $organization);
+    public static function onBeforeInsert($model)
+    {
+        $organization = self::resolveOrganization();
+        if ($organization !== null) {
+            $model->setAttr('organization', $organization);
+        }
         $info = getTenantInfo();
         $info && $model->setAttr('created_by', $info['id']);
     }
 
-    public static function onBeforeWrite($model) {
-        $organization = request()->header('App-Id');
-        $organization && $model->setAttr('organization', $organization);
+    public static function onBeforeWrite($model)
+    {
+        $organization = self::resolveOrganization();
+        if ($organization !== null) {
+            $model->setAttr('organization', $organization);
+        }
         $info = getTenantInfo();
         $info && $model->setAttr('updated_by', $info['id']);
     }
 
+    private static function resolveOrganization(): ?int
+    {
+        if (!request()) {
+            return null;
+        }
+
+        $organization = TenantContext::organization(false);
+        if ($organization === null && !TenantContext::isAdminRequest()) {
+            throw new ApiException('租户上下文缺失', TenantContext::REQUIRED);
+        }
+
+        return $organization;
+    }
+
+    private static function assertModelOrganization($model): void
+    {
+        $organization = self::resolveOrganization();
+        if ($organization !== null && (int) $model->getAttr('organization') !== $organization) {
+            throw new ApiException('非法跨租户操作', TenantContext::MISMATCH);
+        }
+    }
 }

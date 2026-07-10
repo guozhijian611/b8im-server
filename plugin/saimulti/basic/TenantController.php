@@ -9,6 +9,7 @@ namespace plugin\saimulti\basic;
 use plugin\saimulti\exception\ApiException;
 use plugin\saimulti\app\cache\TenantUserCache;
 use plugin\saimulti\app\logic\system\SystemOrganizationLogic;
+use plugin\saimulti\service\TenantContext;
 
 /**
  * 租户控制器基类
@@ -55,7 +56,13 @@ class TenantController extends OpenController
             $this->tenantId = $result['id'];
             $this->tenantName = $result['username'];
             $this->tenantInfo = TenantUserCache::getUserInfo($result['id']);
-            $this->organization = $this->tenantInfo['organization'];
+            if (empty($this->tenantInfo) || (int) $this->tenantInfo['status'] !== 1) {
+                throw new ApiException('租户管理员已停用或不存在', 401);
+            }
+            $this->organization = TenantContext::parseOrganization($result['organization']);
+            if ((int) $this->tenantInfo['organization'] !== $this->organization) {
+                throw new ApiException('登录凭证与用户归属不一致', TenantContext::MISMATCH);
+            }
 
             $organLogic = new SystemOrganizationLogic();
             $organization = $organLogic->where('id', $this->organization)->findOrEmpty();
@@ -63,6 +70,9 @@ class TenantController extends OpenController
                 throw new ApiException('机构信息读取失败,请检查');
             }
             $this->organInfo = $organization->toArray();
+            if ((int) $this->organInfo['status'] !== 1) {
+                throw new ApiException('当前租户已停用', 41003);
+            }
         }
 
         // 检查站点信息
@@ -71,12 +81,9 @@ class TenantController extends OpenController
 
     protected function checkSite($isLogin)
     {
-        $organization = request()->header('App-Id');
-        if (empty($organization)) {
-            throw new ApiException('站点信息读取失败,请重新登录');
-        }
-        if ($isLogin && $organization != $this->tenantInfo['organization']) {
-            throw new ApiException('站点信息校验失败,请重新登录');
+        $organization = TenantContext::requestOrganization();
+        if ($isLogin && $organization !== $this->organization) {
+            throw new ApiException('App-Id 与登录租户不一致', TenantContext::MISMATCH);
         }
     }
 }

@@ -35,13 +35,13 @@ class CheckTenantAuth implements MiddlewareInterface
         }
 
         // 登录信息
-        $token = getTenantInfo();
-        if ($token === false) {
+        $token = $request->header('check_saimulti_tenant');
+        if (!is_array($token)) {
             throw new SystemException('权限不足，无法访问或操作');
         }
 
         // 系统默认超级管理员，无需权限验证
-        if ($token['user_type'] == 100) {
+        if ((int) $token['user_type'] === 100) {
             return $handler($request);
         }
 
