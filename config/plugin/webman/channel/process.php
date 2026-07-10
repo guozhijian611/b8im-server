@@ -18,7 +18,8 @@ use Workerman\Protocols\Frame;
 
 return [
     'server' => [
-        'listen'  => 'frame://0.0.0.0:2206',
+        // 允许多个本地工作区并行联调，默认值保持 webman/channel 约定。
+        'listen'  => env('CHANNEL_SERVER_LISTEN', 'frame://0.0.0.0:2206'),
         'protocol' => Frame::class,
         'handler' => Server::class,
         'reloadable' => false,
