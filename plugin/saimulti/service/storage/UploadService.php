@@ -25,7 +25,12 @@ class UploadService
      * @param bool $_is_file_upload
      * @return mixed
      */
-    public static function disk(int $type = 1, string $upload = 'image', bool $_is_file_upload = true)
+    public static function disk(
+        int $type = 1,
+        string $upload = 'image',
+        bool $_is_file_upload = true,
+        ?string $tenantDirname = null,
+    )
     {
         $logic = new SystemConfigLogic();
         $uploadConfig = $logic->getGroup('upload_config');
@@ -117,6 +122,15 @@ class UploadService
             default:
                 throw new ApiException('该上传模式不存在');
         }
+        if ($tenantDirname !== null) {
+            $tenantDirname = trim($tenantDirname, '/');
+            if ($tenantDirname === '' || preg_match('#^[a-zA-Z0-9/_-]+$#', $tenantDirname) !== 1) {
+                throw new ApiException('存储目录无效');
+            }
+            $base = is_string($config['dirname'] ?? null) ? trim((string) $config['dirname'], '/') : '';
+            $config['dirname'] = $base === '' ? $tenantDirname : $base . '/' . $tenantDirname;
+        }
+
         return new $config['adapter'](array_merge(
             $config,
             ['_is_file_upload' => $_is_file_upload]

@@ -7,9 +7,16 @@ if (is_file(__DIR__ . '/.env')) {
 }
 
 $env = static function (string $key, mixed $default = null): mixed {
-    $value = $_ENV[$key] ?? $_SERVER[$key] ?? getenv($key);
+    $override = getenv('PHINX_' . $key);
+    if ($override !== false && $override !== '') {
+        return $override;
+    }
+    $value = getenv($key);
+    if ($value === false || $value === null) {
+        $value = $_ENV[$key] ?? $_SERVER[$key] ?? null;
+    }
 
-    return $value === false || $value === '' ? $default : $value;
+    return $value === null || $value === '' ? $default : $value;
 };
 
 return [

@@ -38,7 +38,7 @@ class SystemMenuController extends TenantController
             ['is_hidden', ''],
             ['status', ''],
         ]);
-        $data = $this->logic->tree($where, $this->organInfo['group_id']);
+        $data = $this->logic->tree($where);
         return $this->success($data);
     }
 

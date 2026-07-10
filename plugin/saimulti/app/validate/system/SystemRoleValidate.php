@@ -19,6 +19,7 @@ class SystemRoleValidate extends Validate
     protected $rule =   [
         'name' => 'require|max:16',
         'code' => 'require|alpha',
+        'level' => 'require|integer',
         'status' => 'require',
     ];
 
@@ -30,6 +31,8 @@ class SystemRoleValidate extends Validate
         'name.max'     => '角色名称最多不能超过16个字符',
         'code.require' => '角色标识必须填写',
         'code.alpha' => '角色标识只能由英文字母组成',
+        'level.require' => '角色职级必须填写',
+        'level.integer' => '角色职级必须为整数',
         'status' => '状态必须填写',
     ];
 
@@ -40,11 +43,13 @@ class SystemRoleValidate extends Validate
         'save' => [
             'name',
             'code',
+            'level',
             'status',
         ],
         'update' => [
             'name',
             'code',
+            'level',
             'status',
         ],
     ];

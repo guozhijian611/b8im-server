@@ -48,7 +48,7 @@ class SystemAttachmentLogic extends BaseLogic
      * @param bool $local
      * @return array
      */
-    public function uploadBase($upload = 'image', $local = false): array
+    public function uploadBase($upload = 'image', $local = false, ?string $dirname = null): array
     {
         $logic = new SystemConfigLogic();
         $uploadConfig = $logic->getGroup('upload_config');
@@ -56,7 +56,7 @@ class SystemAttachmentLogic extends BaseLogic
         if ($local === true) {
             $type = 1;
         }
-        $result = UploadService::disk($type, $upload)->uploadFile();
+        $result = UploadService::disk($type, $upload, true, $dirname)->uploadFile();
         $data = $result[0];
         $url = str_replace('\\', '/', $data['url']);
         $savePath = str_replace('\\', '/', $data['save_path']);

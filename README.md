@@ -82,4 +82,10 @@ php webman phinx:seed-create ExampleSeeder
 php webman phinx:seed-run
 ```
 
+对隔离库执行 Webman 迁移命令时，使用专用 `PHINX_DB_*` 覆盖，避免应用启动时加载的 `.env` 改回默认开发库：
+
+```bash
+PHINX_DB_NAME=nb8im_module_test PHINX_DB_USER=root PHINX_DB_PASSWORD=root php webman phinx:migrate
+```
+
 `phinx.php` 不是可执行入口，不要使用 `php phinx.php`。

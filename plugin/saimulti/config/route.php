@@ -5,7 +5,9 @@ use plugin\saimulti\app\middleware\CheckAdminAuth;
 use plugin\saimulti\app\middleware\CheckAdminLogin;
 use plugin\saimulti\app\middleware\CheckTenantAuth;
 use plugin\saimulti\app\middleware\CheckTenantLogin;
+use plugin\saimulti\app\middleware\CheckWebLogin;
 use plugin\saimulti\app\middleware\TenantLog;
+use plugin\saimulti\app\middleware\WebCors;
 use Webman\Route;
 
 // 验证码
@@ -16,6 +18,95 @@ Route::post('/saimulti/admin/login', [plugin\saimulti\app\controller\LoginContro
 Route::post('/saimulti/tenant/login', [plugin\saimulti\app\controller\LoginController::class, 'tenantLogin']);
 // 应用信息
 Route::get("/saimulti/appInfo", [plugin\saimulti\app\controller\LoginController::class, 'appInfo']);
+Route::options("/saimulti/appInfo", [plugin\saimulti\app\controller\LoginController::class, 'appInfoOptions']);
+
+// Web 普通用户公开登录。App-Id 和 Origin 由 WebCors/OrganizationResolver 校验。
+Route::group('/saimulti', function () {
+	Route::post('/web/im/login', [\plugin\saimulti\app\controller\web\ImController::class, 'login']);
+	Route::options('/web/im/login', static fn () => response('', 204));
+})->middleware([
+	WebCors::class,
+]);
+
+// Web 普通用户认证接口。organization 只从 Web access token 取得。
+Route::group('/saimulti', function () {
+	Route::post('/web/im/imToken', [\plugin\saimulti\app\controller\web\ImController::class, 'imToken']);
+	Route::get('/web/im/me', [\plugin\saimulti\app\controller\web\ImController::class, 'me']);
+	Route::post('/web/im/updateAvatar', [\plugin\saimulti\app\controller\web\ImController::class, 'updateAvatar']);
+	Route::get('/web/im/conversations', [\plugin\saimulti\app\controller\web\ImController::class, 'conversations']);
+	Route::get('/web/im/messageGroups', [\plugin\saimulti\app\controller\web\ImController::class, 'messageGroups']);
+	Route::post('/web/im/createMessageGroup', [\plugin\saimulti\app\controller\web\ImController::class, 'createMessageGroup']);
+	Route::post('/web/im/updateConversationGroup', [\plugin\saimulti\app\controller\web\ImController::class, 'updateConversationGroup']);
+	Route::get('/web/im/messageConfig', [\plugin\saimulti\app\controller\web\ImController::class, 'messageConfig']);
+	Route::get('/web/im/messages', [\plugin\saimulti\app\controller\web\ImController::class, 'messages']);
+	Route::post('/web/im/markRead', [\plugin\saimulti\app\controller\web\ImController::class, 'markRead']);
+	Route::get('/web/im/contacts', [\plugin\saimulti\app\controller\web\ImController::class, 'contacts']);
+	Route::get('/web/im/searchUsers', [\plugin\saimulti\app\controller\web\ImController::class, 'searchUsers']);
+	Route::get('/web/im/requests', [\plugin\saimulti\app\controller\web\ImController::class, 'requests']);
+	Route::post('/web/im/sendFriendRequest', [\plugin\saimulti\app\controller\web\ImController::class, 'sendFriendRequest']);
+	Route::post('/web/im/handleFriendRequest', [\plugin\saimulti\app\controller\web\ImController::class, 'handleFriendRequest']);
+	Route::post('/web/im/createGroup', [\plugin\saimulti\app\controller\web\ImController::class, 'createGroup']);
+	Route::get('/web/im/groupMembers', [\plugin\saimulti\app\controller\web\ImController::class, 'groupMembers']);
+	Route::post('/web/im/addGroupMembers', [\plugin\saimulti\app\controller\web\ImController::class, 'addGroupMembers']);
+	Route::post('/web/im/updateConversationSetting', [\plugin\saimulti\app\controller\web\ImController::class, 'updateConversationSetting']);
+	Route::post('/web/im/updateGroupProfile', [\plugin\saimulti\app\controller\web\ImController::class, 'updateGroupProfile']);
+	Route::post('/web/im/updateGroupManagers', [\plugin\saimulti\app\controller\web\ImController::class, 'updateGroupManagers']);
+	Route::post('/web/im/updateGroupMemberStatus', [\plugin\saimulti\app\controller\web\ImController::class, 'updateGroupMemberStatus']);
+	Route::post('/web/im/removeGroupMember', [\plugin\saimulti\app\controller\web\ImController::class, 'removeGroupMember']);
+	Route::post('/web/im/updateFriendRemark', [\plugin\saimulti\app\controller\web\ImController::class, 'updateFriendRemark']);
+	Route::get('/web/im/searchMessages', [\plugin\saimulti\app\controller\web\ImController::class, 'searchMessages']);
+	Route::post('/web/im/prepareUpload', [\plugin\saimulti\app\controller\web\ImController::class, 'prepareUpload']);
+	Route::post('/web/im/upload', [\plugin\saimulti\app\controller\web\ImController::class, 'upload']);
+	Route::post('/web/im/confirmUpload', [\plugin\saimulti\app\controller\web\ImController::class, 'confirmUpload']);
+	Route::post('/web/im/deriveForwardAsset', [\plugin\saimulti\app\controller\web\ImController::class, 'deriveForwardAsset']);
+	Route::post('/web/im/resolveAssetUrl', [\plugin\saimulti\app\controller\web\ImController::class, 'resolveAssetUrl']);
+	Route::get('/client/config', [\plugin\saimulti\app\controller\web\ClientConfigController::class, 'index']);
+	Route::get('/web/announcement/index', [\plugin\saimulti\app\controller\web\AnnouncementController::class, 'index']);
+	Route::get('/web/announcement/read', [\plugin\saimulti\app\controller\web\AnnouncementController::class, 'read']);
+	Route::post('/web/announcement/acknowledge', [\plugin\saimulti\app\controller\web\AnnouncementController::class, 'acknowledge']);
+
+	foreach ([
+		'/web/im/imToken',
+		'/web/im/me',
+		'/web/im/updateAvatar',
+		'/web/im/conversations',
+		'/web/im/messageGroups',
+		'/web/im/createMessageGroup',
+		'/web/im/updateConversationGroup',
+		'/web/im/messageConfig',
+		'/web/im/messages',
+		'/web/im/markRead',
+		'/web/im/contacts',
+		'/web/im/searchUsers',
+		'/web/im/requests',
+		'/web/im/sendFriendRequest',
+		'/web/im/handleFriendRequest',
+		'/web/im/createGroup',
+		'/web/im/groupMembers',
+		'/web/im/addGroupMembers',
+		'/web/im/updateConversationSetting',
+		'/web/im/updateGroupProfile',
+		'/web/im/updateGroupManagers',
+		'/web/im/updateGroupMemberStatus',
+		'/web/im/removeGroupMember',
+		'/web/im/updateFriendRemark',
+		'/web/im/searchMessages',
+		'/web/im/prepareUpload',
+		'/web/im/upload',
+		'/web/im/confirmUpload',
+		'/web/im/deriveForwardAsset',
+		'/web/im/resolveAssetUrl',
+		'/client/config',
+		'/web/announcement/index',
+		'/web/announcement/read',
+		'/web/announcement/acknowledge',
+	] as $path) {
+		Route::options($path, static fn () => response('', 204));
+	}
+})->middleware([
+	WebCors::class,
+	CheckWebLogin::class,
+]);
 
 Route::group("/saimulti", function () {
 	// 管理中台信息
@@ -84,6 +175,32 @@ Route::group("/saimulti", function () {
 	// 菜单管理
 	saiMultiRoute('/admin/menu', \plugin\saimulti\app\controller\admin\SystemMenuController::class);
 
+	// 统一模块生命周期与租户授权
+	Route::get('/admin/module/catalog', [\plugin\saimulti\app\controller\admin\ModuleController::class, 'catalog']);
+	Route::get('/admin/module/read', [\plugin\saimulti\app\controller\admin\ModuleController::class, 'read']);
+	Route::post('/admin/module/discover', [\plugin\saimulti\app\controller\admin\ModuleController::class, 'discover']);
+	Route::post('/admin/module/install', [\plugin\saimulti\app\controller\admin\ModuleController::class, 'install']);
+	Route::post('/admin/module/upgrade', [\plugin\saimulti\app\controller\admin\ModuleController::class, 'upgrade']);
+	Route::post('/admin/module/enable', [\plugin\saimulti\app\controller\admin\ModuleController::class, 'enable']);
+	Route::post('/admin/module/disable', [\plugin\saimulti\app\controller\admin\ModuleController::class, 'disable']);
+	Route::post('/admin/module/uninstall', [\plugin\saimulti\app\controller\admin\ModuleController::class, 'uninstall']);
+	Route::post('/admin/module/license/grant', [\plugin\saimulti\app\controller\admin\ModuleController::class, 'grant']);
+	Route::post('/admin/module/license/revoke', [\plugin\saimulti\app\controller\admin\ModuleController::class, 'revoke']);
+
+	// 内置公告模块（权限、系统启用状态由现有鉴权中间件统一校验）
+	saiMultiRoute('/admin/announcement', \plugin\saimulti\app\controller\admin\AnnouncementController::class);
+
+	// IM 运行管理与安全审计
+	Route::get('/admin/im/operations/overview', [\plugin\saimulti\app\controller\admin\AdminImOperationsController::class, 'overview']);
+	Route::get('/admin/im/operations/users', [\plugin\saimulti\app\controller\admin\AdminImOperationsController::class, 'users']);
+	Route::get('/admin/im/operations/devices', [\plugin\saimulti\app\controller\admin\AdminImOperationsController::class, 'devices']);
+	Route::get('/admin/im/operations/sessions', [\plugin\saimulti\app\controller\admin\AdminImOperationsController::class, 'sessions']);
+	Route::get('/admin/im/operations/loginAudits', [\plugin\saimulti\app\controller\admin\AdminImOperationsController::class, 'loginAudits']);
+	Route::post('/admin/im/operations/deviceStatus', [\plugin\saimulti\app\controller\admin\AdminImOperationsController::class, 'deviceStatus']);
+	Route::post('/admin/im/operations/revokeSession', [\plugin\saimulti\app\controller\admin\AdminImOperationsController::class, 'revokeSession']);
+	Route::get('/admin/im/policy/read', [\plugin\saimulti\app\controller\admin\AdminImPolicyController::class, 'read']);
+	Route::put('/admin/im/policy/update', [\plugin\saimulti\app\controller\admin\AdminImPolicyController::class, 'update']);
+
 	//--------------------------- 系统维护 ------------------------- //
 	// 数据表维护
 	Route::get("/tool/database/index", [\plugin\saimulti\app\controller\tool\DataBaseController::class, 'index']);
@@ -151,6 +268,20 @@ Route::group("/saimulti", function () {
 	Route::get("/tenant/areaCode", [plugin\saimulti\app\controller\TenantCommonController::class, 'areaCode']);
 	Route::post("/tenant/uploadImage", [plugin\saimulti\app\controller\TenantCommonController::class, 'uploadImage']);
 	Route::post("/tenant/uploadFile", [plugin\saimulti\app\controller\TenantCommonController::class, 'uploadFile']);
+
+	// 租户模块启停与配置（租户不能自授权）
+	Route::get('/tenant/module/index', [\plugin\saimulti\app\controller\tenant\ModuleController::class, 'index']);
+	Route::post('/tenant/module/enable', [\plugin\saimulti\app\controller\tenant\ModuleController::class, 'enable']);
+	Route::post('/tenant/module/disable', [\plugin\saimulti\app\controller\tenant\ModuleController::class, 'disable']);
+	Route::get('/tenant/module/config', [\plugin\saimulti\app\controller\tenant\ModuleController::class, 'config']);
+	Route::put('/tenant/module/config', [\plugin\saimulti\app\controller\tenant\ModuleController::class, 'updateConfig']);
+
+	// 租户公告模块（organization 只取认证上下文）
+	saiMultiRoute('/tenant/announcement', \plugin\saimulti\app\controller\tenant\AnnouncementController::class);
+
+	// 租户 IM 运行策略（organization 只取认证上下文）
+	Route::get('/tenant/im/policy/read', [\plugin\saimulti\app\controller\tenant\TenantImPolicyController::class, 'read']);
+	Route::put('/tenant/im/policy/update', [\plugin\saimulti\app\controller\tenant\TenantImPolicyController::class, 'update']);
 
 	// 菜单列表
 	Route::get("/tenant/menu/index", [plugin\saimulti\app\controller\tenant\SystemMenuController::class, 'index']);

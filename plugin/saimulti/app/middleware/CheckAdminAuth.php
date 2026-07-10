@@ -12,6 +12,8 @@ use Webman\Http\Request;
 use Webman\Http\Response;
 use Webman\MiddlewareInterface;
 use plugin\saimulti\service\Permission;
+use plugin\saimulti\service\ModuleRequired;
+use plugin\saimulti\service\module\ModuleServiceFactory;
 use plugin\saimulti\app\cache\AdminAuthCache;
 use plugin\saimulti\exception\SystemException;
 
@@ -28,9 +30,11 @@ class CheckAdminAuth implements MiddlewareInterface
         // 通过反射获取控制器哪些方法不需要登录
         $controllerClass = new ReflectionClass($controller);
         $noNeedLogin = $controllerClass->getDefaultProperties()['noNeedLogin'] ?? [];
+        $moduleRequired = $this->getModuleRequired($controller, $action, $controllerClass);
 
         // 不登录访问，无需权限验证
         if (in_array($action, $noNeedLogin)) {
+            $this->assertModuleRequired($moduleRequired);
             return $handler($request);
         }
 
@@ -39,6 +43,9 @@ class CheckAdminAuth implements MiddlewareInterface
         if ($token === false) {
             throw new SystemException('权限不足，无法访问或操作');
         }
+
+        // 模块边界与 Permission 权限是并列条件，超级管理员也不绕过模块状态。
+        $this->assertModuleRequired($moduleRequired);
 
         // 系统默认超级管理员，无需权限验证
         if ($token['id'] === 1) {
@@ -87,6 +94,32 @@ class CheckAdminAuth implements MiddlewareInterface
     {
         // 直接对比 slug
         return in_array($attr['slug'], $userPermissions);
+    }
+
+    private function getModuleRequired($controller, $action, ReflectionClass $controllerClass): ?ModuleRequired
+    {
+        if (method_exists($controller, $action)) {
+            $attributes = (new ReflectionMethod($controller, $action))->getAttributes(ModuleRequired::class);
+            if ($attributes !== []) {
+                return $attributes[0]->newInstance();
+            }
+        }
+
+        $attributes = $controllerClass->getAttributes(ModuleRequired::class);
+
+        return $attributes === [] ? null : $attributes[0]->newInstance();
+    }
+
+    private function assertModuleRequired(?ModuleRequired $required): void
+    {
+        if ($required === null) {
+            return;
+        }
+        ModuleServiceFactory::access()->assertSystemAvailable(
+            $required->moduleKey(),
+            $required->platform(),
+            $required->capability(),
+        );
     }
 
 }

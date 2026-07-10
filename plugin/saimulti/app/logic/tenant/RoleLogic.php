@@ -6,11 +6,16 @@
 // +----------------------------------------------------------------------
 namespace plugin\saimulti\app\logic\tenant;
 
+use plugin\saimulti\app\cache\TenantAuthCache;
+use plugin\saimulti\app\cache\TenantUserCache;
 use plugin\saimulti\app\model\tenant\Role;
+use plugin\saimulti\app\model\tenant\Menu;
 use plugin\saimulti\basic\BaseLogic;
 use plugin\saimulti\exception\ApiException;
+use plugin\saimulti\service\TenantContext;
+use plugin\saimulti\service\TenantRoleHierarchyService;
+use plugin\saimulti\service\module\TenantRoleMenuPermissionService;
 use support\think\Db;
-use support\think\Cache;
 
 /**
  * 角色逻辑层
@@ -31,8 +36,14 @@ class RoleLogic extends BaseLogic
      */
     public function add($data): bool
     {
-        $data = $this->handleData($data);
-        return $this->model->save($data);
+        [$organization, $actorUserId] = $this->actorContext();
+
+        return Db::transaction(function () use ($organization, $actorUserId, $data): bool {
+            $actorMaxLevel = $this->roleHierarchy()->lockActorMaxLevel($organization, $actorUserId);
+            $data = $this->normalizeRoleData($data, $actorMaxLevel);
+
+            return $this->model->save($data);
+        });
     }
 
     /**
@@ -40,12 +51,27 @@ class RoleLogic extends BaseLogic
      */
     public function edit($id, $data): bool
     {
-        $model = $this->model->findOrEmpty($id);
-        if ($model->isEmpty()) {
-            throw new ApiException('数据不存在');
+        $roleId = $this->roleId($id);
+        [$organization, $actorUserId] = $this->actorContext();
+        $result = Db::transaction(function () use ($organization, $actorUserId, $roleId, $data): bool {
+            $actorMaxLevel = $this->roleHierarchy()->lockActorMaxLevel($organization, $actorUserId);
+            $this->roleHierarchy()->lockManageableRole($organization, $roleId, $actorMaxLevel);
+            $data = $this->normalizeRoleData($data, $actorMaxLevel);
+            $model = Role::where('id', $roleId)
+                ->where('organization', $organization)
+                ->lock(true)
+                ->findOrEmpty();
+            if ($model->isEmpty()) {
+                throw new ApiException('数据不存在', 404);
+            }
+
+            return $model->save($data);
+        });
+        if ($result) {
+            $this->clearRoleCaches([$roleId]);
         }
-        $data = $this->handleData($data);
-        return $model->save($data);
+
+        return $result;
     }
 
     /**
@@ -53,30 +79,21 @@ class RoleLogic extends BaseLogic
      */
     public function destroy($ids): bool
     {
-        // 越权保护
-        $levelArr = array_column($this->tenantInfo['roleList'], 'level');
-        $maxLevel = max($levelArr);
+        $roleIds = $this->roleIds($ids);
+        [$organization, $actorUserId] = $this->actorContext();
+        $result = Db::transaction(function () use ($organization, $actorUserId, $roleIds): bool {
+            $actorMaxLevel = $this->roleHierarchy()->lockActorMaxLevel($organization, $actorUserId);
+            foreach ($roleIds as $roleId) {
+                $this->roleHierarchy()->lockManageableRole($organization, $roleId, $actorMaxLevel);
+            }
 
-        $num = Role::where('level', '>=', $maxLevel)->whereIn('id', $ids)->count();
-        if ($num > 0) {
-            throw new ApiException('不能操作比当前账户职级高的角色');
-        } else {
-            return $this->model->destroy($ids);
+            return Role::destroy($roleIds);
+        });
+        if ($result) {
+            $this->clearRoleCaches($roleIds);
         }
-    }
 
-    /**
-     * 数据处理
-     */
-    protected function handleData($data)
-    {
-        // 越权保护
-        $levelArr = array_column($this->tenantInfo['roleList'], 'level');
-        $maxLevel = max($levelArr);
-        if ($data['level'] >= $maxLevel) {
-            throw new ApiException('不能操作比当前账户职级高的角色');
-        }
-        return $data;
+        return $result;
     }
 
     /**
@@ -119,10 +136,18 @@ class RoleLogic extends BaseLogic
      */
     public function getMenuByRole($id): array
     {
-        $role = $this->model->findOrEmpty($id);
-        $menus = $role->menus ?: [];
+        [$organization, $actorUserId] = $this->actorContext();
+        $menuIds = (new TenantRoleMenuPermissionService())->assignedIds(
+            $organization,
+            $actorUserId,
+            (int) $id,
+        );
+        $menus = $menuIds === []
+            ? []
+            : Menu::whereIn('id', $menuIds)->order('sort', 'desc')->select()->toArray();
+
         return [
-            'id' => $id,
+            'id' => (int) $id,
             'menus' => $menus
         ];
     }
@@ -135,20 +160,80 @@ class RoleLogic extends BaseLogic
      */
     public function saveMenuPermission($id, $menu_ids): mixed
     {
-        return $this->transaction(function () use ($id, $menu_ids) {
-            $role = $this->model->findOrEmpty($id);
-            if ($role) {
-                $role->menus()->detach();
-                $data = array_map(function ($menu_id) use ($id) {
-                    return ['menu_id' => $menu_id, 'role_id' => $id];
-                }, $menu_ids);
-                Db::table('sm_tenant_role_menu')->limit(100)->insertAll($data);
-            }
-            $cache = config('plugin.saimulti.saithink.tenant_button_cache');
-            $tag = $cache['role'] . $id;
-            Cache::tag($tag)->clear();       // 清理权限缓存-角色TAG
-            return true;
-        });
+        [$organization, $actorUserId] = $this->actorContext();
+
+        return (new TenantRoleMenuPermissionService())->save(
+            $organization,
+            $actorUserId,
+            (int) $id,
+            $menu_ids,
+        );
     }
 
+    /** @return array{0: int, 1: int} */
+    private function actorContext(): array
+    {
+        $identity = getTenantInfo();
+        if (!is_array($identity)
+            || ($identity['plat'] ?? null) !== 'tenant'
+            || ($identity['aud'] ?? null) !== 'tenant-api') {
+            throw new ApiException('租户登录凭证无效。', 401);
+        }
+        $actorUserId = $this->roleId($identity['id'] ?? null, '租户登录凭证缺少用户标识。');
+        $organization = TenantContext::organization();
+        if (TenantContext::parseOrganization($identity['organization'] ?? null) !== $organization) {
+            throw new ApiException('登录凭证与租户上下文不一致。', TenantContext::MISMATCH);
+        }
+
+        return [$organization, $actorUserId];
+    }
+
+    private function normalizeRoleData(mixed $data, int $actorMaxLevel): array
+    {
+        if (!is_array($data)) {
+            throw new ApiException('角色数据格式无效。', 422);
+        }
+        if (hash_equals('superAdmin', trim((string) ($data['code'] ?? '')))) {
+            throw new ApiException('superAdmin 是系统保留角色标识。', 403);
+        }
+        $data['level'] = $this->roleHierarchy()->normalizeNewLevel($data['level'] ?? null, $actorMaxLevel);
+        unset($data['id'], $data['organization'], $data['delete_time']);
+
+        return $data;
+    }
+
+    private function roleId(mixed $id, string $message = '租户角色编号无效。'): int
+    {
+        if (is_int($id) && $id > 0) {
+            return $id;
+        }
+        if (is_string($id) && preg_match('/^[1-9][0-9]*$/', $id) === 1) {
+            return (int) $id;
+        }
+
+        throw new ApiException($message, 422);
+    }
+
+    /** @return list<int> */
+    private function roleIds(mixed $ids): array
+    {
+        $ids = is_array($ids) ? $ids : [$ids];
+        if (!array_is_list($ids) || $ids === []) {
+            throw new ApiException('租户角色编号必须为非空数组。', 422);
+        }
+
+        return array_values(array_unique(array_map(fn (mixed $id): int => $this->roleId($id), $ids)));
+    }
+
+    /** @param list<int> $roleIds */
+    private function clearRoleCaches(array $roleIds): void
+    {
+        TenantUserCache::clearUserInfoByRoleId($roleIds);
+        TenantAuthCache::clearUserAuthByRoleId($roleIds);
+    }
+
+    private function roleHierarchy(): TenantRoleHierarchyService
+    {
+        return new TenantRoleHierarchyService();
+    }
 }

@@ -7,12 +7,76 @@ use plugin\saimulti\app\model\tenant\User;
 use plugin\saimulti\app\model\tenant\UserRole;
 use plugin\saimulti\basic\BaseLogic;
 use plugin\saimulti\exception\ApiException;
+use plugin\saimulti\service\OrganizationDiscovery;
+use plugin\saimulti\service\adminIm\OrganizationImAccessService;
+use plugin\saimulti\service\tenantPolicy\TenantImPolicyService;
+use plugin\saimulti\service\tenantPolicy\ThinkOrmTenantImPolicyStore;
+use support\think\Db;
 
 /**
  * 单位信息逻辑层
  */
 class SystemOrganizationLogic extends BaseLogic
 {
+    private const WRITABLE_FIELDS = [
+        'group_id',
+        'domain',
+        'enterprise_code',
+        'deployment_id',
+        'title',
+        'logo',
+        'favicon',
+        'icp',
+        'public_security_record_no',
+        'public_security_record_url',
+        'copyright',
+        'android_download_url',
+        'ios_download_url',
+        'api_server_url',
+        'im_server_url',
+        'upload_server_url',
+        'web_server_url',
+        'user_agreement_title',
+        'user_agreement_content',
+        'privacy_policy_title',
+        'privacy_policy_content',
+        'organization_name',
+        'province',
+        'city',
+        'area',
+        'address',
+        'contact_name',
+        'contact_phone',
+        'contact_email',
+        'status',
+        'remark',
+    ];
+
+    private const TENANT_PROFILE_FIELDS = [
+        'title',
+        'logo',
+        'favicon',
+        'icp',
+        'public_security_record_no',
+        'public_security_record_url',
+        'copyright',
+        'android_download_url',
+        'ios_download_url',
+        'user_agreement_title',
+        'user_agreement_content',
+        'privacy_policy_title',
+        'privacy_policy_content',
+        'organization_name',
+        'province',
+        'city',
+        'area',
+        'address',
+        'contact_name',
+        'contact_phone',
+        'contact_email',
+        'remark',
+    ];
+
     public function __construct()
     {
         $this->model = new SystemOrganization();
@@ -69,45 +133,251 @@ class SystemOrganizationLogic extends BaseLogic
         if ($info->status !== 1) {
             throw new ApiException('当前应用已关闭,暂时无法访问！');
         }
-        return $info->toArray();
+        return array_intersect_key(
+            $info->toArray(),
+            array_flip(array_merge(['id', 'config_version'], self::TENANT_PROFILE_FIELDS)),
+        );
     }
 
     public function add($data): bool
     {
-        // $region = $data['region'];
-        // if (is_array($region)) {
-        //     $data['province'] = $region['province'];
-        //     $data['city'] = $region['city'];
-        //     $data['area'] = $region['area'];
-        // }
-        return $this->model->save($data);
+        $data = $this->normalizeWriteData((array) $data);
+        $data['config_version'] = 1;
+
+        return Db::transaction(function () use ($data): bool {
+            $saved = $this->model->save($data);
+            if (!$saved) {
+                return false;
+            }
+
+            (new ThinkOrmTenantImPolicyStore())->createDefault(
+                (int) $this->model->id,
+                TenantImPolicyService::defaults(),
+            );
+
+            return true;
+        });
     }
 
     public function edit($id, $data): mixed
     {
-        // $region = $data['region'];
-        // if (is_array($region)) {
-        //     $data['province'] = $region['province'];
-        //     $data['city'] = $region['city'];
-        //     $data['area'] = $region['area'];
-        // }
-        return $this->model->update($data, ['id' => $id]);
+        $input = (array) $data;
+        $statusWasRequested = array_key_exists('status', $input);
+        $access = new OrganizationImAccessService();
+        $now = date('Y-m-d H:i:s');
+
+        $result = Db::transaction(function () use (
+            $id,
+            $input,
+            $statusWasRequested,
+            $access,
+            $now,
+        ): array {
+            $locked = Db::table('sm_system_organization')
+                ->where('id', (int) $id)
+                ->whereNull('delete_time')
+                ->lock(true)
+                ->find();
+            if (!$locked) {
+                throw new ApiException('未找到该机构信息', OrganizationDiscovery::UNAVAILABLE);
+            }
+
+            $data = $this->normalizeWriteData($input, $locked);
+            $previousStatus = (int) ($locked['status'] ?? 0);
+            $nextStatus = (int) ($data['status'] ?? $previousStatus);
+            $statusChanged = $previousStatus !== $nextStatus;
+            $data['update_time'] = $now;
+
+            $updated = Db::table('sm_system_organization')
+                ->where('id', (int) $id)
+                ->whereNull('delete_time')
+                ->inc('config_version')
+                ->update($data);
+            if ($updated !== 1) {
+                throw new \RuntimeException('机构配置更新未持久化。');
+            }
+
+            $credentialSessionIds = [];
+            if (self::shouldRevokeImAccess($statusWasRequested, $nextStatus)) {
+                $credentialSessionIds = $access->revokeInsideTransaction((int) $id, $now);
+            }
+
+            return compact(
+                'updated',
+                'statusChanged',
+                'nextStatus',
+                'credentialSessionIds',
+            );
+        });
+
+        // An explicit status write is also the retry contract for a failed
+        // after-commit Redis synchronization. Re-sending status=1 must clear a
+        // stale inactive marker even though MySQL already contains status=1.
+        if ($result['statusChanged'] || $statusWasRequested) {
+            $this->publishOrganizationImAccess(
+                $access,
+                (int) $id,
+                $result['nextStatus'] === 1,
+                $result['credentialSessionIds'],
+                $now,
+                $result['nextStatus'] === 1 ? 'organization_enabled' : 'organization_disabled',
+            );
+        }
+
+        return $result['updated'];
     }
 
-    public function appInfo($id, $mode): array
+    private static function shouldRevokeImAccess(bool $statusWasRequested, int $nextStatus): bool
     {
-        if ($mode === 'domain') {
-            $info = $this->model->field('id, title, logo, status, domain, group_id')->where('domain', $id)->findOrEmpty();
-        } else {
-            $info = $this->model->field('id, title, logo, status, domain, group_id')->findOrEmpty($id);
+        return $statusWasRequested && $nextStatus !== 1;
+    }
+
+    public function destroy($ids): bool
+    {
+        $ids = self::normalizedOrganizationIds($ids);
+        if ($ids === []) {
+            throw new ApiException('机构编号无效。', 422);
         }
-        if ($info->isEmpty()) {
-            throw new ApiException('未找到该应用');
+        $organizations = $this->model->whereIn('id', $ids)->select()->toArray();
+        if (count($organizations) !== count($ids)) {
+            throw new ApiException('部分机构不存在。', 404);
         }
-        if ($info->status !== 1) {
-            throw new ApiException('当前应用已关闭,暂时无法访问！');
+
+        $access = new OrganizationImAccessService();
+        $now = date('Y-m-d H:i:s');
+        $sessions = [];
+        $deleted = Db::transaction(function () use ($ids, $access, $now, &$sessions): bool {
+            $placeholders = implode(',', array_fill(0, count($ids), '?'));
+            $lockedRows = Db::query(
+                'SELECT id FROM sm_system_organization '
+                . 'WHERE id IN (' . $placeholders . ') AND delete_time IS NULL '
+                . 'ORDER BY id ASC FOR UPDATE',
+                $ids,
+            );
+            $lockedIds = array_map(static fn (array $row): int => (int) $row['id'], $lockedRows);
+            if ($lockedIds !== $ids) {
+                throw new ApiException('部分机构不存在。', 404);
+            }
+
+            // Keep the global lock order organization -> auth/access/device.
+            // Soft-delete first inside the same transaction so any waiting
+            // login observes delete_time and cannot insert a fresh bearer.
+            $deleted = $this->model->destroy($ids);
+            if (!$deleted) {
+                throw new \RuntimeException('机构删除未持久化。');
+            }
+            foreach ($ids as $organization) {
+                $sessions[$organization] = $access->revokeInsideTransaction($organization, $now);
+            }
+
+            return true;
+        });
+
+        if ($deleted) {
+            foreach ($ids as $organization) {
+                $this->publishOrganizationImAccess(
+                    $access,
+                    $organization,
+                    false,
+                    $sessions[$organization] ?? [],
+                    $now,
+                    'organization_deleted',
+                );
+            }
         }
-        $data = $info->toArray();
+
+        return $deleted;
+    }
+
+    /** @return list<int> */
+    private static function normalizedOrganizationIds(mixed $ids): array
+    {
+        $ids = array_values(array_unique(array_filter(
+            array_map('intval', (array) $ids),
+            static fn (int $id): bool => $id > 0,
+        )));
+        sort($ids, SORT_NUMERIC);
+
+        return $ids;
+    }
+
+    /**
+     * Tenant-owned branding and public content. Entry identifiers, deployment
+     * trust roots, organization status and server_info remain platform-owned.
+     *
+     * @param array<string, mixed> $data
+     */
+    public function editTenantProfile(int $organization, array $data): mixed
+    {
+        $data = self::tenantProfileData($data);
+
+        return $this->edit($organization, $data);
+    }
+
+    /**
+     * @param array<string, mixed> $data
+     * @return array<string, mixed>
+     */
+    public static function tenantProfileData(array $data): array
+    {
+        return array_intersect_key($data, array_flip(self::TENANT_PROFILE_FIELDS));
+    }
+
+    public function appInfo(string $identifier, string $mode): array
+    {
+        return (new OrganizationDiscovery())->resolve($identifier, $mode);
+    }
+
+    /**
+     * @param array<string, mixed> $data
+     * @param array<string, mixed>|null $existing
+     * @return array<string, mixed>
+     */
+    private function normalizeWriteData(array $data, ?array $existing = null): array
+    {
+        $data = array_intersect_key($data, array_flip(self::WRITABLE_FIELDS));
+        $requestedFields = array_keys($data);
+        $merged = array_merge($existing ?? [], $data);
+
+        $merged['enterprise_code'] = OrganizationDiscovery::normalizeEnterpriseCode(
+            (string) ($merged['enterprise_code'] ?? ''),
+        );
+        $merged['deployment_id'] = OrganizationDiscovery::assertDeploymentId(
+            (string) ($merged['deployment_id'] ?? ''),
+        );
+        $merged['domain'] = trim((string) ($merged['domain'] ?? ''));
+        $merged['domain'] = $merged['domain'] === ''
+            ? null
+            : OrganizationDiscovery::normalizeDomain($merged['domain']);
+
+        (new OrganizationDiscovery())->validatePublicConfiguration($merged);
+
+        foreach ($requestedFields as $field) {
+            if (array_key_exists($field, $merged)) {
+                $data[$field] = $merged[$field];
+            }
+        }
+
         return $data;
+    }
+
+    /** @param list<string> $credentialSessionIds */
+    private function publishOrganizationImAccess(
+        OrganizationImAccessService $access,
+        int $organization,
+        bool $active,
+        array $credentialSessionIds,
+        string $now,
+        string $reason,
+    ): void {
+        try {
+            $access->afterCommit($organization, $active, $credentialSessionIds, $now, $reason);
+        } catch (\Throwable $throwable) {
+            throw new ApiException(
+                '机构状态已保存，但 IM 访问状态同步失败，请重试当前操作。',
+                OrganizationImAccessService::SYNC_UNAVAILABLE,
+                $throwable,
+            );
+        }
     }
 }

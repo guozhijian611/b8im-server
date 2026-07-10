@@ -18,6 +18,27 @@ SET NAMES utf8mb4;
 SET FOREIGN_KEY_CHECKS = 0;
 
 -- ----------------------------
+-- Phinx baseline represented by this full schema snapshot
+-- ----------------------------
+DROP TABLE IF EXISTS `phinxlog`;
+CREATE TABLE `phinxlog` (
+  `version` bigint NOT NULL,
+  `migration_name` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL,
+  `start_time` timestamp NULL DEFAULT NULL,
+  `end_time` timestamp NULL DEFAULT NULL,
+  `breakpoint` tinyint(1) NOT NULL DEFAULT 0,
+  PRIMARY KEY (`version`)
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci;
+
+INSERT INTO `phinxlog` VALUES (
+  20260710020000,
+  'AddOrganizationDiscoveryContract',
+  '2026-07-10 00:00:00',
+  '2026-07-10 00:00:00',
+  0
+);
+
+-- ----------------------------
 -- Table structure for saimulti_column
 -- ----------------------------
 DROP TABLE IF EXISTS `saimulti_column`;
@@ -873,8 +894,26 @@ CREATE TABLE `sm_system_organization`  (
   `id` int(11) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '机构编号',
   `group_id` int(11) NULL DEFAULT NULL COMMENT '机构分组',
   `domain` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '域名',
+  `enterprise_code` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '公开企业码',
+  `deployment_id` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '目标部署信任域',
+  `config_version` bigint(20) UNSIGNED NOT NULL DEFAULT 1 COMMENT '公开配置版本',
   `title` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '标题',
   `logo` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '图标',
+  `favicon` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT '' COMMENT '站点图标',
+  `icp` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT '' COMMENT 'ICP 备案号',
+  `public_security_record_no` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT '' COMMENT '公安备案号',
+  `public_security_record_url` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT '' COMMENT '公安备案链接',
+  `copyright` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT '' COMMENT '版权信息',
+  `android_download_url` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT '' COMMENT 'Android 下载地址',
+  `ios_download_url` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT '' COMMENT 'iOS 下载地址',
+  `api_server_url` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT '' COMMENT 'API 服务地址',
+  `im_server_url` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT '' COMMENT 'IM 服务地址',
+  `upload_server_url` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT '' COMMENT '上传服务地址',
+  `web_server_url` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT '' COMMENT 'Web 服务地址',
+  `user_agreement_title` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT '用户协议' COMMENT '用户协议标题',
+  `user_agreement_content` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '用户协议内容',
+  `privacy_policy_title` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT '隐私政策' COMMENT '隐私政策标题',
+  `privacy_policy_content` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '隐私政策内容',
   `organization_name` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '机构名称',
   `province` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '省',
   `city` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '市',
@@ -889,13 +928,29 @@ CREATE TABLE `sm_system_organization`  (
   `create_time` datetime NULL DEFAULT NULL COMMENT '创建时间',
   `update_time` datetime NULL DEFAULT NULL COMMENT '修改时间',
   `delete_time` datetime NULL DEFAULT NULL COMMENT '删除时间',
-  PRIMARY KEY (`id`) USING BTREE
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE INDEX `uk_sm_org_enterprise_code`(`enterprise_code`) USING BTREE,
+  UNIQUE INDEX `uk_sm_org_domain`(`domain`) USING BTREE
 ) ENGINE = InnoDB AUTO_INCREMENT = 2 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '机构信息表' ROW_FORMAT = DYNAMIC;
 
 -- ----------------------------
 -- Records of sm_system_organization
 -- ----------------------------
-INSERT INTO `sm_system_organization` VALUES (1, 1, '', '京北商城', 'http://127.0.0.1:8888/storage/20260417/1a461f995803887b2441eff5bd55c24f30841eed.png', '京北商城', '130000000000', '130400000000', '130404000000', '河马大道158号', '张三', '15888888888', '15888888888@qq.com', 1, '', 1, '2026-04-17 16:01:24', '2026-04-25 23:59:37', NULL);
+INSERT INTO `sm_system_organization` (
+  `id`, `group_id`, `domain`, `enterprise_code`, `deployment_id`, `config_version`,
+  `title`, `logo`, `favicon`, `icp`, `public_security_record_no`, `public_security_record_url`, `copyright`,
+  `android_download_url`, `ios_download_url`, `api_server_url`, `im_server_url`, `upload_server_url`, `web_server_url`,
+  `user_agreement_title`, `user_agreement_content`, `privacy_policy_title`, `privacy_policy_content`,
+  `organization_name`, `province`, `city`, `area`, `address`, `contact_name`, `contact_phone`, `contact_email`,
+  `status`, `remark`, `is_init`, `create_time`, `update_time`, `delete_time`
+) VALUES (
+  1, 1, NULL, 'org_1', 'b8im-local', 1,
+  '京北商城', 'http://127.0.0.1:8888/storage/20260417/1a461f995803887b2441eff5bd55c24f30841eed.png', '', '', '', '', 'Copyright © B8IM',
+  '', '', 'http://127.0.0.1:8888', 'ws://127.0.0.1:7272', 'http://127.0.0.1:8888', 'http://127.0.0.1:5173',
+  '用户协议', '', '隐私政策', '',
+  '京北商城', '130000000000', '130400000000', '130404000000', '河马大道158号', '张三', '15888888888', '15888888888@qq.com',
+  1, '', 1, '2026-04-17 16:01:24', '2026-04-25 23:59:37', NULL
+);
 
 -- ----------------------------
 -- Table structure for sm_tenant_config

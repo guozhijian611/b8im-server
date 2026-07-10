@@ -7,6 +7,7 @@
 namespace plugin\saimulti\app\controller\admin;
 
 use plugin\saimulti\app\logic\system\SystemOrganizationLogic;
+use plugin\saimulti\app\validate\admin\SystemOrganizationValidate;
 use plugin\saimulti\basic\AdminController;
 use plugin\saimulti\service\Permission;
 use support\Request;
@@ -23,6 +24,7 @@ class SystemOrganizationController extends AdminController
     public function __construct()
     {
         $this->logic = new SystemOrganizationLogic();
+        $this->validate = new SystemOrganizationValidate();
         parent::__construct();
     }
 
@@ -73,7 +75,7 @@ class SystemOrganizationController extends AdminController
     {
         $data = $request->post();
         $this->validate('save', $data);
-        $region = $data['region'];
+        $region = $data['region'] ?? [];
         if (is_array($region)) {
             $data['province'] = $region[0] ?? '';
             $data['city'] = $region[1] ?? '';
@@ -97,7 +99,7 @@ class SystemOrganizationController extends AdminController
     {
         $data = $request->post();
         $this->validate('update', $data);
-        $region = $data['region'];
+        $region = $data['region'] ?? [];
         if (is_array($region)) {
             $data['province'] = $region[0] ?? '';
             $data['city'] = $region[1] ?? '';

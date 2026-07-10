@@ -11,6 +11,7 @@ use plugin\saimulti\app\model\admin\RoleMenu;
 use plugin\saimulti\app\model\admin\UserRole;
 use plugin\saimulti\basic\BaseLogic;
 use plugin\saimulti\exception\ApiException;
+use plugin\saimulti\service\module\ModuleServiceFactory;
 use plugin\saimulti\utils\Helper;
 
 /**
@@ -87,6 +88,7 @@ class MenuLogic extends BaseLogic
     {
         if ($group_id > 0) {
             $query = $this->search($where)->alias('a');
+            $this->applyModuleFilter($query, 'a.module_key');
             if (request()->input('tree', 'false') === 'true') {
                 $query->field('a.id, a.id as value, a.name as label, a.type, a.parent_id');
             }
@@ -96,6 +98,7 @@ class MenuLogic extends BaseLogic
                 ->select()->toArray();
         } else {
             $query = $this->search($where);
+            $this->applyModuleFilter($query);
             if (request()->input('tree', 'false') === 'true') {
                 $query->field('id, id as value, name as label, type, parent_id');
             }
@@ -111,6 +114,7 @@ class MenuLogic extends BaseLogic
     public function getAllMenus(): array
     {
         $query = $this->search(['status' => 1, 'type' => [1, 2, 4]])->order('sort', 'desc');
+        $this->applyModuleFilter($query);
         $data = $this->getAll($query);
         return Helper::makeArtdMenus($data);
     }
@@ -121,6 +125,7 @@ class MenuLogic extends BaseLogic
     public function getAllCode(): array
     {
         $query = $this->search(['type' => 3]);
+        $this->applyModuleFilter($query);
         return $query->column('code');
     }
 
@@ -138,6 +143,9 @@ class MenuLogic extends BaseLogic
             ->where('type', 3)
             ->where('status', 1)
             ->where('id', 'in', array_unique($menuId))
+            ->where(function ($query) {
+                $this->moduleWhere($query);
+            })
             ->column('code');
     }
 
@@ -147,8 +155,13 @@ class MenuLogic extends BaseLogic
      */
     public function getAllAuth(): array
     {
-        return Menu::where('type', 3)
+        return Menu::where('type', 'in', [2, 3])
             ->where('status', 1)
+            ->whereNotNull('slug')
+            ->where('slug', '<>', '')
+            ->where(function ($query) {
+                $this->moduleWhere($query);
+            })
             ->column('slug');
     }
 
@@ -162,9 +175,14 @@ class MenuLogic extends BaseLogic
         $menuId = RoleMenu::whereIn('role_id', $roleIds)->column('menu_id');
 
         return Menu::distinct(true)
-            ->where('type', 3)
+            ->where('type', 'in', [2, 3])
             ->where('status', 1)
+            ->whereNotNull('slug')
+            ->where('slug', '<>', '')
             ->where('id', 'in', array_unique($menuId))
+            ->where(function ($query) {
+                $this->moduleWhere($query);
+            })
             ->column('slug');
     }
 
@@ -181,10 +199,29 @@ class MenuLogic extends BaseLogic
             ->where('status', 1)
             ->where('type', 'in', [1, 2, 4])
             ->where('id', 'in', array_unique($menuId))
+            ->where(function ($query) {
+                $this->moduleWhere($query);
+            })
             ->order('sort', 'desc')
             ->select()
             ->toArray();
         return Helper::makeArtdMenus($data);
+    }
+
+    private function applyModuleFilter($query, string $field = 'module_key'): void
+    {
+        $query->where(function ($nested) use ($field) {
+            $this->moduleWhere($nested, $field);
+        });
+    }
+
+    private function moduleWhere($query, string $field = 'module_key'): void
+    {
+        $enabled = ModuleServiceFactory::access()->enabledSystemModuleKeys('admin');
+        $query->whereNull($field);
+        if ($enabled !== []) {
+            $query->whereIn($field, $enabled, 'OR');
+        }
     }
 
 }

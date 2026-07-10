@@ -8,13 +8,18 @@ namespace plugin\saimulti\process;
 
 use plugin\saimulti\app\logic\tool\CrontabLogic;
 use plugin\saimulti\app\model\tool\Crontab as CrontabModel;
+use plugin\saimulti\service\module\ModuleServiceFactory;
 use Webman\Channel\Client;
 use Workerman\Crontab\Crontab;
+use Workerman\Timer;
+use Throwable;
 
 class Task
 {
     protected $logic; //login对象
     public $crontabIds = []; //定时任务表主键id => Crontab对象id
+
+    private ?int $moduleExpiryTimerId = null;
 
     public function __construct()
     {
@@ -34,6 +39,26 @@ class Task
         $dbName = env('DB_NAME');
         if (!empty($dbName)) {
             $this->initStart();
+            $this->scanExpiredModuleLicenses();
+            $interval = (int) config('plugin.saimulti.module.expiry_scan_interval_seconds', 60);
+            $this->moduleExpiryTimerId = Timer::add(
+                max(10, $interval),
+                fn () => $this->scanExpiredModuleLicenses(),
+            );
+        }
+    }
+
+    public function scanExpiredModuleLicenses(): void
+    {
+        try {
+            $result = ModuleServiceFactory::expiryScanner()->run();
+            if ($result['expired'] > 0 || $result['failed'] > 0) {
+                echo PHP_EOL . date('Y-m-d H:i:s') . ' => 模块授权到期扫描: '
+                    . json_encode($result, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+            }
+        } catch (Throwable $exception) {
+            echo PHP_EOL . date('Y-m-d H:i:s') . ' => 模块授权到期扫描失败: '
+                . $exception->getMessage() . PHP_EOL;
         }
     }
 

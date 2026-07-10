@@ -47,15 +47,13 @@ class SystemConfigController extends TenantController
     public function saveBasic(Request $request): Response
     {
         $data = $request->post();
-        unset($data['organization']);
-        unset($data['domain']);
-        $region = $data['region'];
+        $region = $data['region'] ?? [];
         if (is_array($region)) {
             $data['province'] = $region[0] ?? '';
             $data['city'] = $region[1] ?? '';
             $data['area'] = $region[2] ?? '';
         }
-        $result = $this->logic->update($data, ['id' => $this->organization]);
+        $result = $this->logic->editTenantProfile((int) $this->organization, $data);
         if ($result) {
             return $this->success('保存成功');
         } else {

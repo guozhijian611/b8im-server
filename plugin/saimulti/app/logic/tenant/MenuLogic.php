@@ -11,7 +11,10 @@ use plugin\saimulti\app\model\tenant\RoleMenu;
 use plugin\saimulti\app\model\tenant\UserRole;
 use plugin\saimulti\basic\BaseLogic;
 use plugin\saimulti\exception\ApiException;
+use plugin\saimulti\service\TenantContext;
+use plugin\saimulti\service\module\TenantAssignableMenuService;
 use plugin\saimulti\utils\Helper;
+use support\think\Db;
 
 /**
  * 菜单逻辑层
@@ -79,48 +82,40 @@ class MenuLogic extends BaseLogic
     /**
      * 数据树形化
      * @param array $where
-     * @param int $group_id
      * @return array
      */
-    public function tree($where = [], $group_id = 0): array
+    public function tree($where = []): array
     {
-        if ($group_id > 0) {
-            $query = $this->search($where)->alias('a');
-            if (request()->input('tree', 'false') === 'true') {
-                $query->field('a.id, a.id as value, a.name as label, a.type, a.parent_id');
-            }
-            $data = $query->join('sm_tenant_group_menu b', 'a.id=b.menu_id')
-                ->where('b.group_id', $group_id)
-                ->order('a.sort', 'desc')
-                ->select()->toArray();
-        } else {
-            $query = $this->search($where);
-            if (request()->input('tree', 'false') === 'true') {
-                $query->field('id, id as value, name as label, type, parent_id');
-            }
-            $query->order('sort', 'desc');
-            $data = $this->getAll($query);
+        $ids = $this->assignableIds();
+        if ($ids === []) {
+            return [];
         }
+
+        $query = $this->search($where)->whereIn('id', $ids);
+        if (request()->input('tree', 'false') === 'true') {
+            $query->field('id, id as value, name as label, type, parent_id');
+        }
+        $query->order('sort', 'desc');
+        $data = $this->getAll($query);
+
         return Helper::makeTree($data);
     }
 
     /**
      * 获取全部菜单
      */
-    public function getAllMenus($group_id = 0): array
+    public function getAllMenus(): array
     {
-        if ($group_id > 0) {
-            $data = $this->model->alias('a')->join('sm_tenant_group_menu b', 'a.id=b.menu_id')
-                ->whereIn('a.type', [1, 2, 4])
-                ->where('b.group_id', $group_id)
-                ->field('a.*')
-                ->order(['a.sort' => 'desc', 'a.id' => 'asc'])
-                ->select()->toArray();
-        } else {
-            $data = $this->model->whereIn('type', [1, 2, 4])
-                ->order(['sort' => 'desc', 'id' => 'asc'])
-                ->select()->toArray();
+        $ids = $this->assignableIds();
+        if ($ids === []) {
+            return [];
         }
+
+        $data = $this->model->whereIn('id', $ids)
+            ->whereIn('type', [1, 2, 4])
+            ->order(['sort' => 'desc', 'id' => 'asc'])
+            ->select()->toArray();
+
         return Helper::makeArtdMenus($data);
     }
 
@@ -129,8 +124,9 @@ class MenuLogic extends BaseLogic
      */
     public function getAllCode(): array
     {
-        $query = $this->search(['type' => 3]);
-        return $query->column('code');
+        $ids = $this->assignableIds();
+
+        return $ids === [] ? [] : $this->search(['type' => 3])->whereIn('id', $ids)->column('code');
     }
 
     /**
@@ -141,12 +137,15 @@ class MenuLogic extends BaseLogic
     public function getAuthByAdminId($id): array
     {
         $roleIds = UserRole::where('user_id', $id)->column('role_id');
-        $menuId = RoleMenu::whereIn('role_id', $roleIds)->column('menu_id');
+        $menuId = $this->assignedMenuIds($roleIds);
+        if ($menuId === []) {
+            return [];
+        }
 
         return Menu::distinct(true)
             ->where('type', 3)
             ->where('status', 1)
-            ->where('id', 'in', array_unique($menuId))
+            ->whereIn('id', $menuId)
             ->column('code');
     }
 
@@ -156,8 +155,16 @@ class MenuLogic extends BaseLogic
      */
     public function getAllAuth(): array
     {
-        return Menu::where('type', 3)
+        $ids = $this->assignableIds();
+        if ($ids === []) {
+            return [];
+        }
+
+        return Menu::whereIn('id', $ids)
+            ->where('type', 'in', [2, 3])
             ->where('status', 1)
+            ->whereNotNull('slug')
+            ->where('slug', '<>', '')
             ->column('slug');
     }
 
@@ -168,12 +175,20 @@ class MenuLogic extends BaseLogic
      */
     public function getAuthByRole($roleIds): array
     {
-        $menuId = RoleMenu::whereIn('role_id', $roleIds)->column('menu_id');
+        $menuId = $this->assignedMenuIds((array) $roleIds);
+        if ($menuId === []) {
+            return [];
+        }
 
+        // 模块页面菜单本身可以承载列表/API slug。角色勾选页面菜单后，
+        // 该 slug 必须与按钮 slug 一起进入鉴权缓存，否则会出现菜单可见、
+        // 列表接口却被 CheckTenantAuth 拒绝的断链。
         return Menu::distinct(true)
-            ->where('type', 3)
+            ->where('type', 'in', [2, 3])
             ->where('status', 1)
-            ->where('id', 'in', array_unique($menuId))
+            ->whereNotNull('slug')
+            ->where('slug', '<>', '')
+            ->whereIn('id', $menuId)
             ->column('slug');
     }
 
@@ -184,16 +199,54 @@ class MenuLogic extends BaseLogic
      */
     public function getMenuByRole($roleIds): array
     {
-        $menuId = RoleMenu::whereIn('role_id', $roleIds)->column('menu_id');
+        $menuId = $this->assignedMenuIds((array) $roleIds);
+        if ($menuId === []) {
+            return [];
+        }
 
         $data = Menu::distinct(true)
             ->where('status', 1)
             ->where('type', 'in', [1, 2, 4])
-            ->where('id', 'in', array_unique($menuId))
+            ->whereIn('id', $menuId)
             ->order('sort', 'desc')
             ->select()
             ->toArray();
         return Helper::makeArtdMenus($data);
+    }
+
+    /** @return list<int> */
+    private function assignableIds(): array
+    {
+        return (new TenantAssignableMenuService())->ids(TenantContext::organization());
+    }
+
+    /** @param list<int|string> $roleIds @return list<int> */
+    private function assignedMenuIds(array $roleIds): array
+    {
+        $organization = TenantContext::organization();
+        $normalizedRoleIds = array_values(array_unique(array_filter(
+            array_map('intval', $roleIds),
+            static fn (int $roleId): bool => $roleId > 0,
+        )));
+        if ($normalizedRoleIds === []) {
+            return [];
+        }
+
+        $currentRoleIds = Db::table('sm_tenant_role')
+            ->where('organization', $organization)
+            ->whereIn('id', $normalizedRoleIds)
+            ->whereNull('delete_time')
+            ->column('id');
+        if ($currentRoleIds === []) {
+            return [];
+        }
+
+        $assignable = array_fill_keys($this->assignableIds(), true);
+
+        return array_values(array_unique(array_map('intval', array_filter(
+            RoleMenu::whereIn('role_id', $currentRoleIds)->column('menu_id'),
+            static fn (mixed $menuId): bool => isset($assignable[(int) $menuId]),
+        ))));
     }
 
 }
