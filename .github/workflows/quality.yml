@@ -60,6 +60,12 @@ jobs:
           repository: guozhijian611/b8im-module-sdk
           path: b8im-module-sdk
 
+      - name: Checkout IM migration dependency
+        uses: actions/checkout@v4
+        with:
+          repository: guozhijian611/b8im-im
+          path: b8im-im
+
       - name: Checkout admin generator target
         uses: actions/checkout@v4
         with:
