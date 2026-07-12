@@ -180,6 +180,26 @@ $assert(
     && !array_key_exists('public_url', $prepared),
     'Prepare response leaked a raw URL or changed the proxy metadata contract.',
 );
+$assert(
+    $service->prepare(
+        $identity,
+        'file',
+        'archive.zip',
+        2 * 1024 * 1024 * 1024,
+        'application/zip',
+    )['size'] === 2 * 1024 * 1024 * 1024,
+    '2GB boundary upload should be accepted.',
+);
+$expectApiCode(
+    422,
+    static fn () => $service->prepare(
+        $identity,
+        'file',
+        'archive.zip',
+        2 * 1024 * 1024 * 1024 + 1,
+        'application/zip',
+    ),
+);
 
 $temporary = tempnam(sys_get_temp_dir(), 'b8im-upload-test-');
 if ($temporary === false || file_put_contents($temporary, 'private-data') === false) {

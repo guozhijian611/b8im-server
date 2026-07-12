@@ -57,7 +57,11 @@
     "workerman/crontab": "^1.0",
     "openspout/openspout": "^4.28",
     "robmorgan/phinx": "^0.16.11",
-    "aws/aws-sdk-php": "^3.0"
+    "aws/aws-sdk-php": "^3.0",
+    "aliyuncs/oss-sdk-php": "^2.7",
+    "qcloud/cos-sdk-v5": "^2.6",
+    "qiniu/php-sdk": "^7.14",
+    "league/flysystem-aws-s3-v3": "^3.35"
   },
   "suggest": {
     "ext-event": "For better performance. "

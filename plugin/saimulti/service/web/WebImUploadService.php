@@ -10,6 +10,8 @@ use support\Request;
 
 final class WebImUploadService
 {
+    private const MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024;
+
     private const KINDS = ['image', 'file', 'voice', 'video'];
 
     private const EXTENSIONS = [
@@ -206,8 +208,8 @@ final class WebImUploadService
         if ($extension === '' || !in_array($extension, self::EXTENSIONS[$kind], true)) {
             throw new ApiException('不支持该文件格式。', 422);
         }
-        if ($size <= 0 || $size > 50 * 1024 * 1024) {
-            throw new ApiException('文件大小必须在 50MB 以内。', 422);
+        if ($size <= 0 || $size > self::MAX_FILE_BYTES) {
+            throw new ApiException('文件大小必须在 2GB 以内。', 422);
         }
     }
 

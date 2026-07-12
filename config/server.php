@@ -12,6 +12,8 @@
  * @license   http://www.opensource.org/licenses/mit-license.php MIT License
  */
 
+$maxPackageSize = (int) env('WEBMAN_MAX_PACKAGE_SIZE_BYTES', 2 * 1024 * 1024 * 1024);
+
 return [
     'event_loop' => '',
     'stop_timeout' => 2,
@@ -19,5 +21,5 @@ return [
     'status_file' => runtime_path() . '/webman.status',
     'stdout_file' => runtime_path() . '/logs/stdout.log',
     'log_file' => runtime_path() . '/logs/workerman.log',
-    'max_package_size' => 10 * 1024 * 1024
+    'max_package_size' => $maxPackageSize
 ];
