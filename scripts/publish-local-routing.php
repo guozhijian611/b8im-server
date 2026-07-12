@@ -26,38 +26,45 @@ if ($organizations === []) {
 $service = new RoutingConfigService();
 $summaries = [];
 $publicKey = '';
+$mode = (string) env('ROUTING_LOCAL_MODE', 'primary_backup');
+if (!in_array($mode, ['single', 'primary_backup'], true)) {
+    throw new RuntimeException('ROUTING_LOCAL_MODE 只允许 single 或 primary_backup。');
+}
 foreach ($organizations as $organization) {
     $id = (int) $organization['id'];
+    $routes = [
+        [
+            'route_id' => 'local-primary', 'name' => '本机主线路', 'priority' => 10, 'weight' => 100,
+            'region' => 'local', 'carrier' => 'loopback', 'failure_domain' => 'port-primary',
+            'endpoints' => [
+                'api_server_url' => env('ROUTING_LOCAL_API_PRIMARY', 'http://127.0.0.1:18888'),
+                'im_server_url' => env('ROUTING_LOCAL_IM_PRIMARY', 'ws://127.0.0.1:18787'),
+                'upload_server_url' => env('ROUTING_LOCAL_UPLOAD_PRIMARY', 'http://127.0.0.1:18888'),
+                'web_server_url' => env('ROUTING_LOCAL_WEB_URL', 'http://127.0.0.1:16988'),
+            ],
+        ],
+    ];
+    if ($mode === 'primary_backup') {
+        $routes[] = [
+            'route_id' => 'local-backup', 'name' => '本机备用线路', 'priority' => 20, 'weight' => 100,
+            'region' => 'local', 'carrier' => 'loopback', 'failure_domain' => 'port-backup',
+            'endpoints' => [
+                'api_server_url' => env('ROUTING_LOCAL_API_BACKUP', 'http://127.0.0.1:18889'),
+                'im_server_url' => env('ROUTING_LOCAL_IM_BACKUP', 'ws://127.0.0.1:18788'),
+                'upload_server_url' => env('ROUTING_LOCAL_UPLOAD_BACKUP', 'http://127.0.0.1:18889'),
+                'web_server_url' => env('ROUTING_LOCAL_WEB_URL', 'http://127.0.0.1:16988'),
+            ],
+        ];
+    }
     $result = $service->publish([
         'organization' => $id,
         'deployment_id' => (string) $organization['deployment_id'],
         'deployment_name' => '本机开发环境',
         'route_pool_id' => 'org-' . $id . '-local-dev',
-        'route_pool_name' => '机构 ' . $id . ' 本机双端口线路池',
-        'mode' => 'primary_backup',
+        'route_pool_name' => '机构 ' . $id . ($mode === 'single' ? ' 本机单线路池' : ' 本机双端口线路池'),
+        'mode' => $mode,
         'client_families' => ['web', 'app', 'desktop'],
-        'routes' => [
-            [
-                'route_id' => 'local-primary', 'name' => '本机主线路', 'priority' => 10, 'weight' => 100,
-                'region' => 'local', 'carrier' => 'loopback', 'failure_domain' => 'port-primary',
-                'endpoints' => [
-                    'api_server_url' => env('ROUTING_LOCAL_API_PRIMARY', 'http://127.0.0.1:18888'),
-                    'im_server_url' => env('ROUTING_LOCAL_IM_PRIMARY', 'ws://127.0.0.1:18787'),
-                    'upload_server_url' => env('ROUTING_LOCAL_UPLOAD_PRIMARY', 'http://127.0.0.1:18888'),
-                    'web_server_url' => env('ROUTING_LOCAL_WEB_URL', 'http://127.0.0.1:16988'),
-                ],
-            ],
-            [
-                'route_id' => 'local-backup', 'name' => '本机备用线路', 'priority' => 20, 'weight' => 100,
-                'region' => 'local', 'carrier' => 'loopback', 'failure_domain' => 'port-backup',
-                'endpoints' => [
-                    'api_server_url' => env('ROUTING_LOCAL_API_BACKUP', 'http://127.0.0.1:18889'),
-                    'im_server_url' => env('ROUTING_LOCAL_IM_BACKUP', 'ws://127.0.0.1:18788'),
-                    'upload_server_url' => env('ROUTING_LOCAL_UPLOAD_BACKUP', 'http://127.0.0.1:18889'),
-                    'web_server_url' => env('ROUTING_LOCAL_WEB_URL', 'http://127.0.0.1:16988'),
-                ],
-            ],
-        ],
+        'routes' => $routes,
     ], ['type' => 'local-script', 'id' => 0]);
     $publicKey = (string) $result['routing_public_key'];
     $summaries[] = [
