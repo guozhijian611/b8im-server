@@ -8,6 +8,7 @@ use DateTimeImmutable;
 use DateTimeZone;
 use plugin\saimulti\app\model\system\SystemOrganization;
 use plugin\saimulti\exception\ApiException;
+use plugin\saimulti\service\routing\RoutingConfigService;
 use support\Log;
 
 /**
@@ -146,7 +147,7 @@ final class OrganizationDiscovery
     /**
      * @return array<string, mixed>
      */
-    public function resolve(string $identifier, string $mode): array
+    public function resolve(string $identifier, string $mode, string $clientFamily): array
     {
         $field = $mode === self::MODE_DOMAIN ? 'domain' : 'enterprise_code';
         $rows = (new SystemOrganization())
@@ -160,7 +161,7 @@ final class OrganizationDiscovery
         }
 
         try {
-            return $this->toPublicContract($rows[0]);
+            return $this->toPublicContract($rows[0], $clientFamily);
         } catch (ApiException $exception) {
             Log::warning('appInfo organization configuration rejected', [
                 'organization' => (int) $rows[0]['id'],
@@ -185,8 +186,6 @@ final class OrganizationDiscovery
             self::normalizeDomain((string) $data['domain']);
         }
 
-        $this->validatedServerInfo($data);
-
         foreach (['logo', 'favicon', 'public_security_record_url', 'android_download_url', 'ios_download_url'] as $field) {
             self::assertPublicUrl(
                 (string) ($data[$field] ?? ''),
@@ -201,9 +200,13 @@ final class OrganizationDiscovery
      * @param array<string, mixed> $row
      * @return array<string, mixed>
      */
-    private function toPublicContract(array $row): array
+    private function toPublicContract(array $row, string $clientFamily): array
     {
         $this->validatePublicConfiguration($row);
+        $routing = (new RoutingConfigService())->read((int) $row['id'], $clientFamily);
+        if ($routing['deployment_id'] !== (string) $row['deployment_id']) {
+            throw new ApiException('线路发布部署与机构不一致', self::INVALID_CONFIGURATION);
+        }
         $configVersion = (int) ($row['config_version'] ?? 0);
         if ($configVersion < 1) {
             throw new ApiException('应用公开配置无效', self::INVALID_CONFIGURATION);
@@ -220,6 +223,7 @@ final class OrganizationDiscovery
             'organization' => (int) $row['id'],
             'deployment_id' => (string) $row['deployment_id'],
             'enterprise_code' => (string) $row['enterprise_code'],
+            'client_family' => $clientFamily,
             'config_version' => $configVersion,
             'updated_at' => $updatedAt,
             'site_name' => (string) ($row['title'] ?? ''),
@@ -233,7 +237,8 @@ final class OrganizationDiscovery
                 'android' => (string) ($row['android_download_url'] ?? ''),
                 'ios' => (string) ($row['ios_download_url'] ?? ''),
             ],
-            'server_info' => $this->validatedServerInfo($row),
+            'server_info' => $routing['server_info'],
+            'routing_signature' => $routing['routing_signature'],
             'agreements' => [
                 'user_agreement' => [
                     'title' => (string) ($row['user_agreement_title'] ?? '用户协议'),
@@ -247,33 +252,4 @@ final class OrganizationDiscovery
         ];
     }
 
-    /**
-     * @param array<string, mixed> $data
-     * @return array<string, string>
-     */
-    private function validatedServerInfo(array $data): array
-    {
-        return [
-            'api_server_url' => self::assertPublicUrl(
-                (string) ($data['api_server_url'] ?? ''),
-                ['https', 'http'],
-                $this->allowInsecureUrls,
-            ),
-            'im_server_url' => self::assertPublicUrl(
-                (string) ($data['im_server_url'] ?? ''),
-                ['wss', 'ws'],
-                $this->allowInsecureUrls,
-            ),
-            'upload_server_url' => self::assertPublicUrl(
-                (string) ($data['upload_server_url'] ?? ''),
-                ['https', 'http'],
-                $this->allowInsecureUrls,
-            ),
-            'web_server_url' => self::assertPublicUrl(
-                (string) ($data['web_server_url'] ?? ''),
-                ['https', 'http'],
-                $this->allowInsecureUrls,
-            ),
-        ];
-    }
 }

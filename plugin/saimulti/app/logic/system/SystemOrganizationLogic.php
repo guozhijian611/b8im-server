@@ -32,10 +32,6 @@ class SystemOrganizationLogic extends BaseLogic
         'copyright',
         'android_download_url',
         'ios_download_url',
-        'api_server_url',
-        'im_server_url',
-        'upload_server_url',
-        'web_server_url',
         'user_agreement_title',
         'user_agreement_content',
         'privacy_policy_title',
@@ -323,9 +319,9 @@ class SystemOrganizationLogic extends BaseLogic
         return array_intersect_key($data, array_flip(self::TENANT_PROFILE_FIELDS));
     }
 
-    public function appInfo(string $identifier, string $mode): array
+    public function appInfo(string $identifier, string $mode, string $clientFamily): array
     {
-        return (new OrganizationDiscovery())->resolve($identifier, $mode);
+        return (new OrganizationDiscovery())->resolve($identifier, $mode, $clientFamily);
     }
 
     /**

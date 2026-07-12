@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace plugin\saimulti\service;
 
 use plugin\saimulti\exception\ApiException;
+use plugin\saimulti\service\routing\RoutingConfigService;
 use support\think\Db;
 use Webman\Http\Request;
 
@@ -41,9 +42,18 @@ final class WebOrganizationResolver
 
     public function registeredWebOrigin(array $organization): string
     {
+        $routing = (new RoutingConfigService())->read((int) ($organization['id'] ?? 0), 'web');
+        $routes = (array) ($routing['server_info']['routes'] ?? []);
+        $primaryRouteId = (string) ($routing['server_info']['policy']['primary_route_id'] ?? '');
+        $primary = current(array_filter(
+            $routes,
+            static fn (array $route): bool => ($route['route_id'] ?? null) === $primaryRouteId,
+        ));
+        if (!is_array($primary)) {
+            throw new ApiException('Web 主线路配置无效。', 50301);
+        }
         $url = OrganizationDiscovery::assertPublicUrl(
-            (string) ($organization['web_server_url'] ?? ''),
-            ['https', 'http'],
+            (string) ($primary['endpoints']['web_server_url'] ?? ''), ['https', 'http'],
             (bool) config('app.debug', false),
         );
 
@@ -63,21 +73,28 @@ final class WebOrganizationResolver
             ->where('deployment_id', $deploymentId)
             ->where('status', 1)
             ->whereNull('delete_time')
-            ->field(['id', 'web_server_url'])
+            ->field(['id'])
             ->select()
             ->toArray();
         foreach ($rows as $row) {
             try {
-                $registered = self::originFromUrl(OrganizationDiscovery::assertPublicUrl(
-                    (string) ($row['web_server_url'] ?? ''),
-                    ['https', 'http'],
-                    (bool) config('app.debug', false),
-                ));
+                $routing = (new RoutingConfigService())->read((int) $row['id'], 'web');
+                $routes = (array) ($routing['server_info']['routes'] ?? []);
             } catch (ApiException) {
                 continue;
             }
-            if (hash_equals($registered, $origin)) {
-                return $registered;
+            foreach ($routes as $route) {
+                try {
+                    $registered = self::originFromUrl(OrganizationDiscovery::assertPublicUrl(
+                        (string) ($route['endpoints']['web_server_url'] ?? ''), ['https', 'http'],
+                        (bool) config('app.debug', false),
+                    ));
+                } catch (ApiException) {
+                    continue;
+                }
+                if (hash_equals($registered, $origin)) {
+                    return $registered;
+                }
             }
         }
 

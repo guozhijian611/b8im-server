@@ -161,6 +161,8 @@ Route::group("/saimulti", function () {
 	// 机构管理
 	saiMultiRoute('/admin/organization', \plugin\saimulti\app\controller\admin\SystemOrganizationController::class);
 	Route::post("/admin/organization/initTenant", [\plugin\saimulti\app\controller\admin\SystemOrganizationController::class, 'initTenant']);
+	Route::get('/admin/routing/read', [\plugin\saimulti\app\controller\admin\AdminRoutingController::class, 'read']);
+	Route::post('/admin/routing/publish', [\plugin\saimulti\app\controller\admin\AdminRoutingController::class, 'publish']);
 
 	// 机构分组
 	saiMultiRoute('/admin/group', \plugin\saimulti\app\controller\admin\SystemGroupController::class);
@@ -282,6 +284,7 @@ Route::group("/saimulti", function () {
 	// 租户 IM 运行策略（organization 只取认证上下文）
 	Route::get('/tenant/im/policy/read', [\plugin\saimulti\app\controller\tenant\TenantImPolicyController::class, 'read']);
 	Route::put('/tenant/im/policy/update', [\plugin\saimulti\app\controller\tenant\TenantImPolicyController::class, 'update']);
+	Route::get('/tenant/routing/read', [\plugin\saimulti\app\controller\tenant\TenantRoutingController::class, 'read']);
 
 	// 菜单列表
 	Route::get("/tenant/menu/index", [plugin\saimulti\app\controller\tenant\SystemMenuController::class, 'index']);

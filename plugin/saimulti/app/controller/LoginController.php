@@ -107,7 +107,11 @@ class LoginController extends OpenController
             );
 
             $logic = new SystemOrganizationLogic();
-            $data = $logic->appInfo($identifier, $mode);
+            $data = $logic->appInfo(
+                $identifier,
+                $mode,
+                (string) $request->input('client_family', ''),
+            );
             $etag = '"' . hash(
                 'sha256',
                 json_encode($data, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
@@ -122,6 +126,7 @@ class LoginController extends OpenController
                 'identifier_hash' => hash('sha256', $identifier),
                 'organization' => $data['organization'],
                 'deployment_id' => $data['deployment_id'],
+                'client_family' => $data['client_family'],
                 'client_ip' => $clientIp,
             ]);
 
