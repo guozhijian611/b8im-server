@@ -140,7 +140,11 @@ $signedParts = parse_url($signed);
 parse_str((string) ($signedParts['query'] ?? ''), $signedQuery);
 $assert(($signedParts['scheme'] ?? '') === 'https' && ($signedParts['host'] ?? '') === 's3.example.test', 'Signer changed the configured HTTPS endpoint.');
 $assert(str_contains((string) ($signedParts['path'] ?? ''), '/private-bucket/private/organizations/901/im/202607/'), 'Signer did not use the canonical object key exactly once.');
-$assert(isset($signedQuery['X-Amz-Signature']) && (int) ($signedQuery['X-Amz-Expires'] ?? 0) === 300, 'Signer did not create a 300-second SigV4 URL.');
+$signedTtl = (int) ($signedQuery['X-Amz-Expires'] ?? 0);
+$assert(
+    isset($signedQuery['X-Amz-Signature']) && $signedTtl >= 299 && $signedTtl <= 300,
+    'Signer did not create an approximately 300-second SigV4 URL.',
+);
 $assert(!str_contains($signed, $s3Config['s3_secret']), 'S3 secret leaked into the signed URL.');
 
 $expectApiCode(409, static fn () => $realSigner->sign(

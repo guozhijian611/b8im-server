@@ -1,0 +1,105 @@
+name: Backend quality
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: nb8im
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -proot"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      APP_DEBUG: "true"
+      DB_HOST: 127.0.0.1
+      DB_PORT: 3306
+      DB_NAME: nb8im
+      DB_USER: root
+      DB_PASSWORD: root
+      DB_CHARSET: utf8mb4
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: 6379
+      CACHE_STORE: redis
+
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@v4
+        with:
+          path: b8im-server
+
+      - name: Checkout module SDK path dependency
+        uses: actions/checkout@v4
+        with:
+          repository: guozhijian611/b8im-module-sdk
+          path: b8im-module-sdk
+
+      - name: Checkout admin generator target
+        uses: actions/checkout@v4
+        with:
+          repository: guozhijian611/b8im-admin-vue
+          path: b8im-admin-vue
+
+      - name: Checkout tenant generator target
+        uses: actions/checkout@v4
+        with:
+          repository: guozhijian611/b8im-tenant-vue
+          path: b8im-tenant-vue
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          extensions: pdo_mysql, redis, sodium, mbstring
+          coverage: none
+
+      - name: Install dependencies
+        working-directory: b8im-server
+        run: composer install --no-interaction --prefer-dist
+
+      - name: Validate Composer
+        working-directory: b8im-server
+        run: composer validate --no-check-publish
+
+      - name: Lint
+        working-directory: b8im-server
+        run: composer lint
+
+      - name: Unit tests
+        working-directory: b8im-server
+        run: composer test:unit
+
+      - name: Integration tests
+        working-directory: b8im-server
+        run: composer test:integration
+
+      - name: Cleanup isolated databases
+        if: always()
+        working-directory: b8im-server
+        run: composer test:cleanup

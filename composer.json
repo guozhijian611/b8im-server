@@ -75,6 +75,15 @@
     }
   },
   "scripts": {
+    "lint": "@php scripts/php-lint.php",
+    "test:unit": "@php scripts/test-runner.php unit",
+    "test:test-unit": "@test:unit",
+    "test:integration": "@php scripts/test-runner.php integration",
+    "test": [
+      "@test:unit",
+      "@test:integration"
+    ],
+    "test:cleanup": "@php scripts/test-cleanup.php",
     "post-package-install": [
       "support\\Plugin::install"
     ],

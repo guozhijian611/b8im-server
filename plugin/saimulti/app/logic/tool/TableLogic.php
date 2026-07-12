@@ -98,7 +98,7 @@ class TableLogic extends BaseLogic
                     'tpl_category' => 'single',
                     'template' => 'app',
                     'stub' => 'tenant',
-                    'generate_path' => 'tenant-vue',
+                    'generate_path' => 'b8im-tenant-vue',
                     'namespace' => '',
                     'package_name' => '',
                     'source' => $source,
