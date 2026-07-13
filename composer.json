@@ -81,9 +81,14 @@
     "test:integration": "@php scripts/test-runner.php integration",
     "test": [
       "@test:unit",
-      "@test:integration"
+      "@test:integration",
+      "@test:qa-fixtures"
     ],
     "test:cleanup": "@php scripts/test-cleanup.php",
+    "test:qa-fixtures": "@php scripts/qa-fixture-smoke.php",
+    "qa:provision": "@php webman qa:fixtures provision",
+    "qa:status": "@php webman qa:fixtures status",
+    "qa:cleanup": "@php webman qa:fixtures cleanup",
     "post-package-install": [
       "support\\Plugin::install"
     ],
