@@ -66,6 +66,12 @@ jobs:
           repository: guozhijian611/b8im-im
           path: b8im-im
 
+      - name: Checkout IM shared path dependency
+        uses: actions/checkout@v4
+        with:
+          repository: guozhijian611/b8im-im-shared
+          path: b8im-im-shared
+
       - name: Checkout admin generator target
         uses: actions/checkout@v4
         with:
@@ -87,6 +93,10 @@ jobs:
 
       - name: Install dependencies
         working-directory: b8im-server
+        run: composer install --no-interaction --prefer-dist
+
+      - name: Install IM migration dependencies
+        working-directory: b8im-im/im-business
         run: composer install --no-interaction --prefer-dist
 
       - name: Validate Composer
