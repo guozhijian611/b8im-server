@@ -16,13 +16,26 @@ $assert = static function (bool $condition, string $message) use (&$assertions):
     $assertions++;
 };
 
-$policy = new TrustedCorsPolicy('https://extra.example.com, https://tenant.idev.love');
+$configuredOrigins = implode(',', [
+    'https://extra.example.com',
+    'https://tenant.idev.love',
+    'http://127.0.0.1:16888',
+]);
+$policy = new TrustedCorsPolicy($configuredOrigins);
 $assert($policy->allowedOrigin('https://tenant.idev.love') === 'https://tenant.idev.love', 'Public tenant origin was rejected.');
 $assert($policy->allowedOrigin('http://127.0.0.1:16888') === 'http://127.0.0.1:16888', 'Local tenant origin was rejected.');
 $assert($policy->allowedOrigin('https://extra.example.com') === 'https://extra.example.com', 'Environment origin extension was rejected.');
 $assert($policy->allowedOrigin('https://evil.example.com') === null, 'Unknown origin was accepted.');
 $assert($policy->allowedOrigin('*') === null, 'Wildcard origin was accepted.');
 $assert($policy->allowedOrigin('https://tenant.idev.love.evil.example') === null, 'Suffix-confusion origin was accepted.');
+$assert((new TrustedCorsPolicy(''))->allowedOrigin('https://tenant.idev.love') === null, 'Missing env configuration did not fail closed.');
+$invalidRejected = false;
+try {
+    new TrustedCorsPolicy('https://tenant.idev.love/path');
+} catch (InvalidArgumentException) {
+    $invalidRejected = true;
+}
+$assert($invalidRejected, 'Invalid env origin was silently accepted.');
 $assert($policy->allowsRequestedHeaders('content-type, app-id, authorization'), 'Trusted request headers were rejected.');
 $assert(!$policy->allowsRequestedHeaders('content-type, x-internal-secret'), 'Unknown request header was accepted.');
 
@@ -32,6 +45,8 @@ $handler = static function () use (&$handlerCalls) {
     $handlerCalls++;
     return response('handled', 200);
 };
+putenv('SAIMULTI_CORS_ALLOWED_ORIGINS=' . $configuredOrigins);
+$_ENV['SAIMULTI_CORS_ALLOWED_ORIGINS'] = $configuredOrigins;
 $middleware = new CrossDomain();
 
 $allowedPreflight = $middleware->process($request(<<<'HTTP'

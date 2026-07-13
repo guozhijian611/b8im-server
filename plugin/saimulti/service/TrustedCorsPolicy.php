@@ -4,21 +4,10 @@ declare(strict_types=1);
 
 namespace plugin\saimulti\service;
 
+use InvalidArgumentException;
+
 final class TrustedCorsPolicy
 {
-    public const DEFAULT_ORIGINS = [
-        'https://admin.idev.love',
-        'https://tenant.idev.love',
-        'https://idev.love',
-        'https://www.idev.love',
-        'http://127.0.0.1:16788',
-        'http://127.0.0.1:16888',
-        'http://127.0.0.1:16988',
-        'http://localhost:16788',
-        'http://localhost:16888',
-        'http://localhost:16988',
-    ];
-
     public const ALLOWED_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
     public const ALLOWED_HEADERS = [
         'authorization',
@@ -31,15 +20,18 @@ final class TrustedCorsPolicy
     /** @var array<string, true> */
     private array $origins = [];
 
-    public function __construct(?string $additionalOrigins = null)
+    public function __construct(?string $configuredOrigins = null)
     {
-        $additionalOrigins ??= (string) env('SAIMULTI_CORS_ALLOWED_ORIGINS', '');
-        $candidates = [...self::DEFAULT_ORIGINS, ...explode(',', $additionalOrigins)];
-        foreach ($candidates as $candidate) {
-            $normalized = self::normalizeOrigin($candidate);
-            if ($normalized !== null) {
-                $this->origins[$normalized] = true;
+        $configuredOrigins ??= (string) env('SAIMULTI_CORS_ALLOWED_ORIGINS', '');
+        foreach (explode(',', $configuredOrigins) as $candidate) {
+            if (trim($candidate) === '') {
+                continue;
             }
+            $normalized = self::normalizeOrigin($candidate);
+            if ($normalized === null) {
+                throw new InvalidArgumentException('SAIMULTI_CORS_ALLOWED_ORIGINS contains an invalid origin.');
+            }
+            $this->origins[$normalized] = true;
         }
     }
 
