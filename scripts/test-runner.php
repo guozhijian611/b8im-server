@@ -100,6 +100,7 @@ $databaseByTest = [
     'ModuleLifecycleIntegrationTest.php' => 'MODULE_TEST_DB_NAME',
     'ModuleTenantAclIntegrationTest.php' => 'MODULE_ACL_TEST_DB_NAME',
     'RoutingConfigIntegrationTest.php' => 'ROUTING_TEST_DB_NAME',
+    'TraceCenterMigrationIntegrationTest.php' => 'ROUTING_TEST_DB_NAME',
     'TenantImPolicyIntegrationTest.php' => 'TENANT_IM_POLICY_TEST_DB_NAME',
     'WebImAccessSessionIntegrationTest.php' => 'WEB_IM_ACCESS_TEST_DB_NAME',
     'WebImControlPlaneIntegrationTest.php' => 'WEB_IM_TEST_DB_NAME',

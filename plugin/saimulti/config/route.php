@@ -158,6 +158,11 @@ Route::group("/saimulti", function () {
 	saiMultiRoute('/system/config', \plugin\saimulti\app\controller\system\SystemConfigController::class);
 	Route::post("/system/config/batchUpdate", [\plugin\saimulti\app\controller\system\SystemConfigController::class, 'batchUpdate']);
 
+	// 全链路查询（控制器内额外限制为平台超级管理员）
+	Route::get('/system/trace/services', [\plugin\saimulti\app\controller\system\TraceController::class, 'services']);
+	Route::get('/system/trace/search', [\plugin\saimulti\app\controller\system\TraceController::class, 'search']);
+	Route::get('/system/trace/read', [\plugin\saimulti\app\controller\system\TraceController::class, 'read']);
+
 	//--------------------------- 租户管理 ------------------------- //
 	// 机构管理
 	saiMultiRoute('/admin/organization', \plugin\saimulti\app\controller\admin\SystemOrganizationController::class);
