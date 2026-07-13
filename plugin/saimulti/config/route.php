@@ -6,6 +6,7 @@ use plugin\saimulti\app\middleware\CheckAdminLogin;
 use plugin\saimulti\app\middleware\CheckTenantAuth;
 use plugin\saimulti\app\middleware\CheckTenantLogin;
 use plugin\saimulti\app\middleware\CheckWebLogin;
+use plugin\saimulti\app\middleware\CrossDomain;
 use plugin\saimulti\app\middleware\TenantLog;
 use plugin\saimulti\app\middleware\WebCors;
 use Webman\Route;
@@ -343,4 +344,9 @@ Route::group("/cms", function () {
 	CheckTenantLogin::class,
 	CheckTenantAuth::class,
 	TenantLog::class
+]);
+
+// 非 Web 控制面统一预检入口。appInfo 和 Web IM 已有更具体的 OPTIONS 路由，精确路由优先。
+Route::options('/saimulti/{path:.+}', static fn () => response('', 204))->middleware([
+	CrossDomain::class,
 ]);
