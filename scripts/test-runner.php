@@ -28,6 +28,9 @@ $environment = [
     'ANNOUNCEMENT_TEST_DB_NAME' => "nb8im_{$suffix}_announcement_test",
     'WEB_IM_TEST_DB_NAME' => "nb8im_{$suffix}_web_test",
 ];
+putenv('OTEL_SDK_DISABLED=true');
+$_ENV['OTEL_SDK_DISABLED'] = 'true';
+$_SERVER['OTEL_SDK_DISABLED'] = 'true';
 foreach ($environment as $key => $value) {
     putenv("{$key}={$value}");
     $_ENV[$key] = $value;

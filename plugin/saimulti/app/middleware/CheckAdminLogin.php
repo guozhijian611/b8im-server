@@ -12,6 +12,7 @@ use Webman\Http\Response;
 use Webman\MiddlewareInterface;
 use Tinywan\Jwt\JwtToken;
 use plugin\saimulti\exception\ApiException;
+use plugin\saimulti\service\trace\Telemetry;
 
 /**
  * 中台登录检查中间件
@@ -19,6 +20,18 @@ use plugin\saimulti\exception\ApiException;
 class CheckAdminLogin implements MiddlewareInterface
 {
     public function process(Request $request, callable $handler): Response
+    {
+        Telemetry::inSpan(
+            'b8im.auth.admin.login',
+            'auth.admin.login',
+            ['b8im.auth.scope' => 'admin'],
+            fn () => $this->authenticate($request),
+        );
+
+        return $handler($request);
+    }
+
+    private function authenticate(Request $request): void
     {
         // 通过反射获取控制器哪些方法不需要登录
         $controller = new ReflectionClass($request->controller);
@@ -37,6 +50,5 @@ class CheckAdminLogin implements MiddlewareInterface
             $request->setHeader('check_saimulti_login', true);
             $request->setHeader('check_saimulti_admin', $token);
         }
-        return $handler($request);
     }
 }

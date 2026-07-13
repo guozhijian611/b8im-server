@@ -17,6 +17,8 @@ use plugin\saimulti\service\TenantContext;
 use plugin\saimulti\service\module\ModuleServiceFactory;
 use plugin\saimulti\app\cache\TenantAuthCache;
 use plugin\saimulti\exception\SystemException;
+use plugin\saimulti\service\trace\Telemetry;
+use OpenTelemetry\API\Trace\Span;
 
 /**
  * 权限检查中间件
@@ -24,6 +26,18 @@ use plugin\saimulti\exception\SystemException;
 class CheckTenantAuth implements MiddlewareInterface
 {
     public function process(Request $request, callable $handler) : Response
+    {
+        Telemetry::inSpan(
+            'b8im.auth.tenant.permission',
+            'auth.tenant.permission',
+            ['b8im.auth.scope' => 'tenant'],
+            fn () => $this->authorize($request),
+        );
+
+        return $handler($request);
+    }
+
+    private function authorize(Request $request): void
     {
         $controller = $request->controller;
         $action = $request->action;
@@ -38,7 +52,7 @@ class CheckTenantAuth implements MiddlewareInterface
             if ($moduleRequired !== null) {
                 $this->assertModuleRequired($moduleRequired, TenantContext::requestOrganization());
             }
-            return $handler($request);
+            return;
         }
 
         // 登录信息
@@ -46,6 +60,10 @@ class CheckTenantAuth implements MiddlewareInterface
         if (!is_array($token)) {
             throw new SystemException('权限不足，无法访问或操作');
         }
+        Span::getCurrent()->setAttribute(
+            'b8im.organization',
+            TenantContext::parseOrganization($token['organization'] ?? null),
+        );
 
         // organization 只从登录凭证取得，不使用 body/query 中的租户参数。
         if ($moduleRequired !== null) {
@@ -57,11 +75,16 @@ class CheckTenantAuth implements MiddlewareInterface
 
         // 系统默认超级管理员，无需权限验证
         if ((int) $token['user_type'] === 100) {
-            return $handler($request);
+            Span::getCurrent()->setAttribute('b8im.permission.bypassed', true);
+            return;
         }
 
         // 获取接口权限属性 (使用缓存类)
         $permissions = $this->getPermissions($controller, $action);
+        Span::getCurrent()->setAttribute('b8im.permission.required', !empty($permissions['slug']));
+        if (!empty($permissions['slug'])) {
+            Span::getCurrent()->setAttribute('b8im.permission.slug', (string) $permissions['slug']);
+        }
 
         if (!empty($permissions) && !empty($permissions['slug'])) {
             // 用户权限缓存
@@ -71,7 +94,6 @@ class CheckTenantAuth implements MiddlewareInterface
                 throw new SystemException('权限不足，无法访问或操作');
             }
         }
-        return $handler($request);
     }
 
     /**

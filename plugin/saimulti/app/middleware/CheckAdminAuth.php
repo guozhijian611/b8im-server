@@ -16,6 +16,8 @@ use plugin\saimulti\service\ModuleRequired;
 use plugin\saimulti\service\module\ModuleServiceFactory;
 use plugin\saimulti\app\cache\AdminAuthCache;
 use plugin\saimulti\exception\SystemException;
+use plugin\saimulti\service\trace\Telemetry;
+use OpenTelemetry\API\Trace\Span;
 
 /**
  * 权限检查中间件
@@ -23,6 +25,18 @@ use plugin\saimulti\exception\SystemException;
 class CheckAdminAuth implements MiddlewareInterface
 {
     public function process(Request $request, callable $handler) : Response
+    {
+        Telemetry::inSpan(
+            'b8im.auth.admin.permission',
+            'auth.admin.permission',
+            ['b8im.auth.scope' => 'admin'],
+            fn () => $this->authorize($request),
+        );
+
+        return $handler($request);
+    }
+
+    private function authorize(Request $request): void
     {
         $controller = $request->controller;
         $action = $request->action;
@@ -35,7 +49,7 @@ class CheckAdminAuth implements MiddlewareInterface
         // 不登录访问，无需权限验证
         if (in_array($action, $noNeedLogin)) {
             $this->assertModuleRequired($moduleRequired);
-            return $handler($request);
+            return;
         }
 
         // 登录信息
@@ -49,11 +63,16 @@ class CheckAdminAuth implements MiddlewareInterface
 
         // 系统默认超级管理员，无需权限验证
         if ($token['id'] === 1) {
-            return $handler($request);
+            Span::getCurrent()->setAttribute('b8im.permission.bypassed', true);
+            return;
         }
 
         // 获取接口权限属性 (使用缓存类)
         $permissions = $this->getPermissions($controller, $action);
+        Span::getCurrent()->setAttribute('b8im.permission.required', !empty($permissions['slug']));
+        if (!empty($permissions['slug'])) {
+            Span::getCurrent()->setAttribute('b8im.permission.slug', (string) $permissions['slug']);
+        }
 
         if (!empty($permissions) && !empty($permissions['slug'])) {
             // 用户权限缓存
@@ -63,7 +82,6 @@ class CheckAdminAuth implements MiddlewareInterface
                 throw new SystemException('权限不足，无法访问或操作');
             }
         }
-        return $handler($request);
     }
 
     /**

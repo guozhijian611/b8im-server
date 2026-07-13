@@ -63,6 +63,7 @@ final class CrossDomain implements MiddlewareInterface
                 static fn (string $header): string => implode('-', array_map('ucfirst', explode('-', $header))),
                 TrustedCorsPolicy::ALLOWED_HEADERS,
             )),
+            'Access-Control-Expose-Headers' => 'X-Trace-Id',
             'Access-Control-Max-Age' => '600',
         ]);
     }

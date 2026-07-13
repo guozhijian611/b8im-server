@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace plugin\saimulti\service\web;
 
 use plugin\saimulti\exception\ApiException;
+use OpenTelemetry\API\Trace\Span;
+use plugin\saimulti\service\trace\Telemetry;
 use support\think\Db;
 
 final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
@@ -895,12 +897,21 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 }
             }
             if ($notifyAll && $descriptionChanged) {
-                $noticeState = $this->appendGroupDescriptionNotice(
-                    $organization,
-                    $conversationId,
-                    $operatorUserId,
-                    $description,
-                    $now,
+                $noticeState = Telemetry::inSpan(
+                    'b8im.message.notice.persist',
+                    'message.notice.persist',
+                    [
+                        'b8im.organization' => $organization,
+                        'b8im.conversation_id' => $conversationId,
+                        'b8im.conversation_type' => self::CONVERSATION_GROUP,
+                    ],
+                    fn (): array => $this->appendGroupDescriptionNotice(
+                        $organization,
+                        $conversationId,
+                        $operatorUserId,
+                        $description,
+                        $now,
+                    ),
                 );
                 $noticeMessage = $noticeState['message'];
                 $noticeRecipientUserIds = $noticeState['recipient_user_ids'];
@@ -1335,6 +1346,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             'mention_all' => true,
         ];
         $messageId = 'n' . bin2hex(random_bytes(16));
+        Span::getCurrent()->setAttribute('b8im.message_id', $messageId);
         $clientMessageId = 'web-notice-' . $messageId;
         Db::execute(
             'INSERT INTO ' . $this->quoteShard($shardTable) . '
@@ -1469,6 +1481,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             'message' => $realtimeMessage,
             'created_at' => $now,
         ];
+        $traceHeaders = Telemetry::currentTraceHeaders();
         Db::table('im_message_outbox')->insert([
             'organization' => $organization,
             'event_type' => 'message.created',
@@ -1478,6 +1491,8 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             'conversation_id' => $conversationId,
             'conversation_type' => self::CONVERSATION_GROUP,
             'payload_json' => json_encode($eventPayload, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR),
+            'traceparent' => $traceHeaders['traceparent'] ?? null,
+            'tracestate' => $traceHeaders['tracestate'] ?? null,
             'status' => 1,
             'retry_count' => 0,
             'next_retry_at' => $now,

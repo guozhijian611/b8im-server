@@ -53,7 +53,8 @@ final class WebCors implements MiddlewareInterface
         $headers = [
             'Vary' => 'Origin',
             'Access-Control-Allow-Methods' => 'GET, POST, PUT, DELETE, OPTIONS',
-            'Access-Control-Allow-Headers' => 'Authorization, Content-Type, App-Id, X-Device-Id',
+            'Access-Control-Allow-Headers' => 'Authorization, Content-Type, App-Id, X-Device-Id, Traceparent, Tracestate',
+            'Access-Control-Expose-Headers' => 'X-Trace-Id',
             'Access-Control-Max-Age' => '600',
         ];
         if ($origin !== '' && $allowedOrigin !== '' && hash_equals($allowedOrigin, strtolower($origin))) {

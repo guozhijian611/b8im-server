@@ -17,6 +17,8 @@ use support\think\Db;
 use Webman\Http\Request;
 use Webman\Http\Response;
 use Webman\MiddlewareInterface;
+use OpenTelemetry\API\Trace\Span;
+use plugin\saimulti\service\trace\Telemetry;
 
 final class CheckWebLogin implements MiddlewareInterface
 {
@@ -28,12 +30,25 @@ final class CheckWebLogin implements MiddlewareInterface
 
     public function process(Request $request, callable $handler): Response
     {
+        Telemetry::inSpan(
+            'b8im.auth.web.session',
+            'auth.web.session',
+            ['b8im.auth.scope' => 'web'],
+            fn () => $this->authenticate($request),
+        );
+
+        return $handler($request);
+    }
+
+    private function authenticate(Request $request): void
+    {
         if ($request->method() === 'OPTIONS') {
-            return $handler($request);
+            return;
         }
 
         $organization = (new WebOrganizationResolver())->fromRequest($request);
         $organizationId = (int) $organization['id'];
+        Span::getCurrent()->setAttribute('b8im.organization', $organizationId);
         $deploymentId = (string) $organization['deployment_id'];
         $tokens = new WebTokenService();
         $claims = $tokens->verifyAccess(
@@ -83,7 +98,6 @@ final class CheckWebLogin implements MiddlewareInterface
             );
         }
 
-        return $handler($request);
     }
 
     private function moduleRequired(string $controller, string $action): ?ModuleRequired

@@ -6,6 +6,7 @@
 // +----------------------------------------------------------------------
 namespace plugin\saimulti\exception;
 
+use plugin\saimulti\app\middleware\HttpTrace;
 use Webman\Http\Request;
 use Webman\Http\Response;
 use support\exception\BusinessException;
@@ -17,6 +18,11 @@ class ApiException extends BusinessException
 {
     public function render(Request $request): ?Response
     {
-        return json(['code' => $this->getCode() ?: 500, 'message' => $this->getMessage()]);
+        $response = json(['code' => $this->getCode() ?: 500, 'message' => $this->getMessage()]);
+        $traceId = $request->properties[HttpTrace::REQUEST_TRACE_ID] ?? null;
+
+        return is_string($traceId) && preg_match('/^[0-9a-f]{32}$/', $traceId) === 1
+            ? $response->withHeader('X-Trace-Id', $traceId)
+            : $response;
     }
 }

@@ -64,6 +64,17 @@ $trace = [
                 ['key' => 'b8im.organization', 'type' => 'string', 'value' => '7'],
                 ['key' => 'b8im.message_id', 'type' => 'string', 'value' => 'msg-7'],
                 ['key' => 'authorization', 'type' => 'string', 'value' => 'Bearer secret'],
+                ['key' => 'http.request.body', 'type' => 'string', 'value' => 'private request'],
+                ['key' => 'http.response.body', 'type' => 'string', 'value' => 'private response'],
+                ['key' => 'db.statement', 'type' => 'string', 'value' => 'SELECT secret'],
+                ['key' => 'sql.query', 'type' => 'string', 'value' => 'UPDATE secret'],
+                ['key' => 'attachment.signed_url', 'type' => 'string', 'value' => 'https://secret'],
+                ['key' => 'url.query', 'type' => 'string', 'value' => 'token=secret'],
+                ['key' => 'url.full', 'type' => 'string', 'value' => 'https://secret/path?token=secret'],
+                ['key' => 'file.name', 'type' => 'string', 'value' => 'private.pdf'],
+                ['key' => 'user.email', 'type' => 'string', 'value' => 'user@example.test'],
+                ['key' => 'user.phone_number', 'type' => 'string', 'value' => '13800000000'],
+                ['key' => 'safe.label', 'type' => 'string', 'value' => 'visible'],
             ],
             'logs' => [],
         ],
@@ -85,7 +96,11 @@ $trace = [
             ],
             'logs' => [[
                 'timestamp' => 1_700_000_000_055_000,
-                'fields' => [['key' => 'event', 'type' => 'string', 'value' => 'exception']],
+                'fields' => [
+                    ['key' => 'event', 'type' => 'string', 'value' => 'exception'],
+                    ['key' => 'exception.message', 'type' => 'string', 'value' => 'private exception'],
+                    ['key' => 'exception.stacktrace', 'type' => 'string', 'value' => '/private/source.php:12'],
+                ],
             ]],
         ],
     ],
@@ -144,6 +159,30 @@ $assert($detail['spans'][0]['parent_span_id'] === null, '根 Span 父级应为 n
 $assert($detail['spans'][1]['parent_span_id'] === '1111111111111111', '子 Span 父级识别错误');
 $assert($detail['spans'][1]['error'] === true && $detail['spans'][1]['status'] === 'error', '错误 Span 状态未归一化');
 $assert($detail['spans'][0]['tags']['authorization'] === '[REDACTED]', '敏感 Trace 标签未脱敏');
+$sensitiveKeys = [
+    'http.request.body',
+    'http.response.body',
+    'db.statement',
+    'sql.query',
+    'attachment.signed_url',
+    'url.query',
+    'url.full',
+    'file.name',
+    'user.email',
+    'user.phone_number',
+];
+foreach ($sensitiveKeys as $sensitiveKey) {
+    $assert(
+        $detail['spans'][0]['tags'][$sensitiveKey] === '[REDACTED]',
+        "敏感 Trace 标签未脱敏: {$sensitiveKey}",
+    );
+}
+$assert($detail['spans'][0]['tags']['safe.label'] === 'visible', '普通 Trace 标签被误脱敏');
+$assert(
+    $detail['spans'][1]['logs'][0]['fields']['exception.message'] === '[REDACTED]'
+    && $detail['spans'][1]['logs'][0]['fields']['exception.stacktrace'] === '[REDACTED]',
+    '敏感 Span Event 未脱敏',
+);
 $assert($detail['spans'][1]['logs'][0]['time_ms'] === 1_700_000_000_055.0, 'Span 日志时间未转换为毫秒');
 
 $traceSearch = $service->search(['trace_id' => strtoupper($traceId), 'limit' => 1]);

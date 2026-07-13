@@ -359,14 +359,9 @@ final class JaegerTraceQueryService
                 continue;
             }
             $key = $tag['key'];
-            $result[$key] = $this->isSensitiveKey($key) ? '[REDACTED]' : ($tag['value'] ?? null);
+            $result[$key] = TraceDataPolicy::isSensitiveKey($key) ? '[REDACTED]' : ($tag['value'] ?? null);
         }
         return $result;
-    }
-
-    private function isSensitiveKey(string $key): bool
-    {
-        return preg_match('/(?:authorization|cookie|password|passwd|secret|token|api[_-]?key|message[._-]?(?:body|content))/i', $key) === 1;
     }
 
     private function firstTag(array $tags, array $keys): ?string

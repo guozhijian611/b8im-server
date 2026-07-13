@@ -11,6 +11,7 @@ if (is_file($root . '/.env')) {
 
 use plugin\saimulti\service\qa\QaFixtureService;
 use plugin\saimulti\service\OrganizationDiscovery;
+use plugin\saimulti\service\module\ModuleServiceFactory;
 use plugin\saimulti\service\web\ThinkOrmWebImAuthStore;
 use plugin\saimulti\service\web\WebImPolicyGuard;
 use support\think\Db;
@@ -27,13 +28,43 @@ $service = new QaFixtureService();
 $ordinaryOrganization = Db::table('sm_system_organization')->where('id', 1)->find();
 $assert(is_array($ordinaryOrganization), 'Ordinary organization sentinel is missing before the fixture test.');
 $first = $service->provision();
+$firstLicenseVersion = (int) Db::table('sm_tenant_module_license')
+    ->where('organization', (int) $first['organizations'][QaFixtureService::PRIMARY_CODE]['id'])
+    ->where('module_key', 'announcement')
+    ->value('version');
 $second = $service->provision();
+$secondLicenseVersion = (int) Db::table('sm_tenant_module_license')
+    ->where('organization', (int) $second['organizations'][QaFixtureService::PRIMARY_CODE]['id'])
+    ->where('module_key', 'announcement')
+    ->value('version');
 $assert($first['organizations'] === $second['organizations'], 'Idempotent provision changed organization identities.');
+$assert($firstLicenseVersion === $secondLicenseVersion, 'Idempotent provision changed announcement license version.');
 $primary = (int) $first['organizations'][QaFixtureService::PRIMARY_CODE]['id'];
 $isolated = (int) $first['organizations'][QaFixtureService::ISOLATED_CODE]['id'];
 $assert($primary !== $isolated, 'Primary and isolated organizations collapsed.');
 $assert(Db::table('im_user')->where('organization', $primary)->whereIn('account', ['qa_im_a', 'qa_im_b'])->count() === 2, 'Primary IM users are missing.');
 $assert(Db::table('im_user')->where('organization', $isolated)->where('account', 'qa_im_x')->count() === 1, 'Isolated IM user is missing.');
+$announcementLicense = Db::table('sm_tenant_module_license')
+    ->where('organization', $primary)
+    ->where('module_key', 'announcement')
+    ->whereNull('delete_time')
+    ->find();
+$assert(
+    is_array($announcementLicense)
+    && $announcementLicense['status'] === 'ENABLED'
+    && $announcementLicense['remark'] === QaFixtureService::MARKER
+    && $announcementLicense['expire_at'] === null,
+    'Primary QA organization announcement license is not enabled.',
+);
+$assert(
+    ModuleServiceFactory::access()->isAvailable(
+        $primary,
+        'announcement',
+        'server',
+        'announcement.web.read',
+    ),
+    'Primary QA organization cannot pass the announcement.web.read license boundary.',
+);
 $friendships = Db::table('im_friend_relation')
     ->where('organization', $primary)
     ->whereIn('user_id', ['qa-im-user-a', 'qa-im-user-b'])
@@ -62,9 +93,11 @@ $assert($authStore->findActiveLoginUser($isolated, 'qa_im_a') === null, 'Cross-o
 $service->cleanup();
 $assert(Db::table('sm_system_organization')->whereIn('enterprise_code', [QaFixtureService::PRIMARY_CODE, QaFixtureService::ISOLATED_CODE])->count() === 0, 'Cleanup left QA organizations behind.');
 $assert(Db::table('sm_organization_route_publish')->whereIn('organization', [$primary, $isolated])->count() === 0, 'Cleanup left QA routing publications behind.');
+$assert(Db::table('sm_tenant_module_license')->whereIn('organization', [$primary, $isolated])->count() === 0, 'Cleanup left QA module licenses behind.');
 $assert(Db::table('sm_server_route_pool')->whereIn('route_pool_id', ['qa-im-primary-local', 'qa-im-isolated-local'])->count() === 0, 'Cleanup left QA route pools behind.');
 $assert(Db::table('sm_system_organization')->where('id', 1)->count() === 1, 'Cleanup damaged an ordinary organization.');
 $final = $service->provision();
 $assert(count($final['im_users']) === 3, 'Final reprovision did not restore all IM users.');
+$assert(($final['announcement_license']['status'] ?? null) === 'ENABLED', 'Final reprovision did not restore announcement license.');
 
 fwrite(STDOUT, json_encode(['passed' => true, 'final_fixture' => $final], JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT) . PHP_EOL);

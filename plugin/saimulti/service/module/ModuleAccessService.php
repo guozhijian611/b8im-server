@@ -8,6 +8,8 @@ use B8im\ModuleSdk\State\SystemModuleStatus;
 use B8im\ModuleSdk\State\TenantModuleStatus;
 use plugin\saimulti\exception\ApiException;
 use Throwable;
+use OpenTelemetry\API\Trace\Span;
+use plugin\saimulti\service\trace\Telemetry;
 
 final class ModuleAccessService
 {
@@ -66,9 +68,23 @@ final class ModuleAccessService
         string $platform = 'server',
         ?string $capability = null,
     ): void {
-        if (!$this->isAvailable($organization, $moduleKey, $platform, $capability)) {
-            throw new ApiException('模块未启用、未授权、已过期或当前平台不支持', self::ACCESS_DENIED);
-        }
+        Telemetry::inSpan(
+            'b8im.module.license',
+            'module.license.tenant',
+            [
+                'b8im.organization' => $organization,
+                'b8im.module_key' => $moduleKey,
+                'b8im.platform' => $platform,
+                'b8im.capability' => $capability ?? 'any',
+            ],
+            function () use ($organization, $moduleKey, $platform, $capability): void {
+                $available = $this->isAvailable($organization, $moduleKey, $platform, $capability);
+                Span::getCurrent()->setAttribute('b8im.module.available', $available);
+                if (!$available) {
+                    throw new ApiException('模块未启用、未授权、已过期或当前平台不支持', self::ACCESS_DENIED);
+                }
+            },
+        );
     }
 
     public function isSystemAvailable(string $moduleKey, string $platform = 'server', ?string $capability = null): bool
@@ -88,9 +104,22 @@ final class ModuleAccessService
 
     public function assertSystemAvailable(string $moduleKey, string $platform = 'server', ?string $capability = null): void
     {
-        if (!$this->isSystemAvailable($moduleKey, $platform, $capability)) {
-            throw new ApiException('系统模块未启用或当前平台不支持', self::ACCESS_DENIED);
-        }
+        Telemetry::inSpan(
+            'b8im.module.license',
+            'module.license.system',
+            [
+                'b8im.module_key' => $moduleKey,
+                'b8im.platform' => $platform,
+                'b8im.capability' => $capability ?? 'any',
+            ],
+            function () use ($moduleKey, $platform, $capability): void {
+                $available = $this->isSystemAvailable($moduleKey, $platform, $capability);
+                Span::getCurrent()->setAttribute('b8im.module.available', $available);
+                if (!$available) {
+                    throw new ApiException('系统模块未启用或当前平台不支持', self::ACCESS_DENIED);
+                }
+            },
+        );
     }
 
     public function isTenantLicensed(int $organization, string $moduleKey): bool
@@ -118,9 +147,18 @@ final class ModuleAccessService
 
     public function assertTenantLicensed(int $organization, string $moduleKey): void
     {
-        if (!$this->isTenantLicensed($organization, $moduleKey)) {
-            throw new ApiException('当前租户未获得有效模块授权', self::ACCESS_DENIED);
-        }
+        Telemetry::inSpan(
+            'b8im.module.license',
+            'module.license.entitlement',
+            ['b8im.organization' => $organization, 'b8im.module_key' => $moduleKey],
+            function () use ($organization, $moduleKey): void {
+                $licensed = $this->isTenantLicensed($organization, $moduleKey);
+                Span::getCurrent()->setAttribute('b8im.module.licensed', $licensed);
+                if (!$licensed) {
+                    throw new ApiException('当前租户未获得有效模块授权', self::ACCESS_DENIED);
+                }
+            },
+        );
     }
 
     /** @return list<string> */

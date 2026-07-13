@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 use Phinx\Config\Config;
 use Phinx\Migration\Manager;
+use OpenTelemetry\SDK\Trace\TracerProvider;
 use plugin\saimulti\exception\ApiException;
+use plugin\saimulti\service\trace\Telemetry;
 use plugin\saimulti\service\web\S3WebImAssetUrlSigner;
 use plugin\saimulti\service\web\ThinkOrmWebImUploadAssetStore;
 use plugin\saimulti\service\web\ThinkOrmWebImControlStore;
@@ -633,14 +635,22 @@ $readState = Db::query(
 )[0];
 $assert((int) $readState['unread_count'] === 0 && (int) $readState['last_read_seq'] === 3, 'Read state mismatch.');
 
-$broadcastGroup = $service->updateGroupProfile(
-    $alice,
-    $conversationId,
-    null,
-    null,
-    'Broadcast description',
-    true,
+$traceProvider = TracerProvider::builder()->build();
+Telemetry::setProviderForTesting($traceProvider);
+$broadcastGroup = Telemetry::inSpan(
+    'test.group-description-notice',
+    'test.group-description-notice',
+    [],
+    fn (): array => $service->updateGroupProfile(
+        $alice,
+        $conversationId,
+        null,
+        null,
+        'Broadcast description',
+        true,
+    ),
 );
+Telemetry::setProviderForTesting(null);
 $notice = $broadcastGroup['notice_message'];
 $assert(
     is_array($notice)
@@ -649,7 +659,8 @@ $assert(
     'notify_all did not return the committed notice to its HTTP origin.',
 );
 $outbox = $pdo->prepare(
-    'SELECT message_id, payload_json, next_retry_at, locked_until, worker_id, claim_token, published_at
+    'SELECT message_id, payload_json, traceparent, tracestate,
+            next_retry_at, locked_until, worker_id, claim_token, published_at
        FROM im_message_outbox
       WHERE organization = 901 AND event_type = "message.created"
       ORDER BY id DESC LIMIT 1',
@@ -662,12 +673,14 @@ $outboxPayload = $outboxRow === false
 $assert(
     $outboxRow !== false
     && is_array($outboxPayload)
+    && preg_match('/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/', (string) $outboxRow['traceparent']) === 1
+    && $outboxRow['tracestate'] === null
     && $outboxRow['next_retry_at'] === $now
     && $outboxRow['locked_until'] === null
     && $outboxRow['worker_id'] === null
     && $outboxRow['claim_token'] === null
     && $outboxRow['published_at'] === null,
-    'Group notice did not use the final outbox lease schema.',
+    'Group notice did not use the final outbox trace/lease schema.',
 );
 $assert(
     is_array($outboxPayload)

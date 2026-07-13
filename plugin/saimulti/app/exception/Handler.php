@@ -11,6 +11,7 @@ use Webman\Http\Request;
 use Webman\Http\Response;
 use Webman\Exception\ExceptionHandler;
 use plugin\saimulti\exception\ApiException;
+use plugin\saimulti\app\middleware\HttpTrace;
 
 /**
  * 异常处理类
@@ -61,7 +62,13 @@ class Handler extends ExceptionHandler
                 'trace' => explode("\n", $exception->getTraceAsString())
             ];
         }
-        return new Response(200, ['Content-Type' => 'application/json;charset=utf-8'], json_encode($json));
+        $headers = ['Content-Type' => 'application/json;charset=utf-8'];
+        $traceId = $request->properties[HttpTrace::REQUEST_TRACE_ID] ?? null;
+        if (is_string($traceId) && preg_match('/^[0-9a-f]{32}$/', $traceId) === 1) {
+            $headers['X-Trace-Id'] = $traceId;
+        }
+
+        return new Response(200, $headers, json_encode($json));
     }
 
     /** @param array<string|int, mixed> $value */

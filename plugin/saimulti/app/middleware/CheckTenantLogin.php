@@ -14,6 +14,8 @@ use Tinywan\Jwt\JwtToken;
 use plugin\saimulti\exception\ApiException;
 use plugin\saimulti\service\TenantContext;
 use think\facade\Db;
+use OpenTelemetry\API\Trace\Span;
+use plugin\saimulti\service\trace\Telemetry;
 
 /**
  * 租户登录检查中间件
@@ -21,6 +23,18 @@ use think\facade\Db;
 class CheckTenantLogin implements MiddlewareInterface
 {
     public function process(Request $request, callable $handler): Response
+    {
+        Telemetry::inSpan(
+            'b8im.auth.tenant.login',
+            'auth.tenant.login',
+            ['b8im.auth.scope' => 'tenant'],
+            fn () => $this->authenticate($request),
+        );
+
+        return $handler($request);
+    }
+
+    private function authenticate(Request $request): void
     {
         // 通过反射获取控制器哪些方法不需要登录
         $controller = new ReflectionClass($request->controller);
@@ -41,6 +55,7 @@ class CheckTenantLogin implements MiddlewareInterface
             }
 
             $organization = TenantContext::parseOrganization($token['organization']);
+            Span::getCurrent()->setAttribute('b8im.organization', $organization);
             TenantContext::assertRequestMatches($organization);
 
             $tenant = Db::table('sm_tenant_user')
@@ -67,6 +82,5 @@ class CheckTenantLogin implements MiddlewareInterface
             $request->setHeader('check_saimulti_login', true);
             $request->setHeader('check_saimulti_tenant', $token);
         }
-        return $handler($request);
     }
 }

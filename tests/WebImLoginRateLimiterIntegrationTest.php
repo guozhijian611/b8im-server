@@ -64,6 +64,12 @@ try {
         $account,
         $accountIp,
     ));
+    $accountLimiter->resetAccountAttempts($organization, $account);
+    $assert($redis->exists($cacheKeys[0]) === 0, 'Account limiter reset did not delete the exact account key.');
+    $assert($redis->exists($store->getCacheKey(
+        'web_im_login:ip:' . hash('sha256', $accountIp),
+    )) === 1, 'Account limiter reset unexpectedly deleted the IP key.');
+    $accountLimiter->assertAllowed($organization, $account, $accountIp);
 
     $ipLimiter = new RedisWebImLoginRateLimiter(100, 2, 30);
     $ipLimiter->assertAllowed($organization, $accounts[1], $ipScope);

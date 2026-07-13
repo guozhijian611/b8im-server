@@ -17,6 +17,8 @@ use plugin\saimulti\utils\Captcha;
 use support\Log;
 use support\Request;
 use support\Response;
+use OpenTelemetry\API\Trace\SpanInterface;
+use plugin\saimulti\service\trace\Telemetry;
 
 /**
  * 登录控制器
@@ -43,19 +45,29 @@ class LoginController extends OpenController
      */
     public function adminLogin(Request $request): Response
     {
-        $username = $request->post('username');
-        $password = $request->post('password');
-        $type = $request->post('type', 'pc');
+        return Telemetry::inSpan(
+            'b8im.auth.admin.login',
+            'auth.admin.login',
+            ['b8im.auth.scope' => 'admin'],
+            function (SpanInterface $span) use ($request): Response {
+                $username = $request->post('username');
+                $password = $request->post('password');
+                $type = $request->post('type', 'pc');
 
-        $code = $request->post('code', '');
-        $uuid = $request->post('uuid', '');
-        $captcha = new Captcha();
-        if (!$captcha->checkCaptcha($uuid, $code)) {
-            return $this->fail('验证码错误');
-        }
-        $logic = new AdminLogic();
-        $data = $logic->login($username, $password, $type);
-        return $this->success($data);
+                $code = $request->post('code', '');
+                $uuid = $request->post('uuid', '');
+                $captcha = new Captcha();
+                if (!$captcha->checkCaptcha($uuid, $code)) {
+                    Telemetry::recordError($span, new ApiException('验证码校验失败', 401), 'auth.admin.login');
+
+                    return $this->fail('验证码错误');
+                }
+                $logic = new AdminLogic();
+                $data = $logic->login($username, $password, $type);
+
+                return $this->success($data);
+            },
+        );
     }
 
     /**
@@ -65,19 +77,29 @@ class LoginController extends OpenController
      */
     public function tenantLogin(Request $request): Response
     {
-        $username = $request->post('username');
-        $password = $request->post('password');
-        $type = $request->post('type', 'pc');
+        return Telemetry::inSpan(
+            'b8im.auth.tenant.login',
+            'auth.tenant.login',
+            ['b8im.auth.scope' => 'tenant'],
+            function (SpanInterface $span) use ($request): Response {
+                $username = $request->post('username');
+                $password = $request->post('password');
+                $type = $request->post('type', 'pc');
 
-        $code = $request->post('code', '');
-        $uuid = $request->post('uuid', '');
-        $captcha = new Captcha();
-        if (!$captcha->checkCaptcha($uuid, $code)) {
-            return $this->fail('验证码错误');
-        }
-        $logic = new UserLogic();
-        $data = $logic->login($username, $password, $type);
-        return $this->success($data);
+                $code = $request->post('code', '');
+                $uuid = $request->post('uuid', '');
+                $captcha = new Captcha();
+                if (!$captcha->checkCaptcha($uuid, $code)) {
+                    Telemetry::recordError($span, new ApiException('验证码校验失败', 401), 'auth.tenant.login');
+
+                    return $this->fail('验证码错误');
+                }
+                $logic = new UserLogic();
+                $data = $logic->login($username, $password, $type);
+
+                return $this->success($data);
+            },
+        );
     }
 
     /**
@@ -173,7 +195,8 @@ class LoginController extends OpenController
         return [
             'Access-Control-Allow-Origin' => '*',
             'Access-Control-Allow-Methods' => 'GET, OPTIONS',
-            'Access-Control-Allow-Headers' => 'Content-Type, X-Device-Id, If-None-Match',
+            'Access-Control-Allow-Headers' => 'Content-Type, X-Device-Id, If-None-Match, Traceparent, Tracestate',
+            'Access-Control-Expose-Headers' => 'X-Trace-Id',
             'Access-Control-Max-Age' => '600',
         ];
     }

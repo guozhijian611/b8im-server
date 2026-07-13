@@ -4,7 +4,11 @@ declare(strict_types=1);
 
 namespace plugin\saimulti\service\qa;
 
+use B8im\ModuleSdk\State\SystemModuleStatus;
+use B8im\ModuleSdk\State\TenantModuleStatus;
+use plugin\saimulti\service\module\ModuleServiceFactory;
 use plugin\saimulti\service\routing\RoutingConfigService;
+use plugin\saimulti\service\web\RedisWebImLoginRateLimiter;
 use RuntimeException;
 use support\think\Db;
 
@@ -22,7 +26,7 @@ final class QaFixtureService
     /** @return array<string, mixed> */
     public function provision(): array
     {
-        return Db::transaction(function (): array {
+        $fixture = Db::transaction(function (): array {
             $this->databaseName();
             $now = date('Y-m-d H:i:s');
             $this->resetAdmin($now);
@@ -31,6 +35,7 @@ final class QaFixtureService
             $this->upsertTenant((int) $primary['id'], $now);
             $this->upsertPolicy((int) $primary['id'], $now);
             $this->upsertPolicy((int) $isolated['id'], $now);
+            $this->upsertAnnouncementLicense((int) $primary['id'], $now);
             $this->upsertRouting((int) $primary['id'], self::PRIMARY_CODE);
             $this->upsertRouting((int) $isolated['id'], self::ISOLATED_CODE);
             $this->upsertImUser((int) $primary['id'], 'qa-im-user-a', 'qa_im_a', 'QA IM User A', '89000001', $now);
@@ -40,6 +45,32 @@ final class QaFixtureService
 
             return $this->status();
         });
+
+        ModuleServiceFactory::access()->invalidate(
+            (int) $fixture['organizations'][self::PRIMARY_CODE]['id'],
+            'announcement',
+        );
+        $this->resetImLoginRateLimits($fixture);
+
+        return $fixture;
+    }
+
+    /** @param array<string, mixed> $fixture */
+    private function resetImLoginRateLimits(array $fixture): void
+    {
+        $allowedAccounts = ['qa_im_a' => true, 'qa_im_b' => true, 'qa_im_x' => true];
+        $limiter = new RedisWebImLoginRateLimiter();
+        foreach ((array) ($fixture['im_users'] ?? []) as $user) {
+            if (!is_array($user)) {
+                continue;
+            }
+            $account = (string) ($user['account'] ?? '');
+            $organization = (int) ($user['organization'] ?? 0);
+            if (!isset($allowedAccounts[$account]) || $organization <= 0) {
+                throw new RuntimeException('Refusing to reset a non-QA login limiter scope.');
+            }
+            $limiter->resetAccountAttempts($organization, $account);
+        }
     }
 
     /** @return array<string, mixed> */
@@ -132,6 +163,17 @@ final class QaFixtureService
                 throw new RuntimeException('QA IM credentials are not valid: ' . $user['account']);
             }
         }
+        $announcementLicense = Db::table('sm_tenant_module_license')
+            ->where('organization', $primaryId)
+            ->where('module_key', 'announcement')
+            ->whereNull('delete_time')
+            ->find();
+        if (!$announcementLicense
+            || !hash_equals(TenantModuleStatus::ENABLED->value, (string) $announcementLicense['status'])
+            || !hash_equals(self::MARKER, (string) ($announcementLicense['remark'] ?? ''))
+            || $announcementLicense['expire_at'] !== null) {
+            throw new RuntimeException('QA primary organization announcement license is not enabled and trusted.');
+        }
 
         return [
             'marker' => self::MARKER,
@@ -149,6 +191,12 @@ final class QaFixtureService
                 'account' => (string) $user['account'],
                 'password' => self::IM_PASSWORD,
             ], $users),
+            'announcement_license' => [
+                'organization' => $primaryId,
+                'module_key' => 'announcement',
+                'status' => TenantModuleStatus::ENABLED->value,
+                'remark' => self::MARKER,
+            ],
         ];
     }
 
@@ -245,6 +293,57 @@ final class QaFixtureService
         } else {
             Db::table('sm_tenant_im_policy')->insert($data + ['organization' => $organization, 'version' => 1, 'create_time' => $now]);
         }
+    }
+
+    private function upsertAnnouncementLicense(int $organization, string $now): void
+    {
+        $module = Db::table('sm_module')
+            ->where('module_key', 'announcement')
+            ->whereNull('delete_time')
+            ->find();
+        if (!$module || !hash_equals(SystemModuleStatus::ENABLED->value, (string) $module['status'])) {
+            throw new RuntimeException('QA fixtures require the existing announcement module to be ENABLED.');
+        }
+
+        $license = Db::table('sm_tenant_module_license')
+            ->where('organization', $organization)
+            ->where('module_key', 'announcement')
+            ->find();
+        if ($license
+            && hash_equals(TenantModuleStatus::ENABLED->value, (string) $license['status'])
+            && hash_equals(self::MARKER, (string) ($license['remark'] ?? ''))
+            && $license['expire_at'] === null
+            && $license['delete_time'] === null) {
+            return;
+        }
+
+        $data = [
+            'status' => TenantModuleStatus::ENABLED->value,
+            'expire_at' => null,
+            'granted_by' => null,
+            'revoked_by' => null,
+            'authorized_at' => $now,
+            'enabled_at' => $now,
+            'disabled_at' => null,
+            'revoked_at' => null,
+            'remark' => self::MARKER,
+            'update_time' => $now,
+            'delete_time' => null,
+        ];
+        if ($license) {
+            Db::table('sm_tenant_module_license')->where('id', (int) $license['id'])->update($data + [
+                'version' => (int) $license['version'] + 1,
+            ]);
+
+            return;
+        }
+
+        Db::table('sm_tenant_module_license')->insert($data + [
+            'organization' => $organization,
+            'module_key' => 'announcement',
+            'version' => 1,
+            'create_time' => $now,
+        ]);
     }
 
     private function upsertRouting(int $organization, string $code): void

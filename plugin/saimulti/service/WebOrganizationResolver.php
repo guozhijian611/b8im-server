@@ -8,13 +8,24 @@ use plugin\saimulti\exception\ApiException;
 use plugin\saimulti\service\routing\RoutingConfigService;
 use support\think\Db;
 use Webman\Http\Request;
+use plugin\saimulti\service\trace\Telemetry;
 
 final class WebOrganizationResolver
 {
     /** @return array<string, mixed> */
     public function fromRequest(Request $request): array
     {
-        return $this->resolve(TenantContext::parseOrganization($request->header('App-Id')));
+        return Telemetry::inSpan(
+            'b8im.tenant.resolve',
+            'tenant.resolve',
+            ['b8im.context.source' => 'app_id'],
+            function () use ($request): array {
+                $organization = TenantContext::parseOrganization($request->header('App-Id'));
+                \OpenTelemetry\API\Trace\Span::getCurrent()->setAttribute('b8im.organization', $organization);
+
+                return $this->resolve($organization);
+            },
+        );
     }
 
     /** @return array<string, mixed> */

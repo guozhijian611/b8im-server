@@ -8,6 +8,7 @@ use Closure;
 use plugin\saimulti\exception\ApiException;
 use plugin\saimulti\service\OrganizationDiscovery;
 use plugin\saimulti\service\WebTokenService;
+use plugin\saimulti\service\trace\Telemetry;
 
 final class WebImAuthService
 {
@@ -48,6 +49,31 @@ final class WebImAuthService
      * @return array{organization: int, deployment_id: string, token: array<string, mixed>, user: array<string, mixed>}
      */
     public function login(
+        array $organization,
+        string $account,
+        string $password,
+        string $deviceId,
+        string $clientIp,
+    ): array {
+        return Telemetry::inSpan(
+            'b8im.auth.web.login',
+            'auth.web.login',
+            [
+                'b8im.auth.scope' => 'web',
+                'b8im.organization' => (int) ($organization['id'] ?? 0),
+            ],
+            fn (): array => $this->loginInternal(
+                $organization,
+                $account,
+                $password,
+                $deviceId,
+                $clientIp,
+            ),
+        );
+    }
+
+    /** @param array<string, mixed> $organization @return array<string, mixed> */
+    private function loginInternal(
         array $organization,
         string $account,
         string $password,
@@ -166,6 +192,25 @@ final class WebImAuthService
      * @return array{token: string, expire_at: int, device_id: string, client_id: string}
      */
     public function issueImToken(
+        array $identity,
+        string $deviceId,
+        string $clientId,
+        string $clientIp,
+    ): array {
+        return Telemetry::inSpan(
+            'b8im.auth.im_token.issue',
+            'auth.im_token.issue',
+            [
+                'b8im.auth.scope' => 'im',
+                'b8im.organization' => (int) ($identity['organization'] ?? 0),
+                'b8im.client_family' => 'web',
+            ],
+            fn (): array => $this->issueImTokenInternal($identity, $deviceId, $clientId, $clientIp),
+        );
+    }
+
+    /** @param array<string, mixed> $identity @return array<string, mixed> */
+    private function issueImTokenInternal(
         array $identity,
         string $deviceId,
         string $clientId,

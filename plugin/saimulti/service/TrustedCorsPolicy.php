@@ -15,6 +15,8 @@ final class TrustedCorsPolicy
         'app-id',
         'x-device-id',
         'x-requested-with',
+        'traceparent',
+        'tracestate',
     ];
 
     /** @var array<string, true> */

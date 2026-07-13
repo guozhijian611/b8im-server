@@ -38,10 +38,7 @@ final class RedisWebImLoginRateLimiter implements WebImLoginRateLimiterInterface
             if (!$handler instanceof \Redis) {
                 throw new \RuntimeException('Redis is required for atomic Web IM login limiting.');
             }
-            $accountName = 'web_im_login:account:' . hash(
-                'sha256',
-                $organization . ':' . mb_strtolower($account),
-            );
+            $accountName = self::accountCacheName($organization, $account);
             $ipName = 'web_im_login:ip:' . hash('sha256', $clientIp);
             $counts = $handler->eval(
                 <<<'LUA'
@@ -77,5 +74,32 @@ LUA,
         if ((int) $counts[0] > $this->accountLimit || (int) $counts[1] > $this->ipLimit) {
             throw new ApiException('登录尝试过于频繁，请稍后再试。', self::RATE_LIMITED);
         }
+    }
+
+    /** Reset only one exact account scope; IP limits are intentionally untouched. */
+    public function resetAccountAttempts(int $organization, string $account): void
+    {
+        if ($organization <= 0 || trim($account) === '') {
+            throw new \InvalidArgumentException('Web IM login limiter account scope is invalid.');
+        }
+
+        try {
+            $store = Cache::store();
+            $handler = $store->handler();
+            if (!$handler instanceof \Redis) {
+                throw new \RuntimeException('Redis is required for Web IM login limiter reset.');
+            }
+            $handler->del($store->getCacheKey(self::accountCacheName($organization, $account)));
+        } catch (Throwable $exception) {
+            throw new ApiException('登录服务暂不可用。', self::UNAVAILABLE, $exception);
+        }
+    }
+
+    private static function accountCacheName(int $organization, string $account): string
+    {
+        return 'web_im_login:account:' . hash(
+            'sha256',
+            $organization . ':' . mb_strtolower($account),
+        );
     }
 }
