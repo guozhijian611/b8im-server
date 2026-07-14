@@ -77,6 +77,10 @@ final class OrganizationDiscovery
     public static function normalizeDomain(string $domain): string
     {
         $domain = strtolower(rtrim(trim($domain), '.'));
+        // www 与 @ 同为网站主入口：统一剥掉前导 www. 再匹配 organization.domain
+        if (str_starts_with($domain, 'www.')) {
+            $domain = substr($domain, 4);
+        }
         if (
             $domain === ''
             || strlen($domain) > 64

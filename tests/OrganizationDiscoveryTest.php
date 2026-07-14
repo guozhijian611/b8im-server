@@ -33,6 +33,14 @@ $assert($identifier === 'acme_01', '企业码未规范化');
 $assert($mode === OrganizationDiscovery::MODE_DOMAIN, '域名模式解析失败');
 $assert($identifier === 'im.example.com', '域名未规范化');
 
+[$mode, $identifier] = OrganizationDiscovery::requestIdentifier('domain', '', 'www.idev.love');
+$assert($mode === OrganizationDiscovery::MODE_DOMAIN, 'www 域名模式解析失败');
+$assert($identifier === 'idev.love', 'www 应归一化为裸域');
+$assert(
+    OrganizationDiscovery::normalizeDomain('WWW.Example.COM') === 'example.com',
+    '大小写 www 未归一化',
+);
+
 $expectCode(
     OrganizationDiscovery::INVALID_REQUEST,
     static fn () => OrganizationDiscovery::requestIdentifier('', '', ''),
