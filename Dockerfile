@@ -19,8 +19,9 @@ COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 WORKDIR /app
 
 # b8im-server 在开发工作区中使用 Composer path 依赖。
-# docker-bake.hcl 通过 module-sdk named context 提供该目录。
+# docker-bake.hcl 通过 named context 提供模块目录。
 COPY --from=module-sdk / /b8im-module-sdk
+COPY --from=module-i18n / /b8im-module-i18n
 COPY composer.json composer.lock ./
 
 RUN --mount=type=cache,id=b8im-composer-cache,target=/tmp/composer-cache,sharing=locked \
