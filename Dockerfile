@@ -13,6 +13,7 @@ RUN apk add --no-cache \
         libjpeg-turbo \
         libpng \
         libzip \
+        mariadb-client \
         tzdata \
     && apk add --no-cache --virtual .build-deps \
         $PHPIZE_DEPS \
@@ -57,10 +58,10 @@ RUN php docker/check-runtime.php \
     && composer dump-autoload --no-dev --classmap-authoritative --no-interaction \
     && mkdir -p runtime storage public/storage/temp \
     && chown -R www-data:www-data runtime storage public/storage/temp \
-    && chmod +x docker/entrypoint.sh
+    && chmod +x docker/entrypoint.sh docker/ensure-area-code.sh
 
 EXPOSE 8787
 
-# 启动前默认自动 phinx:migrate；可用 RUN_MIGRATIONS_ON_START=0 关闭。
+# 启动前默认自动迁移并幂等初始化地区编码表。
 ENTRYPOINT ["docker/entrypoint.sh"]
 CMD ["php", "start.php", "start"]

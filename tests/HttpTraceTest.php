@@ -80,13 +80,49 @@ $assert(($first->getAttributes()->get('b8im.endpoint')) === 'ClientConfigControl
 $assert(($first->getAttributes()->get('http.response.status_code')) === 200, 'HTTP status attribute missing.');
 $assert(!Span::getCurrent()->getContext()->isValid(), 'HTTP request context leaked after request completion.');
 
+$businessFailure = new RuntimeException('SQL and token=must-not-be-exported', 10501);
+$businessFailureResponse = new Response(
+    200,
+    ['Content-Type' => 'application/json;charset=utf-8'],
+    json_encode([
+        'code' => 10501,
+        'message' => 'SQL and token=must-not-be-exported',
+        'type' => 'failed',
+    ], JSON_THROW_ON_ERROR),
+);
+$businessFailureResponse->exception($businessFailure);
+$middleware->process($request(), static fn (): Response => $businessFailureResponse);
+$spans = $exporter->getSpans();
+$businessFailureSpan = $spans[1];
+$assert(
+    $businessFailureSpan->getStatus()->getCode() === StatusCode::STATUS_ERROR,
+    'HTTP 200 business failure was not marked ERROR.',
+);
+$assert(
+    $businessFailureSpan->getAttributes()->get('b8im.response.code') === 10501,
+    'Business response code attribute is missing.',
+);
+$assert(
+    $businessFailureSpan->getAttributes()->get('b8im.response.type') === 'failed',
+    'Business response type attribute is missing.',
+);
+$businessFailureEvent = json_encode(
+    $businessFailureSpan->getEvents()[0]->getAttributes()->toArray(),
+    JSON_THROW_ON_ERROR,
+);
+$assert(str_contains($businessFailureEvent, '10501'), 'Business error event lost its stable code.');
+$assert(
+    !str_contains($businessFailureEvent, 'must-not-be-exported'),
+    'Business error event leaked the response or exception message.',
+);
+
 $secondRequest = $request('invalid-client-value');
 $secondResponse = $middleware->process($secondRequest, static fn (): Response => new Response(204));
 $secondTraceId = (string) $secondResponse->getHeader('X-Trace-Id');
 $assert(preg_match('/^[0-9a-f]{32}$/', $secondTraceId) === 1, 'Invalid traceparent did not safely start a new trace.');
 $assert($secondTraceId !== $upstreamTraceId, 'Invalid traceparent incorrectly reused the previous request context.');
 $spans = $exporter->getSpans();
-$assert(!$spans[1]->getParentContext()->isValid(), 'Second request inherited leaked parent context.');
+$assert(!$spans[2]->getParentContext()->isValid(), 'Second request inherited leaked parent context.');
 
 $errorRequest = $request();
 try {
@@ -102,7 +138,7 @@ try {
     );
 }
 $spans = $exporter->getSpans();
-$errorSpan = $spans[2];
+$errorSpan = $spans[3];
 $assert($errorSpan->getStatus()->getCode() === StatusCode::STATUS_ERROR, 'Critical ApiException was not ERROR.');
 $eventJson = json_encode($errorSpan->getEvents()[0]->getAttributes()->toArray(), JSON_THROW_ON_ERROR);
 $assert(!str_contains($eventJson, 'must-not-be-exported'), 'Critical ApiException leaked its message.');

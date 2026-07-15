@@ -12,6 +12,7 @@ use OpenTelemetry\API\Trace\SpanKind;
 use OpenTelemetry\Context\Context;
 use plugin\saimulti\exception\ApiException;
 use plugin\saimulti\service\trace\Telemetry;
+use JsonException;
 use Throwable;
 use Webman\Http\Request;
 use Webman\Http\Response;
@@ -48,11 +49,31 @@ final class HttpTrace implements MiddlewareInterface
             $response = $handler($request);
             $status = $response->getStatusCode();
             $span->setAttribute('http.response.status_code', $status);
-            if ($status >= 500) {
+            $businessCode = $this->businessCode($response);
+            if ($businessCode !== null) {
+                $span->setAttribute('b8im.response.code', $businessCode);
+            }
+            $businessType = $this->businessType($response);
+            if ($businessType !== null) {
+                $span->setAttribute('b8im.response.type', $businessType);
+            }
+
+            if ($businessCode !== null && $businessCode !== 200) {
+                $exception = $response->exception()
+                    ?? new ApiException('Business response failed.', $businessCode);
                 Telemetry::recordError(
                     $span,
-                    new \RuntimeException('HTTP server response failed.', $status),
+                    $exception,
                     $operation,
+                    errorCode: $businessCode,
+                );
+            } elseif ($status >= 500) {
+                Telemetry::recordError(
+                    $span,
+                    $response->exception()
+                        ?? new \RuntimeException('HTTP server response failed.', $status),
+                    $operation,
+                    errorCode: $status,
                 );
             }
 
@@ -93,5 +114,41 @@ final class HttpTrace implements MiddlewareInterface
 
         return in_array($exception->getCode(), [401, 403, 41001, 41002, 41003, 42101, 429, 50301], true)
             || $exception->getCode() >= 500;
+    }
+
+    private function businessCode(Response $response): ?int
+    {
+        $payload = $this->jsonPayload($response);
+        $code = $payload['code'] ?? null;
+
+        return is_int($code) || (is_string($code) && preg_match('/^-?[0-9]+$/D', $code) === 1)
+            ? (int) $code
+            : null;
+    }
+
+    private function businessType(Response $response): ?string
+    {
+        $type = $this->jsonPayload($response)['type'] ?? null;
+
+        return is_string($type) && preg_match('/^[a-zA-Z0-9._-]{1,32}$/D', $type) === 1
+            ? $type
+            : null;
+    }
+
+    /** @return array<string, mixed> */
+    private function jsonPayload(Response $response): array
+    {
+        $body = $response->rawBody();
+        if ($body === '' || strlen($body) > 65536 || $body[0] !== '{') {
+            return [];
+        }
+
+        try {
+            $payload = json_decode($body, true, 16, JSON_THROW_ON_ERROR);
+        } catch (JsonException) {
+            return [];
+        }
+
+        return is_array($payload) ? $payload : [];
     }
 }

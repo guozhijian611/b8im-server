@@ -154,10 +154,13 @@ final class Telemetry
         Throwable $exception,
         string $operation,
         int $retryCount = 0,
+        string|int|null $errorCode = null,
     ): void {
         try {
             $attributes = [
-                'error.code' => self::errorCode($exception),
+                'error.code' => $errorCode === null
+                    ? self::errorCode($exception)
+                    : self::safeText((string) $errorCode, 64),
                 'error.type' => $exception::class,
                 'service' => self::SERVICE_NAME,
                 'operation' => self::safeText($operation, 160),

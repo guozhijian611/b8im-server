@@ -34,7 +34,7 @@ db/saimulti.sql
 db/area_code.sql.gz
 ```
 
-`area_code.sql` 原始文件超过 GitHub 单文件 100MB 限制，因此以 gzip 压缩形式保存。
+`area_code.sql` 原始文件超过 GitHub 单文件 100MB 限制，因此以 gzip 压缩形式保存。Server 镜像启动时会默认校验 `sm_area_code`：表缺失、空表或行数不完整时自动从该压缩 SQL 重建，完整的 `665552` 行则直接跳过。
 
 本机默认开发数据库：
 
@@ -49,6 +49,8 @@ DB_PASSWORD = root
 ```bash
 gzip -dk db/area_code.sql.gz
 ```
+
+仅在明确不需要地区数据的专用运行任务中，才可设置 `RUN_AREA_CODE_INIT_ON_START=0` 跳过初始化。
 
 ## 本机配置
 
