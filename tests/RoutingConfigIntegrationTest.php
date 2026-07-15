@@ -98,9 +98,54 @@ $assert($second['route_pool_version'] === $first['route_pool_version'], '相同�
 $assert($second['published']['web']['routing_version'] === $first['published']['web']['routing_version'] + 1, '重复发布没有递增 routing_version');
 $assert((int) Db::table('sm_server_route_version')->whereIn('route_id', ['local-primary', 'local-backup'])->count() === 2, '相同线路内容没有复用 immutable route version');
 
+$expiredRow = Db::table('sm_organization_route_publish')
+    ->where('deployment_id', 'b8im-local')
+    ->where('organization', 1)
+    ->where('client_family', 'web')
+    ->order('routing_version', 'desc')
+    ->find();
+$expiredSnapshot = json_decode((string) $expiredRow['snapshot_json'], true, 512, JSON_THROW_ON_ERROR);
+$expiredSnapshot['expires_at'] = '2000-01-01T00:00:00+00:00';
+Db::table('sm_organization_route_publish')->where('id', $expiredRow['id'])->update([
+    'snapshot_json' => json_encode($expiredSnapshot, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR),
+]);
+$publishCount = (int) Db::table('sm_organization_route_publish')
+    ->where('deployment_id', 'b8im-local')
+    ->where('organization', 1)
+    ->where('client_family', 'web')
+    ->count();
+$renewed = $service->read(1, 'web');
+$assert($renewed['server_info']['routing_version'] === $second['published']['web']['routing_version'] + 1, '过期快照没有递增 routing_version 原子续签');
+$assert(strtotime($renewed['server_info']['expires_at']) > time(), '续签快照 expires_at 未恢复到未来时间');
+$renewedPayload = [
+    'organization' => 1,
+    'deployment_id' => 'b8im-local',
+    'enterprise_code' => (string) $organization['enterprise_code'],
+    'client_family' => 'web',
+    'server_info' => $renewed['server_info'],
+];
+$renewedSignature = strtr($renewed['routing_signature']['value'], '-_', '+/');
+$renewedSignature .= str_repeat('=', (4 - strlen($renewedSignature) % 4) % 4);
+$assert(sodium_crypto_sign_verify_detached(
+    base64_decode($renewedSignature, true),
+    CanonicalJson::encode($renewedPayload),
+    base64_decode(strtr($signer->publicKey(), '-_', '+/') . str_repeat('=', (4 - strlen($signer->publicKey()) % 4) % 4), true),
+), '续签快照 Ed25519 签名验证失败');
+$assert((int) Db::table('sm_organization_route_publish')
+    ->where('deployment_id', 'b8im-local')
+    ->where('organization', 1)
+    ->where('client_family', 'web')
+    ->count() === $publishCount + 1, '过期快照续签未创建不可变发布记录');
+$service->read(1, 'web');
+$assert((int) Db::table('sm_organization_route_publish')
+    ->where('deployment_id', 'b8im-local')
+    ->where('organization', 1)
+    ->where('client_family', 'web')
+    ->count() === $publishCount + 1, '未过期快照被重复续签');
+
 $contract = (new OrganizationDiscovery(true))->resolve((string) $organization['enterprise_code'], OrganizationDiscovery::MODE_ENTERPRISE_CODE, 'web');
 $assert($contract['client_family'] === 'web', 'appInfo 未返回严格 client_family');
-$assert($contract['server_info']['routing_version'] === $second['published']['web']['routing_version'], 'appInfo 没有读取最新发布快照');
+$assert($contract['server_info']['routing_version'] === $renewed['server_info']['routing_version'], 'appInfo 没有读取最新续签快照');
 $assert($contract['routing_signature']['kid'] === 'routing-test-1', 'appInfo 签名元数据不一致');
 
 echo "RoutingConfigIntegrationTest: {$assertions} assertions passed\n";

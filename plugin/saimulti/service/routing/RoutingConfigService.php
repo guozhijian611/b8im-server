@@ -8,6 +8,8 @@ use DateTimeImmutable;
 use DateTimeZone;
 use plugin\saimulti\exception\ApiException;
 use plugin\saimulti\service\OrganizationDiscovery;
+use plugin\saimulti\service\trace\Telemetry;
+use support\Log;
 use support\think\Db;
 
 final class RoutingConfigService
@@ -93,7 +95,129 @@ final class RoutingConfigService
             throw new ApiException('当前机构尚未发布该客户端线路。', 404);
         }
         $serverInfo = $this->decodeObject((string) $row['snapshot_json'], '线路发布快照');
+        if ($this->snapshotExpired($serverInfo)) {
+            return $this->renewExpiredSnapshot($deploymentId, $organization, $clientFamily);
+        }
 
+        return $this->publishedResult($row, $serverInfo);
+    }
+
+    /** @return array<string, mixed> */
+    private function renewExpiredSnapshot(string $deploymentId, int $organization, string $clientFamily): array
+    {
+        return Db::transaction(function () use ($deploymentId, $organization, $clientFamily): array {
+            $organizationRow = Db::table('sm_system_organization')
+                ->where('id', $organization)
+                ->where('deployment_id', $deploymentId)
+                ->whereNull('delete_time')
+                ->lock(true)
+                ->find();
+            if (!$organizationRow || (int) ($organizationRow['status'] ?? 0) !== 1) {
+                throw new ApiException('机构不存在或已停用。', 404);
+            }
+            $policy = Db::table('sm_organization_route_policy')
+                ->where('deployment_id', $deploymentId)
+                ->where('organization', $organization)
+                ->where('client_family', $clientFamily)
+                ->lock(true)
+                ->find();
+            if (!$policy) {
+                throw new ApiException('当前机构尚未发布该客户端线路。', 404);
+            }
+            $row = Db::table('sm_organization_route_publish')
+                ->where('deployment_id', $deploymentId)
+                ->where('organization', $organization)
+                ->where('client_family', $clientFamily)
+                ->order('routing_version', 'desc')
+                ->lock(true)
+                ->find();
+            if (!$row) {
+                throw new ApiException('当前机构尚未发布该客户端线路。', 404);
+            }
+            $serverInfo = $this->decodeObject((string) $row['snapshot_json'], '线路发布快照');
+            if (!$this->snapshotExpired($serverInfo)) {
+                return $this->publishedResult($row, $serverInfo);
+            }
+
+            $now = new DateTimeImmutable('now', new DateTimeZone(date_default_timezone_get()));
+            $issued = $now->format(DATE_ATOM);
+            $routingVersion = max(
+                (int) ($row['routing_version'] ?? 0),
+                (int) ($policy['current_routing_version'] ?? 0),
+            ) + 1;
+            $serverInfo['routing_version'] = $routingVersion;
+            $serverInfo['server_time'] = $issued;
+            $serverInfo['issued_at'] = $issued;
+            $serverInfo['expires_at'] = $now
+                ->modify('+' . max(300, (int) env('ROUTING_SNAPSHOT_TTL_SECONDS', 86400)) . ' seconds')
+                ->format(DATE_ATOM);
+            $serverInfo['stale_if_error_until'] = $now
+                ->modify('+' . max(600, (int) env('ROUTING_STALE_TTL_SECONDS', 172800)) . ' seconds')
+                ->format(DATE_ATOM);
+            $signature = ($this->signer ?? new RoutingSnapshotSigner())->sign([
+                'organization' => $organization,
+                'deployment_id' => $deploymentId,
+                'enterprise_code' => (string) $organizationRow['enterprise_code'],
+                'client_family' => $clientFamily,
+                'server_info' => $serverInfo,
+            ]);
+            $publishTime = $now->format('Y-m-d H:i:s');
+            Db::table('sm_organization_route_policy')
+                ->where('id', $policy['id'])
+                ->update([
+                    'current_routing_version' => $routingVersion,
+                    'update_time' => $publishTime,
+                ]);
+            Db::table('sm_organization_route_publish')->insert([
+                'deployment_id' => $deploymentId,
+                'organization' => $organization,
+                'client_family' => $clientFamily,
+                'routing_version' => $routingVersion,
+                'route_pool_id' => (string) $row['route_pool_id'],
+                'pool_version' => (int) $row['pool_version'],
+                'snapshot_json' => $this->json($serverInfo),
+                'signature_kid' => $signature['kid'],
+                'signature' => $signature['value'],
+                'publish_time' => $publishTime,
+                'audit_id' => 0,
+            ]);
+            Log::info('routing snapshot renewed', array_merge([
+                'organization' => $organization,
+                'deployment_id' => $deploymentId,
+                'client_family' => $clientFamily,
+                'routing_version' => $routingVersion,
+            ], Telemetry::currentLogContext()));
+
+            return $this->publishedResult([
+                ...$row,
+                'routing_version' => $routingVersion,
+                'snapshot_json' => $this->json($serverInfo),
+                'signature_kid' => $signature['kid'],
+                'signature' => $signature['value'],
+                'publish_time' => $publishTime,
+            ], $serverInfo);
+        });
+    }
+
+    /** @param array<string, mixed> $serverInfo */
+    private function snapshotExpired(array $serverInfo): bool
+    {
+        $expiresAt = trim((string) ($serverInfo['expires_at'] ?? ''));
+        if ($expiresAt === '') {
+            throw new ApiException('线路发布快照缺少 expires_at。', 50302);
+        }
+        try {
+            $expires = new DateTimeImmutable($expiresAt);
+        } catch (\Exception) {
+            throw new ApiException('线路发布快照 expires_at 无效。', 50302);
+        }
+
+        return $expires <= new DateTimeImmutable('now', new DateTimeZone(date_default_timezone_get()));
+    }
+
+    /** @param array<string, mixed> $row @param array<string, mixed> $serverInfo @return array<string, mixed> */
+    private function publishedResult(array $row, array $serverInfo): array
+    {
         return [
             'organization' => (int) $row['organization'],
             'deployment_id' => (string) $row['deployment_id'],
