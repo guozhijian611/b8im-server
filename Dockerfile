@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM php:8.3-cli-alpine AS runtime
+FROM hyperf/hyperf:8.3-alpine-v3.22-base@sha256:14f5722ee789e0c6098d97ecc199bde7fc0cde03ed213e711d7d6310a339e622 AS runtime
 
 ARG APP_ENV=production
 
@@ -8,31 +8,11 @@ ENV APP_ENV=${APP_ENV} \
     COMPOSER_ALLOW_SUPERUSER=1 \
     COMPOSER_CACHE_DIR=/tmp/composer-cache
 
+# PHP 及业务所需扩展由基础镜像预编译提供，应用镜像不编译 PHP 扩展。
 RUN apk add --no-cache \
-        freetype \
-        libjpeg-turbo \
-        libpng \
-        libzip \
         mariadb-client \
         tzdata \
-    && apk add --no-cache --virtual .build-deps \
-        $PHPIZE_DEPS \
-        freetype-dev \
-        libjpeg-turbo-dev \
-        libpng-dev \
-        libzip-dev \
-        linux-headers \
-    && docker-php-ext-configure gd --with-freetype --with-jpeg \
-    && docker-php-ext-install -j"$(nproc)" \
-        gd \
-        pcntl \
-        pdo_mysql \
-        sockets \
-        zip \
-    && pecl install redis \
-    && docker-php-ext-enable redis \
-    && apk del .build-deps \
-    && mv "$PHP_INI_DIR/php.ini-production" "$PHP_INI_DIR/php.ini" \
+    && adduser -S -D -H -u 82 -G www-data www-data \
     && rm -rf /tmp/* /var/cache/apk/*
 
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
