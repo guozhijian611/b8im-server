@@ -1,114 +1,123 @@
 {
-  "name": "workerman/webman",
-  "type": "project",
-  "keywords": [
-    "high performance",
-    "http service"
-  ],
-  "homepage": "https://www.workerman.net",
-  "license": "MIT",
-  "description": "High performance HTTP Service Framework.",
-  "authors": [
-    {
-      "name": "walkor",
-      "email": "walkor@workerman.net",
-      "homepage": "https://www.workerman.net",
-      "role": "Developer"
-    }
-  ],
-  "support": {
-    "email": "walkor@workerman.net",
-    "issues": "https://github.com/walkor/webman/issues",
-    "forum": "https://wenda.workerman.net/",
-    "wiki": "https://workerman.net/doc/webman",
-    "source": "https://github.com/walkor/webman"
-  },
-  "repositories": [
-    {
-      "type": "path",
-      "url": "../b8im-module-sdk",
-      "options": {
-        "symlink": true,
-        "reference": "auto"
-      }
-    }
-  ],
-  "require": {
-    "b8im/module-sdk": "dev-main",
-    "guzzlehttp/guzzle": "^7.14",
-    "php": ">=8.1",
-    "workerman/webman-framework": "^2.1",
-    "monolog/monolog": "^2.0",
-    "webman/console": "^2.2",
-    "webman/database": "^2.1",
-    "illuminate/pagination": "^12.56",
-    "illuminate/events": "^12.56",
-    "symfony/var-dumper": "^7.4",
-    "twig/twig": "^3.24",
-    "vlucas/phpdotenv": "^5.6",
-    "webman/think-orm": "^2.1",
-    "webman/think-cache": "^2.1",
-    "tinywan/jwt": "^1.15",
-    "webman/event": "^1.0",
-    "ramsey/uuid": "^4.9",
-    "webman/captcha": "^1.0",
-    "zoujingli/ip2region": "^3.0",
-    "tinywan/storage": "^1.1",
-    "webman/channel": "^2.1",
-    "workerman/crontab": "^1.0",
-    "openspout/openspout": "^4.28",
-    "robmorgan/phinx": "^0.16.11",
-    "aws/aws-sdk-php": "^3.0",
-    "aliyuncs/oss-sdk-php": "^2.7",
-    "qcloud/cos-sdk-v5": "^2.6",
-    "qiniu/php-sdk": "^7.14",
-    "league/flysystem-aws-s3-v3": "^3.35",
-    "open-telemetry/api": "^1.7",
-    "open-telemetry/sdk": "^1.13",
-    "open-telemetry/exporter-otlp": "1.3.4"
-  },
-  "suggest": {
-    "ext-event": "For better performance. "
-  },
-  "autoload": {
-    "psr-4": {
-      "": "./",
-      "app\\": "./app",
-      "App\\": "./app",
-      "app\\View\\Components\\": "./app/view/components"
-    }
-  },
-  "scripts": {
-    "lint": "@php scripts/php-lint.php",
-    "test:unit": "@php scripts/test-runner.php unit",
-    "test:test-unit": "@test:unit",
-    "test:integration": "@php scripts/test-runner.php integration",
-    "test": [
-      "@test:unit",
-      "@test:integration",
-      "@test:qa-fixtures"
+    "name": "workerman/webman",
+    "type": "project",
+    "keywords": [
+        "high performance",
+        "http service"
     ],
-    "test:cleanup": "@php scripts/test-cleanup.php",
-    "test:qa-fixtures": "@php scripts/qa-fixture-smoke.php",
-    "qa:provision": "@php webman qa:fixtures provision",
-    "qa:status": "@php webman qa:fixtures status",
-    "qa:cleanup": "@php webman qa:fixtures cleanup",
-    "post-package-install": [
-      "support\\Plugin::install"
+    "homepage": "https://www.workerman.net",
+    "license": "MIT",
+    "description": "High performance HTTP Service Framework.",
+    "authors": [
+        {
+            "name": "walkor",
+            "email": "walkor@workerman.net",
+            "homepage": "https://www.workerman.net",
+            "role": "Developer"
+        }
     ],
-    "post-package-update": [
-      "support\\Plugin::install"
+    "support": {
+        "email": "walkor@workerman.net",
+        "issues": "https://github.com/walkor/webman/issues",
+        "forum": "https://wenda.workerman.net/",
+        "wiki": "https://workerman.net/doc/webman",
+        "source": "https://github.com/walkor/webman"
+    },
+    "repositories": [
+        {
+            "type": "path",
+            "url": "../b8im-module-sdk",
+            "options": {
+                "symlink": true,
+                "reference": "auto"
+            }
+        },
+        {
+            "type": "path",
+            "url": "../b8im-module-i18n",
+            "options": {
+                "symlink": true,
+                "reference": "auto"
+            }
+        }
     ],
-    "pre-package-uninstall": [
-      "support\\Plugin::uninstall"
-    ],
-    "post-create-project-cmd": [
-      "support\\Setup::run"
-    ],
-    "setup-webman": [
-      "support\\Setup::run"
-    ]
-  },
-  "minimum-stability": "dev",
-  "prefer-stable": true
+    "require": {
+        "b8im/module-sdk": "dev-main",
+        "guzzlehttp/guzzle": "^7.14",
+        "php": ">=8.1",
+        "workerman/webman-framework": "^2.1",
+        "monolog/monolog": "^2.0",
+        "webman/console": "^2.2",
+        "webman/database": "^2.1",
+        "illuminate/pagination": "^12.56",
+        "illuminate/events": "^12.56",
+        "symfony/var-dumper": "^7.4",
+        "twig/twig": "^3.24",
+        "vlucas/phpdotenv": "^5.6",
+        "webman/think-orm": "^2.1",
+        "webman/think-cache": "^2.1",
+        "tinywan/jwt": "^1.15",
+        "webman/event": "^1.0",
+        "ramsey/uuid": "^4.9",
+        "webman/captcha": "^1.0",
+        "zoujingli/ip2region": "^3.0",
+        "tinywan/storage": "^1.1",
+        "webman/channel": "^2.1",
+        "workerman/crontab": "^1.0",
+        "openspout/openspout": "^4.28",
+        "robmorgan/phinx": "^0.16.11",
+        "aws/aws-sdk-php": "^3.0",
+        "aliyuncs/oss-sdk-php": "^2.7",
+        "qcloud/cos-sdk-v5": "^2.6",
+        "qiniu/php-sdk": "^7.14",
+        "league/flysystem-aws-s3-v3": "^3.35",
+        "open-telemetry/api": "^1.7",
+        "open-telemetry/sdk": "^1.13",
+        "open-telemetry/exporter-otlp": "1.3.4",
+        "b8im/module-i18n": "dev-main"
+    },
+    "suggest": {
+        "ext-event": "For better performance. "
+    },
+    "autoload": {
+        "psr-4": {
+            "": "./",
+            "app\\": "./app",
+            "App\\": "./app",
+            "app\\View\\Components\\": "./app/view/components"
+        }
+    },
+    "scripts": {
+        "lint": "@php scripts/php-lint.php",
+        "test:unit": "@php scripts/test-runner.php unit",
+        "test:test-unit": "@test:unit",
+        "test:integration": "@php scripts/test-runner.php integration",
+        "test": [
+            "@test:unit",
+            "@test:integration",
+            "@test:qa-fixtures"
+        ],
+        "test:cleanup": "@php scripts/test-cleanup.php",
+        "test:qa-fixtures": "@php scripts/qa-fixture-smoke.php",
+        "qa:provision": "@php webman qa:fixtures provision",
+        "qa:status": "@php webman qa:fixtures status",
+        "qa:cleanup": "@php webman qa:fixtures cleanup",
+        "post-package-install": [
+            "support\\Plugin::install"
+        ],
+        "post-package-update": [
+            "support\\Plugin::install"
+        ],
+        "pre-package-uninstall": [
+            "support\\Plugin::uninstall"
+        ],
+        "post-create-project-cmd": [
+            "support\\Setup::run"
+        ],
+        "setup-webman": [
+            "support\\Setup::run"
+        ]
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
 }

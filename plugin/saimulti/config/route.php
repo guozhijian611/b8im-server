@@ -65,6 +65,8 @@ Route::group('/saimulti', function () {
 	Route::get('/web/announcement/index', [\plugin\saimulti\app\controller\web\AnnouncementController::class, 'index']);
 	Route::get('/web/announcement/read', [\plugin\saimulti\app\controller\web\AnnouncementController::class, 'read']);
 	Route::post('/web/announcement/acknowledge', [\plugin\saimulti\app\controller\web\AnnouncementController::class, 'acknowledge']);
+	Route::get('/web/i18n/locales', [\plugin\saimulti\app\controller\web\I18nController::class, 'locales']);
+	Route::get('/web/i18n/messages', [\plugin\saimulti\app\controller\web\I18nController::class, 'messages']);
 
 	foreach ([
 		'/web/im/imToken',
@@ -101,6 +103,8 @@ Route::group('/saimulti', function () {
 		'/web/announcement/index',
 		'/web/announcement/read',
 		'/web/announcement/acknowledge',
+		'/web/i18n/locales',
+		'/web/i18n/messages',
 	] as $path) {
 		Route::options($path, static fn () => response('', 204));
 	}
@@ -198,6 +202,13 @@ Route::group("/saimulti", function () {
 	// 内置公告模块（权限、系统启用状态由现有鉴权中间件统一校验）
 	saiMultiRoute('/admin/announcement', \plugin\saimulti\app\controller\admin\AnnouncementController::class);
 
+	// 商业模块 i18n（平台语言与词条）
+	saiMultiRoute('/admin/i18n', \plugin\saimulti\app\controller\admin\I18nController::class);
+	Route::get('/admin/i18n/entryIndex', [\plugin\saimulti\app\controller\admin\I18nController::class, 'entryIndex']);
+	Route::post('/admin/i18n/entrySave', [\plugin\saimulti\app\controller\admin\I18nController::class, 'entrySave']);
+	Route::put('/admin/i18n/entryUpdate', [\plugin\saimulti\app\controller\admin\I18nController::class, 'entryUpdate']);
+	Route::delete('/admin/i18n/entryDestroy', [\plugin\saimulti\app\controller\admin\I18nController::class, 'entryDestroy']);
+
 	// IM 运行管理与安全审计
 	Route::get('/admin/im/operations/overview', [\plugin\saimulti\app\controller\admin\AdminImOperationsController::class, 'overview']);
 	Route::get('/admin/im/operations/users', [\plugin\saimulti\app\controller\admin\AdminImOperationsController::class, 'users']);
@@ -286,6 +297,13 @@ Route::group("/saimulti", function () {
 
 	// 租户公告模块（organization 只取认证上下文）
 	saiMultiRoute('/tenant/announcement', \plugin\saimulti\app\controller\tenant\AnnouncementController::class);
+
+	// 租户 i18n（organization 只取认证上下文）
+	saiMultiRoute('/tenant/i18n', \plugin\saimulti\app\controller\tenant\I18nController::class);
+	Route::get('/tenant/i18n/entryIndex', [\plugin\saimulti\app\controller\tenant\I18nController::class, 'entryIndex']);
+	Route::post('/tenant/i18n/entrySave', [\plugin\saimulti\app\controller\tenant\I18nController::class, 'entrySave']);
+	Route::put('/tenant/i18n/entryUpdate', [\plugin\saimulti\app\controller\tenant\I18nController::class, 'entryUpdate']);
+	Route::delete('/tenant/i18n/entryDestroy', [\plugin\saimulti\app\controller\tenant\I18nController::class, 'entryDestroy']);
 
 	// 租户 IM 运行策略（organization 只取认证上下文）
 	Route::get('/tenant/im/policy/read', [\plugin\saimulti\app\controller\tenant\TenantImPolicyController::class, 'read']);
