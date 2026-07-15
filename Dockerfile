@@ -10,7 +10,6 @@ ENV APP_ENV=${APP_ENV} \
 
 # PHP 及业务所需扩展由基础镜像预编译提供，应用镜像不编译 PHP 扩展。
 RUN apk add --no-cache \
-        mariadb-client \
         tzdata \
     && adduser -S -D -H -u 82 -G www-data www-data \
     && rm -rf /tmp/* /var/cache/apk/*
