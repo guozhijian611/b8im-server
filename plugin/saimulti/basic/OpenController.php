@@ -57,7 +57,7 @@ class OpenController
      */
     public function fail(string $msg = 'fail'): Response
     {
-        return json(['code' => 400, 'message' => $msg]);
+        return json(['code' => 400, 'message' => $msg, 'type' => 'failed']);
     }
 
     /**

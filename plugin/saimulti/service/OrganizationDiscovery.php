@@ -9,6 +9,7 @@ use DateTimeZone;
 use plugin\saimulti\app\model\system\SystemOrganization;
 use plugin\saimulti\exception\ApiException;
 use plugin\saimulti\service\routing\RoutingConfigService;
+use plugin\saimulti\service\trace\Telemetry;
 use support\Log;
 
 /**
@@ -167,10 +168,10 @@ final class OrganizationDiscovery
         try {
             return $this->toPublicContract($rows[0], $clientFamily);
         } catch (ApiException $exception) {
-            Log::warning('appInfo organization configuration rejected', [
+            Log::warning('appInfo organization configuration rejected', array_merge([
                 'organization' => (int) $rows[0]['id'],
                 'reason_code' => $exception->getCode(),
-            ]);
+            ], Telemetry::currentLogContext()));
 
             throw new ApiException('当前应用不可用', self::UNAVAILABLE);
         }

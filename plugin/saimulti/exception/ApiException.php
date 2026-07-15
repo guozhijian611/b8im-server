@@ -18,7 +18,11 @@ class ApiException extends BusinessException
 {
     public function render(Request $request): ?Response
     {
-        $response = json(['code' => $this->getCode() ?: 500, 'message' => $this->getMessage()]);
+        $response = json([
+            'code' => $this->getCode() ?: 500,
+            'message' => $this->getMessage(),
+            'type' => 'failed',
+        ]);
         $traceId = $request->properties[HttpTrace::REQUEST_TRACE_ID] ?? null;
 
         return is_string($traceId) && preg_match('/^[0-9a-f]{32}$/', $traceId) === 1

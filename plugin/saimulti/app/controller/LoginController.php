@@ -143,14 +143,14 @@ class LoginController extends OpenController
                 'ETag' => $etag,
             ];
 
-            Log::info('appInfo discovery succeeded', [
+            Log::info('appInfo discovery succeeded', array_merge([
                 'mode' => $mode,
                 'identifier_hash' => hash('sha256', $identifier),
                 'organization' => $data['organization'],
                 'deployment_id' => $data['deployment_id'],
                 'client_family' => $data['client_family'],
                 'client_ip' => $clientIp,
-            ]);
+            ], Telemetry::currentLogContext()));
 
             if (trim((string) $request->header('If-None-Match', '')) === $etag) {
                 return response('', 304, $headers);
@@ -159,14 +159,15 @@ class LoginController extends OpenController
             return $this->success($data)->withHeaders($headers);
         } catch (ApiException $exception) {
             $isRateLimited = $exception->getCode() === AppInfoRateLimiter::RATE_LIMITED;
-            Log::log($isRateLimited ? 'warning' : 'info', 'appInfo discovery rejected', [
+            Log::log($isRateLimited ? 'warning' : 'info', 'appInfo discovery rejected', array_merge([
                 'code' => $exception->getCode(),
                 'client_ip' => $request->getRealIp(),
-            ]);
+            ], Telemetry::currentLogContext()));
 
             $response = json([
                 'code' => $exception->getCode(),
                 'message' => $exception->getMessage(),
+                'type' => 'failed',
             ])->withHeaders($headers + ['Cache-Control' => 'no-store']);
 
             return $response->withStatus(match ($exception->getCode()) {

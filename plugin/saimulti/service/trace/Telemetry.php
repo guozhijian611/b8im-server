@@ -12,6 +12,7 @@ use GuzzleHttp\Client;
 use GuzzleHttp\Psr7\HttpFactory;
 use OpenTelemetry\API\Behavior\Internal\Logging;
 use OpenTelemetry\API\Trace\NoopTracerProvider;
+use OpenTelemetry\API\Trace\Span;
 use OpenTelemetry\API\Trace\Propagation\TraceContextPropagator;
 use OpenTelemetry\API\Trace\SpanInterface;
 use OpenTelemetry\API\Trace\SpanKind;
@@ -216,6 +217,25 @@ final class Telemetry
         } catch (Throwable $exception) {
             self::warn('context_inject_failed', $exception);
 
+            return [];
+        }
+    }
+
+    /** @return array{trace_id?: string, span_id?: string, trace_flags?: string} */
+    public static function currentLogContext(): array
+    {
+        try {
+            $context = Span::getCurrent()->getContext();
+            if (!$context->isValid()) {
+                return [];
+            }
+
+            return [
+                'trace_id' => $context->getTraceId(),
+                'span_id' => $context->getSpanId(),
+                'trace_flags' => sprintf('%02x', $context->getTraceFlags()),
+            ];
+        } catch (Throwable) {
             return [];
         }
     }

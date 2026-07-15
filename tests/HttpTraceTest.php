@@ -67,7 +67,12 @@ $middleware = new HttpTrace();
 $upstreamTraceId = '0123456789abcdef0123456789abcdef';
 $upstreamSpanId = '0123456789abcdef';
 $firstRequest = $request("00-{$upstreamTraceId}-{$upstreamSpanId}-01", 'vendor=value');
-$firstResponse = $middleware->process($firstRequest, static fn (): Response => new Response(200));
+$activeLogContext = [];
+$firstResponse = $middleware->process($firstRequest, static function () use (&$activeLogContext): Response {
+    $activeLogContext = Telemetry::currentLogContext();
+
+    return new Response(200);
+});
 
 $assert($firstResponse->getHeader('X-Trace-Id') === $upstreamTraceId, 'Response trace id did not continue W3C parent.');
 $spans = $exporter->getSpans();
@@ -76,6 +81,9 @@ $first = $spans[0];
 $assert($first->getKind() === SpanKind::KIND_SERVER, 'HTTP span kind is not SERVER.');
 $assert($first->getTraceId() === $upstreamTraceId, 'HTTP span did not continue upstream trace id.');
 $assert($first->getParentSpanId() === $upstreamSpanId, 'HTTP span parent span id is incorrect.');
+$assert($activeLogContext['trace_id'] === $upstreamTraceId, 'Active log context lost trace id.');
+$assert(preg_match('/^[0-9a-f]{16}$/D', $activeLogContext['span_id'] ?? '') === 1, 'Active log context lost span id.');
+$assert(Telemetry::currentLogContext() === [], 'Log context leaked after request completion.');
 $assert(($first->getAttributes()->get('b8im.endpoint')) === 'ClientConfigController.index', 'Endpoint is not low-cardinality.');
 $assert(($first->getAttributes()->get('http.response.status_code')) === 200, 'HTTP status attribute missing.');
 $assert(!Span::getCurrent()->getContext()->isValid(), 'HTTP request context leaked after request completion.');
@@ -138,6 +146,8 @@ try {
         $rendered?->getHeader('X-Trace-Id') === ($errorRequest->properties[HttpTrace::REQUEST_TRACE_ID] ?? null),
         'Rendered ApiException lost X-Trace-Id.',
     );
+    $renderedPayload = json_decode($rendered?->rawBody() ?? '', true, 16, JSON_THROW_ON_ERROR);
+    $assert(($renderedPayload['type'] ?? null) === 'failed', 'Rendered ApiException lost failed response type.');
 }
 $spans = $exporter->getSpans();
 $errorSpan = $spans[3];
