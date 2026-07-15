@@ -119,15 +119,7 @@ final class JaegerTraceQueryService
             $process = is_array($processes[$span['processID'] ?? ''] ?? null)
                 ? $processes[$span['processID']]
                 : [];
-            $parentSpanId = null;
-            foreach (($span['references'] ?? []) as $reference) {
-                if (is_array($reference) && is_string($reference['spanID'] ?? null)) {
-                    $parentSpanId = $reference['spanID'];
-                    if (($reference['refType'] ?? '') === 'CHILD_OF') {
-                        break;
-                    }
-                }
-            }
+            $parentSpanId = $this->parentSpanId($span['references'] ?? []);
             $logs = [];
             foreach (($span['logs'] ?? []) as $log) {
                 if (!is_array($log)) {
@@ -196,13 +188,7 @@ final class JaegerTraceQueryService
             $services[] = $service;
             $start = $this->microsecondsToMilliseconds($span['startTime'] ?? 0);
             $duration = $this->microsecondsToMilliseconds($span['duration'] ?? 0);
-            $parent = null;
-            foreach (($span['references'] ?? []) as $reference) {
-                if (is_array($reference) && is_string($reference['spanID'] ?? null)) {
-                    $parent = $reference['spanID'];
-                    break;
-                }
-            }
+            $parent = $this->parentSpanId($span['references'] ?? []);
             $spanRows[] = compact('span', 'service', 'start', 'duration', 'parent');
             if ($this->isError($tags, [])) {
                 ++$errorCount;
@@ -215,15 +201,23 @@ final class JaegerTraceQueryService
             throw new ApiException('Jaeger 链路不包含有效 Span。', 502);
         }
         usort($spanRows, static fn (array $left, array $right): int => $left['start'] <=> $right['start']);
-        $root = current(array_filter($spanRows, static fn (array $row): bool => $row['parent'] === null)) ?: $spanRows[0];
+        $roots = array_values(array_filter($spanRows, static fn (array $row): bool => $row['parent'] === null));
+        $root = $roots[0] ?? $spanRows[0];
         $startTime = min(array_column($spanRows, 'start'));
         $endTime = max(array_map(static fn (array $row): float => $row['start'] + $row['duration'], $spanRows));
-        $services = array_values(array_unique($services));
+        $services = array_values(array_unique(array_filter(
+            $services,
+            static fn (string $name): bool => $name !== '',
+        )));
         sort($services, SORT_NATURAL | SORT_FLAG_CASE);
+        $traceId = (string) ($trace['traceID'] ?? $root['span']['traceID'] ?? '');
+        if ($traceId === '') {
+            throw new ApiException('Jaeger 链路缺少 Trace ID。', 502);
+        }
 
         return [
-            'trace_id' => (string) ($trace['traceID'] ?? $root['span']['traceID'] ?? ''),
-            'root_service' => $root['service'],
+            'trace_id' => $traceId,
+            'root_service' => $root['service'] !== '' ? $root['service'] : '未知服务',
             'root_operation' => (string) ($root['span']['operationName'] ?? '未知操作'),
             'start_time_ms' => $startTime,
             'end_time_ms' => $endTime,
@@ -234,6 +228,25 @@ final class JaegerTraceQueryService
             'organization' => $organization,
             'message_id' => $messageId,
         ];
+    }
+
+    /** @param mixed $references */
+    private function parentSpanId(mixed $references): ?string
+    {
+        if (!is_array($references)) {
+            return null;
+        }
+        $fallback = null;
+        foreach ($references as $reference) {
+            if (!is_array($reference) || !is_string($reference['spanID'] ?? null) || $reference['spanID'] === '') {
+                continue;
+            }
+            if (($reference['refType'] ?? '') === 'CHILD_OF') {
+                return $reference['spanID'];
+            }
+            $fallback ??= $reference['spanID'];
+        }
+        return $fallback;
     }
 
     /** @param array<string, mixed> $input */
