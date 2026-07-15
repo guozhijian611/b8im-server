@@ -12,6 +12,7 @@ use OpenTelemetry\API\Trace\SpanKind;
 use OpenTelemetry\Context\Context;
 use plugin\saimulti\exception\ApiException;
 use plugin\saimulti\service\trace\Telemetry;
+use plugin\saimulti\service\trace\TraceDataPolicy;
 use JsonException;
 use Throwable;
 use Webman\Http\Request;
@@ -49,13 +50,21 @@ final class HttpTrace implements MiddlewareInterface
             $response = $handler($request);
             $status = $response->getStatusCode();
             $span->setAttribute('http.response.status_code', $status);
-            $businessCode = $this->businessCode($response);
+            $payload = $this->jsonPayload($response);
+            $businessCode = $this->businessCode($payload);
             if ($businessCode !== null) {
                 $span->setAttribute('b8im.response.code', $businessCode);
             }
-            $businessType = $this->businessType($response);
+            $businessType = $this->businessType($payload);
             if ($businessType !== null) {
                 $span->setAttribute('b8im.response.type', $businessType);
+            }
+            $businessMessage = $this->businessMessage($payload);
+            if ($businessMessage !== null && $businessCode !== null && $businessCode !== 200) {
+                $span->setAttribute(
+                    'b8im.response.message',
+                    TraceDataPolicy::sanitizeDiagnosticText($businessMessage),
+                );
             }
 
             if ($businessCode !== null && $businessCode !== 200) {
@@ -66,6 +75,11 @@ final class HttpTrace implements MiddlewareInterface
                     $exception,
                     $operation,
                     errorCode: $businessCode,
+                    diagnosticMessage: $businessMessage,
+                    context: array_filter([
+                        'b8im.response.code' => $businessCode,
+                        'b8im.response.type' => $businessType,
+                    ], static fn (mixed $value): bool => $value !== null),
                 );
             } elseif ($status >= 500) {
                 Telemetry::recordError(
@@ -116,9 +130,9 @@ final class HttpTrace implements MiddlewareInterface
             || $exception->getCode() >= 500;
     }
 
-    private function businessCode(Response $response): ?int
+    /** @param array<string, mixed> $payload */
+    private function businessCode(array $payload): ?int
     {
-        $payload = $this->jsonPayload($response);
         $code = $payload['code'] ?? null;
 
         return is_int($code) || (is_string($code) && preg_match('/^-?[0-9]+$/D', $code) === 1)
@@ -126,13 +140,22 @@ final class HttpTrace implements MiddlewareInterface
             : null;
     }
 
-    private function businessType(Response $response): ?string
+    /** @param array<string, mixed> $payload */
+    private function businessType(array $payload): ?string
     {
-        $type = $this->jsonPayload($response)['type'] ?? null;
+        $type = $payload['type'] ?? null;
 
         return is_string($type) && preg_match('/^[a-zA-Z0-9._-]{1,32}$/D', $type) === 1
             ? $type
             : null;
+    }
+
+    /** @param array<string, mixed> $payload */
+    private function businessMessage(array $payload): ?string
+    {
+        $message = $payload['message'] ?? null;
+
+        return is_string($message) && trim($message) !== '' ? $message : null;
     }
 
     /** @return array<string, mixed> */

@@ -149,12 +149,15 @@ final class Telemetry
         }
     }
 
+    /** @param array<string, bool|int|float|string|null> $context */
     public static function recordError(
         SpanInterface $span,
         Throwable $exception,
         string $operation,
         int $retryCount = 0,
         string|int|null $errorCode = null,
+        ?string $diagnosticMessage = null,
+        array $context = [],
     ): void {
         try {
             $attributes = [
@@ -166,6 +169,20 @@ final class Telemetry
                 'operation' => self::safeText($operation, 160),
                 'retry_count' => max(0, $retryCount),
             ];
+            if ($diagnosticMessage !== null && trim($diagnosticMessage) !== '') {
+                $attributes['b8im.response.message'] = TraceDataPolicy::sanitizeDiagnosticText($diagnosticMessage);
+            }
+            foreach ($context as $key => $value) {
+                $key = (string) $key;
+                if (!str_starts_with($key, 'b8im.response.')
+                    || TraceDataPolicy::isSensitiveKey($key)
+                    || (!is_scalar($value) && $value !== null)) {
+                    continue;
+                }
+                $attributes[$key] = is_string($value)
+                    ? TraceDataPolicy::sanitizeDiagnosticText($value)
+                    : $value;
+            }
             // Deliberately do not call recordException(): exception messages and
             // stack traces can contain SQL values, request bodies or secrets.
             $span->setStatus(StatusCode::STATUS_ERROR)

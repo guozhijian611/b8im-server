@@ -12,6 +12,7 @@ use Webman\Http\Response;
 use Webman\Exception\ExceptionHandler;
 use plugin\saimulti\exception\ApiException;
 use plugin\saimulti\app\middleware\HttpTrace;
+use plugin\saimulti\service\trace\TraceDataPolicy;
 
 /**
  * 异常处理类
@@ -29,11 +30,15 @@ class Handler extends ExceptionHandler
         }
         $logs = '';
         if ($request = \request()) {
-            $logs .= $request->method() . ' ' . $request->uri();
+            $traceId = $request->properties[HttpTrace::REQUEST_TRACE_ID] ?? '';
+            $logs .= '[trace_id]: ' . (is_string($traceId) ? $traceId : '');
+            $logs .= PHP_EOL . $request->method() . ' ' . $request->uri();
             $logs .= PHP_EOL . '[request_param]: ' . json_encode(self::redact($request->all()));
             $logs .= PHP_EOL . '[timestamp]: ' . date('Y-m-d H:i:s');
             $logs .= PHP_EOL . '[client_ip]: ' . $request->getRealIp();
             $logs .= PHP_EOL . '[exception_handle]: ' . get_class($exception);
+            $logs .= PHP_EOL . '[exception_message]: '
+                . TraceDataPolicy::sanitizeDiagnosticText($exception->getMessage());
             $logs .= PHP_EOL . '[exception_info]: ' . PHP_EOL . $exception;
         }
         $this->logger->error($logs);

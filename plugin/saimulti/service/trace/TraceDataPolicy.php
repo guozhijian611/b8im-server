@@ -27,4 +27,19 @@ final class TraceDataPolicy
             $key,
         ) === 1;
     }
+
+    public static function sanitizeDiagnosticText(string $value, int $maxLength = 2048): string
+    {
+        $value = trim((string) preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $value));
+        $patterns = [
+            '/\bBearer\s+[A-Za-z0-9._~+\/=-]+/i' => 'Bearer [REDACTED]',
+            '/\b((?:access[_-]?|refresh[_-]?)?token|password|passwd|pwd|secret|authorization|cookie|api[_-]?key|private[_-]?key)\s*([:=])\s*(?:"[^"]*"|\'[^\']*\'|[^\s,;&]+)/i' => '$1$2[REDACTED]',
+            '/\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b/' => '[REDACTED_JWT]',
+        ];
+        foreach ($patterns as $pattern => $replacement) {
+            $value = (string) preg_replace($pattern, $replacement, $value);
+        }
+
+        return strlen($value) <= $maxLength ? $value : substr($value, 0, $maxLength);
+    }
 }

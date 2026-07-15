@@ -80,13 +80,14 @@ $assert(($first->getAttributes()->get('b8im.endpoint')) === 'ClientConfigControl
 $assert(($first->getAttributes()->get('http.response.status_code')) === 200, 'HTTP status attribute missing.');
 $assert(!Span::getCurrent()->getContext()->isValid(), 'HTTP request context leaked after request completion.');
 
-$businessFailure = new RuntimeException('SQL and token=must-not-be-exported', 10501);
+$businessFailureMessage = "SQLSTATE[42S22]: Unknown column 'enterprise_code'; token=must-not-be-exported";
+$businessFailure = new RuntimeException($businessFailureMessage, 10501);
 $businessFailureResponse = new Response(
     200,
     ['Content-Type' => 'application/json;charset=utf-8'],
     json_encode([
         'code' => 10501,
-        'message' => 'SQL and token=must-not-be-exported',
+        'message' => $businessFailureMessage,
         'type' => 'failed',
     ], JSON_THROW_ON_ERROR),
 );
@@ -106,15 +107,16 @@ $assert(
     $businessFailureSpan->getAttributes()->get('b8im.response.type') === 'failed',
     'Business response type attribute is missing.',
 );
+$diagnosticMessage = (string) $businessFailureSpan->getAttributes()->get('b8im.response.message');
+$assert(str_contains($diagnosticMessage, "Unknown column 'enterprise_code'"), 'Safe diagnostic message was lost.');
+$assert(!str_contains($diagnosticMessage, 'must-not-be-exported'), 'Diagnostic message leaked a token.');
 $businessFailureEvent = json_encode(
     $businessFailureSpan->getEvents()[0]->getAttributes()->toArray(),
     JSON_THROW_ON_ERROR,
 );
 $assert(str_contains($businessFailureEvent, '10501'), 'Business error event lost its stable code.');
-$assert(
-    !str_contains($businessFailureEvent, 'must-not-be-exported'),
-    'Business error event leaked the response or exception message.',
-);
+$assert(str_contains($businessFailureEvent, "Unknown column 'enterprise_code'"), 'Error event lost diagnostic context.');
+$assert(!str_contains($businessFailureEvent, 'must-not-be-exported'), 'Business error event leaked a token.');
 
 $secondRequest = $request('invalid-client-value');
 $secondResponse = $middleware->process($secondRequest, static fn (): Response => new Response(204));
