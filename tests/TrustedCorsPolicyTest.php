@@ -87,4 +87,24 @@ Origin: https://evil.example.com
 HTTP), $handler);
 $assert($rejectedActual->getStatusCode() === 403 && $handlerCalls === 1, 'Unknown actual origin reached handler.');
 
+// Tenant CMS data plane (/cms/*) must share the control-plane CORS policy.
+$cmsPreflight = $middleware->process($request(<<<'HTTP'
+OPTIONS /cms/Article/index HTTP/1.1
+Host: api.idev.love
+Origin: https://tenant.idev.love
+Access-Control-Request-Method: GET
+Access-Control-Request-Headers: Content-Type, App-Id, Authorization
+HTTP), $handler);
+$assert($cmsPreflight->getStatusCode() === 204, 'CMS preflight did not return 204.');
+$assert($cmsPreflight->getHeader('Access-Control-Allow-Origin') === 'https://tenant.idev.love', 'CMS preflight ACAO is wrong.');
+$assert($handlerCalls === 1, 'CMS preflight reached the business handler.');
+
+$cmsActual = $middleware->process($request(<<<'HTTP'
+GET /cms/Article/index HTTP/1.1
+Host: api.idev.love
+Origin: https://tenant.idev.love
+HTTP), $handler);
+$assert($cmsActual->getStatusCode() === 200 && $handlerCalls === 2, 'CMS actual request did not reach handler.');
+$assert($cmsActual->getHeader('Access-Control-Allow-Origin') === 'https://tenant.idev.love', 'CMS actual response ACAO is wrong.');
+
 echo "TrustedCorsPolicyTest: {$assertions} assertions passed\n";

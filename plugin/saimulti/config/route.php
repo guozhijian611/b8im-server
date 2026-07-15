@@ -355,3 +355,7 @@ Route::group("/cms", function () {
 Route::options('/saimulti/{path:.+}', static fn () => response('', 204))->middleware([
 	CrossDomain::class,
 ]);
+// 租户 CMS 数据中心与 /saimulti 同属控制面，浏览器预检必须落到 CrossDomain。
+Route::options('/cms/{path:.+}', static fn () => response('', 204))->middleware([
+	CrossDomain::class,
+]);

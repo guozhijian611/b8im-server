@@ -47,6 +47,12 @@ final class CrossDomain implements MiddlewareInterface
 
     private function appliesTo(string $path): bool
     {
+        // Tenant CMS data APIs live under /cms (outside /saimulti). They are
+        // still called from tenant.idev.love and must receive the same CORS policy.
+        if ($path === '/cms' || str_starts_with($path, '/cms/')) {
+            return true;
+        }
+
         return str_starts_with($path, '/saimulti/')
             && $path !== '/saimulti/appInfo'
             && !str_starts_with($path, '/saimulti/web/');

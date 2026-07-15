@@ -1060,25 +1060,8 @@ CREATE TABLE `sm_tenant_group_menu`  (
 -- ----------------------------
 -- Records of sm_tenant_group_menu
 -- ----------------------------
-INSERT INTO `sm_tenant_group_menu` VALUES (20, 1, 3000);
-INSERT INTO `sm_tenant_group_menu` VALUES (21, 1, 3001);
-INSERT INTO `sm_tenant_group_menu` VALUES (22, 1, 3002);
-INSERT INTO `sm_tenant_group_menu` VALUES (23, 1, 3003);
-INSERT INTO `sm_tenant_group_menu` VALUES (24, 1, 3004);
-INSERT INTO `sm_tenant_group_menu` VALUES (25, 1, 3005);
-INSERT INTO `sm_tenant_group_menu` VALUES (26, 1, 3007);
-INSERT INTO `sm_tenant_group_menu` VALUES (27, 1, 3011);
-INSERT INTO `sm_tenant_group_menu` VALUES (28, 1, 3012);
-INSERT INTO `sm_tenant_group_menu` VALUES (29, 1, 3013);
-INSERT INTO `sm_tenant_group_menu` VALUES (30, 1, 3014);
-INSERT INTO `sm_tenant_group_menu` VALUES (31, 1, 3015);
-INSERT INTO `sm_tenant_group_menu` VALUES (32, 1, 3017);
-INSERT INTO `sm_tenant_group_menu` VALUES (33, 1, 3021);
-INSERT INTO `sm_tenant_group_menu` VALUES (34, 1, 3022);
-INSERT INTO `sm_tenant_group_menu` VALUES (35, 1, 3023);
-INSERT INTO `sm_tenant_group_menu` VALUES (36, 1, 3024);
-INSERT INTO `sm_tenant_group_menu` VALUES (37, 1, 3025);
-INSERT INTO `sm_tenant_group_menu` VALUES (38, 1, 3027);
+-- CMS (数据管理/文章/轮播/分类) is not a package-default menu for b8im.
+-- Catalog rows remain in sm_tenant_menu; packages bind them only via admin config.
 INSERT INTO `sm_tenant_group_menu` VALUES (39, 1, 1000);
 INSERT INTO `sm_tenant_group_menu` VALUES (40, 1, 1100);
 INSERT INTO `sm_tenant_group_menu` VALUES (41, 1, 1101);
