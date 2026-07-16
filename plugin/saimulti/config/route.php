@@ -115,6 +115,15 @@ Route::group('/saimulti', function () {
 	Route::post('/web/file-media/itemDestroy', [\plugin\saimulti\app\controller\web\FileMediaController::class, 'itemDestroy']);
 	Route::get('/web/search/messages', [\plugin\saimulti\app\controller\web\SearchController::class, 'messages']);
 	Route::get('/web/search/indexStatus', [\plugin\saimulti\app\controller\web\SearchController::class, 'indexStatus']);
+	Route::get('/web/moments/feed', [\plugin\saimulti\app\controller\web\MomentsController::class, 'feed']);
+	Route::get('/web/moments/read', [\plugin\saimulti\app\controller\web\MomentsController::class, 'read']);
+	Route::post('/web/moments/save', [\plugin\saimulti\app\controller\web\MomentsController::class, 'save']);
+	Route::post('/web/moments/destroy', [\plugin\saimulti\app\controller\web\MomentsController::class, 'destroy']);
+	Route::get('/web/moments/commentIndex', [\plugin\saimulti\app\controller\web\MomentsController::class, 'commentIndex']);
+	Route::post('/web/moments/commentSave', [\plugin\saimulti\app\controller\web\MomentsController::class, 'commentSave']);
+	Route::post('/web/moments/likeToggle', [\plugin\saimulti\app\controller\web\MomentsController::class, 'likeToggle']);
+	Route::get('/web/moments/profileRead', [\plugin\saimulti\app\controller\web\MomentsController::class, 'profileRead']);
+	Route::post('/web/moments/profileUpdate', [\plugin\saimulti\app\controller\web\MomentsController::class, 'profileUpdate']);
 
 	foreach ([
 		'/web/im/imToken',
@@ -174,6 +183,15 @@ Route::group('/saimulti', function () {
 		'/web/file-media/itemDestroy',
 		'/web/search/messages',
 		'/web/search/indexStatus',
+		'/web/moments/feed',
+		'/web/moments/read',
+		'/web/moments/save',
+		'/web/moments/destroy',
+		'/web/moments/commentIndex',
+		'/web/moments/commentSave',
+		'/web/moments/likeToggle',
+		'/web/moments/profileRead',
+		'/web/moments/profileUpdate',
 	] as $path) {
 		Route::options($path, static fn () => response('', 204));
 	}
@@ -312,6 +330,11 @@ Route::group("/saimulti", function () {
 	Route::get('/admin/search/jobIndex', [\plugin\saimulti\app\controller\admin\SearchController::class, 'jobIndex']);
 	Route::post('/admin/search/docUpsert', [\plugin\saimulti\app\controller\admin\SearchController::class, 'docUpsert']);
 
+	// 商业模块 moments（平台）
+	Route::get('/admin/moments/index', [\plugin\saimulti\app\controller\admin\MomentsController::class, 'index']);
+	Route::get('/admin/moments/read', [\plugin\saimulti\app\controller\admin\MomentsController::class, 'read']);
+	Route::delete('/admin/moments/destroy', [\plugin\saimulti\app\controller\admin\MomentsController::class, 'destroy']);
+
 	// IM 运行管理与安全审计
 	Route::get('/admin/im/operations/overview', [\plugin\saimulti\app\controller\admin\AdminImOperationsController::class, 'overview']);
 	Route::get('/admin/im/operations/users', [\plugin\saimulti\app\controller\admin\AdminImOperationsController::class, 'users']);
@@ -424,6 +447,11 @@ Route::group("/saimulti", function () {
 	Route::post('/tenant/search/rebuild', [$se, 'rebuild']);
 	Route::get('/tenant/search/jobIndex', [$se, 'jobIndex']);
 	Route::post('/tenant/search/docUpsert', [$se, 'docUpsert']);
+
+	// 租户 moments
+	Route::get('/tenant/moments/index', [\plugin\saimulti\app\controller\tenant\MomentsController::class, 'index']);
+	Route::get('/tenant/moments/read', [\plugin\saimulti\app\controller\tenant\MomentsController::class, 'read']);
+	Route::delete('/tenant/moments/destroy', [\plugin\saimulti\app\controller\tenant\MomentsController::class, 'destroy']);
 
 	// 租户 file_media
 	$fm = \plugin\saimulti\app\controller\tenant\FileMediaController::class;

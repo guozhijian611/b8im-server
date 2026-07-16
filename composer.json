@@ -87,6 +87,14 @@
                 "symlink": true,
                 "reference": "auto"
             }
+        },
+        {
+            "type": "path",
+            "url": "../b8im-module-moments",
+            "options": {
+                "symlink": true,
+                "reference": "auto"
+            }
         }
     ],
     "require": {
@@ -128,7 +136,8 @@
         "b8im/module-customer-service": "dev-main",
         "b8im/module-robot-single": "dev-main",
         "b8im/module-file-media": "dev-main",
-        "b8im/module-search": "dev-main"
+        "b8im/module-search": "dev-main",
+        "b8im/module-moments": "dev-main"
     },
     "suggest": {
         "ext-event": "For better performance. "

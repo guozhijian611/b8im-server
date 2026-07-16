@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "1c367fc492825ea2efd92336bcae7816",
+    "content-hash": "fbc08c6f5daeafa4f31eb18cb1d0a95c",
     "packages": [
         {
             "name": "aliyuncs/oss-sdk-php",
@@ -305,6 +305,33 @@
                 "proprietary"
             ],
             "description": "B8IM i18n commercial module",
+            "transport-options": {
+                "symlink": true,
+                "relative": true
+            }
+        },
+        {
+            "name": "b8im/module-moments",
+            "version": "dev-main",
+            "dist": {
+                "type": "path",
+                "url": "../b8im-module-moments",
+                "reference": "60d6a2cfe6e4b2ec121cc560db79f9b5718b3542"
+            },
+            "require": {
+                "b8im/module-sdk": "dev-main",
+                "php": ">=8.1"
+            },
+            "type": "library",
+            "autoload": {
+                "psr-4": {
+                    "B8im\\Module\\Moments\\": "src/"
+                }
+            },
+            "license": [
+                "proprietary"
+            ],
+            "description": "B8IM moments commercial module",
             "transport-options": {
                 "symlink": true,
                 "relative": true
@@ -8741,6 +8768,7 @@
         "b8im/module-favorite": 20,
         "b8im/module-file-media": 20,
         "b8im/module-i18n": 20,
+        "b8im/module-moments": 20,
         "b8im/module-robot-single": 20,
         "b8im/module-sdk": 20,
         "b8im/module-search": 20,
