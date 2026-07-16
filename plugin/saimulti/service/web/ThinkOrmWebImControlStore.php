@@ -408,13 +408,13 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                    AND u.delete_time IS NULL';
         if ($keyword !== '') {
             $pattern = $this->likePattern($keyword);
-            $sql .= ' AND (u.account LIKE ? ESCAPE "\\"
-                       OR u.nickname LIKE ? ESCAPE "\\"
-                       OR u.mobile LIKE ? ESCAPE "\\"
-                       OR u.im_short_no LIKE ? ESCAPE "\\"
-                       OR fr.remark_name LIKE ? ESCAPE "\\"
-                       OR org.organization_name LIKE ? ESCAPE "\\"
-                       OR org.title LIKE ? ESCAPE "\\")';
+            $sql .= ' AND (u.account LIKE ? ESCAPE "\\\\"
+                       OR u.nickname LIKE ? ESCAPE "\\\\"
+                       OR u.mobile LIKE ? ESCAPE "\\\\"
+                       OR u.im_short_no LIKE ? ESCAPE "\\\\"
+                       OR fr.remark_name LIKE ? ESCAPE "\\\\"
+                       OR org.organization_name LIKE ? ESCAPE "\\\\"
+                       OR org.title LIKE ? ESCAPE "\\\\")';
             array_push($params, $pattern, $pattern, $pattern, $pattern, $pattern, $pattern, $pattern);
         }
         $sql .= ' ORDER BY u.is_system DESC, COALESCE(NULLIF(fr.remark_name, ""), u.nickname) ASC, u.id ASC';

@@ -150,6 +150,19 @@ class SystemOrganizationLogic extends BaseLogic
                 (int) $this->model->id,
                 TenantImPolicyService::defaults(),
             );
+            Db::table('sm_tenant_quota')->insert([
+                'organization' => (int) $this->model->id,
+                'quota_key' => 'im_user_seats',
+                'quota_value' => 0,
+                'used_value' => 0,
+                'source' => 'package',
+                'status' => 'active',
+                'order_no' => 'organization-create',
+                'remark' => '机构创建后由平台配置购买席位',
+                'version' => 1,
+                'create_time' => date('Y-m-d H:i:s'),
+                'update_time' => date('Y-m-d H:i:s'),
+            ]);
 
             return true;
         });
