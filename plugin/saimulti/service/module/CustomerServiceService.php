@@ -13,10 +13,12 @@ final class CustomerServiceService
     private const ENTRY = 'sm_customer_service_entry';
     private const AGENT = 'sm_customer_service_agent';
     private const VISITOR = 'sm_customer_service_visitor';
+    private const VISITOR_TOKEN = 'sm_customer_service_visitor_token';
     private const CONV = 'sm_customer_service_conversation';
     private const SUBJECT_TYPES = ['im_user', 'external_visitor'];
     private const CONV_STATUS = ['queued', 'assigned', 'active', 'closed'];
     private const CODE_PATTERN = '/^[A-Za-z][A-Za-z0-9_-]{0,63}$/';
+    private const GUEST_TTL_SECONDS = 86400;
 
     // ---------- queue ----------
     /** @param array<string, mixed> $filters @return array{current_page:int,data:list<array<string,mixed>>,per_page:int,total:int} */
@@ -289,82 +291,7 @@ final class CustomerServiceService
      */
     public function conversationCreateByUser(int $organization, string $userId, array $input): array
     {
-        $this->assertOrg($organization, false);
-        $userId = $this->normalizeUserId($userId);
-        $maxOpen = max(1, $this->intVal($input['max_open'] ?? 3, '上限'));
-        $open = (int) Db::table(self::CONV)
-            ->where('organization', $organization)
-            ->where('customer_subject_type', 'im_user')
-            ->where('customer_subject_id', $userId)
-            ->whereIn('status', ['queued', 'assigned', 'active'])
-            ->whereNull('delete_time')
-            ->count();
-        if ($open >= $maxOpen) {
-            throw new ApiException('未关闭客服会话已达上限。', 422);
-        }
-
-        $queueId = null;
-        $entryId = null;
-        $channel = $this->limitStr((string) ($input['channel'] ?? 'web'), 32) ?: 'web';
-        if (isset($input['entry_id']) && $input['entry_id'] !== '' && $input['entry_id'] !== null) {
-            $entryId = $this->intVal($input['entry_id'], '入口编号');
-            $entry = $this->row(self::ENTRY, $organization, $entryId, '入口');
-            if ((int) $entry['status'] !== 1) {
-                throw new ApiException('客服入口已停用。', 422);
-            }
-            $queueId = (int) $entry['queue_id'];
-            $channel = (string) $entry['channel'];
-        } elseif (isset($input['queue_id']) && $input['queue_id'] !== '' && $input['queue_id'] !== null) {
-            $queueId = $this->intVal($input['queue_id'], '队列编号');
-            $this->row(self::QUEUE, $organization, $queueId, '队列');
-        } else {
-            $code = trim((string) ($input['queue_code'] ?? 'default'));
-            $queue = Db::table(self::QUEUE)
-                ->where('organization', $organization)
-                ->where('code', $code)
-                ->where('status', 1)
-                ->whereNull('delete_time')
-                ->find();
-            if ($queue === null) {
-                // auto create default queue
-                $now = date('Y-m-d H:i:s');
-                $queueId = (int) Db::table(self::QUEUE)->insertGetId([
-                    'organization' => $organization,
-                    'code' => 'default',
-                    'name' => '默认队列',
-                    'description' => '系统自动创建',
-                    'priority' => 0,
-                    'status' => 1,
-                    'create_time' => $now,
-                    'update_time' => $now,
-                ]);
-            } else {
-                $queueId = (int) $queue['id'];
-            }
-        }
-
-        $now = date('Y-m-d H:i:s');
-        $no = 'CS' . date('YmdHis') . bin2hex(random_bytes(3));
-        $id = (int) Db::table(self::CONV)->insertGetId([
-            'organization' => $organization,
-            'conversation_no' => $no,
-            'entry_id' => $entryId,
-            'queue_id' => $queueId,
-            'agent_id' => null,
-            'customer_subject_type' => 'im_user',
-            'customer_subject_id' => $userId,
-            'status' => 'queued',
-            'channel' => $channel,
-            'subject' => $this->limitStr((string) ($input['subject'] ?? ''), 200),
-            'close_reason' => '',
-            'queued_at' => $now,
-            'assigned_at' => null,
-            'closed_at' => null,
-            'create_time' => $now,
-            'update_time' => $now,
-        ]);
-
-        return $this->conversationRead($organization, $id);
+        return $this->conversationCreateBySubject($organization, 'im_user', $userId, $input);
     }
 
     /**
@@ -417,15 +344,7 @@ final class CustomerServiceService
     /** @return array<string, mixed> */
     public function resolvePublicEntry(string $publicEntryCode): array
     {
-        $code = $this->normalizeCode($publicEntryCode);
-        $entry = Db::table(self::ENTRY)
-            ->where('public_entry_code', $code)
-            ->where('status', 1)
-            ->whereNull('delete_time')
-            ->find();
-        if ($entry === null) {
-            throw new ApiException('客服入口不存在或已停用。', 404);
-        }
+        $entry = $this->findActiveEntry($publicEntryCode);
         $queue = Db::table(self::QUEUE)
             ->where('id', $entry['queue_id'])
             ->where('organization', $entry['organization'])
@@ -433,20 +352,320 @@ final class CustomerServiceService
             ->find();
 
         return [
-            'entry' => [
-                'id' => (int) $entry['id'],
-                'organization' => (int) $entry['organization'],
-                'public_entry_code' => (string) $entry['public_entry_code'],
-                'name' => (string) $entry['name'],
-                'channel' => (string) $entry['channel'],
-                'queue_id' => (int) $entry['queue_id'],
-            ],
+            'entry' => $this->formatEntry($entry),
             'queue' => $queue ? [
                 'id' => (int) $queue['id'],
                 'code' => (string) $queue['code'],
                 'name' => (string) $queue['name'],
             ] : null,
         ];
+    }
+
+    /**
+     * Create or resume an external visitor guest session from public entry.
+     *
+     * @param array<string, mixed> $input
+     * @return array<string, mixed>
+     */
+    public function createGuestSession(array $input): array
+    {
+        $code = trim((string) ($input['public_entry_code'] ?? $input['code'] ?? ''));
+        $entry = $this->findActiveEntry($code);
+        $organization = (int) $entry['organization'];
+        $origin = $this->limitStr((string) ($input['origin'] ?? ''), 255);
+        $this->assertOriginAllowed($entry, $origin);
+
+        $visitorId = trim((string) ($input['visitor_id'] ?? ''));
+        if ($visitorId !== '' && !preg_match('/^[A-Za-z0-9_-]{8,64}$/', $visitorId)) {
+            throw new ApiException('visitor_id 无效。', 422);
+        }
+        if ($visitorId === '') {
+            $visitorId = 'v_' . bin2hex(random_bytes(12));
+        }
+
+        $now = date('Y-m-d H:i:s');
+        $displayName = $this->limitStr((string) ($input['display_name'] ?? '访客'), 100) ?: '访客';
+        $contact = $this->limitStr((string) ($input['contact'] ?? ''), 200);
+        $existing = Db::table(self::VISITOR)
+            ->where('organization', $organization)
+            ->where('visitor_id', $visitorId)
+            ->whereNull('delete_time')
+            ->find();
+        if ($existing === null) {
+            Db::table(self::VISITOR)->insert([
+                'organization' => $organization,
+                'visitor_id' => $visitorId,
+                'display_name' => $displayName,
+                'contact' => $contact,
+                'status' => 1,
+                'first_seen_at' => $now,
+                'last_seen_at' => $now,
+                'create_time' => $now,
+                'update_time' => $now,
+            ]);
+        } else {
+            if ((int) $existing['status'] !== 1) {
+                throw new ApiException('访客已被停用。', 403);
+            }
+            $patch = ['last_seen_at' => $now, 'update_time' => $now];
+            if ($displayName !== '' && $displayName !== '访客') {
+                $patch['display_name'] = $displayName;
+            }
+            if ($contact !== '') {
+                $patch['contact'] = $contact;
+            }
+            Db::table(self::VISITOR)->where('id', $existing['id'])->update($patch);
+        }
+
+        // revoke previous active tokens for this visitor (single active guest session)
+        Db::table(self::VISITOR_TOKEN)
+            ->where('organization', $organization)
+            ->where('visitor_id', $visitorId)
+            ->whereNull('revoked_at')
+            ->update(['revoked_at' => $now, 'update_time' => $now]);
+
+        $rawToken = bin2hex(random_bytes(32));
+        $tokenHash = hash('sha256', $rawToken);
+        $expiresAt = date('Y-m-d H:i:s', time() + self::GUEST_TTL_SECONDS);
+        $tokenId = (int) Db::table(self::VISITOR_TOKEN)->insertGetId([
+            'organization' => $organization,
+            'visitor_id' => $visitorId,
+            'token_hash' => $tokenHash,
+            'token_version' => 1,
+            'entry_id' => (int) $entry['id'],
+            'origin' => $origin,
+            'expires_at' => $expiresAt,
+            'revoked_at' => null,
+            'last_seen_at' => $now,
+            'create_time' => $now,
+            'update_time' => $now,
+        ]);
+
+        $openConversation = null;
+        if (!empty($input['open_conversation'])) {
+            $openConversation = $this->conversationCreateBySubject(
+                $organization,
+                'external_visitor',
+                $visitorId,
+                [
+                    'entry_id' => (int) $entry['id'],
+                    'queue_id' => (int) $entry['queue_id'],
+                    'channel' => (string) $entry['channel'],
+                    'subject' => (string) ($input['subject'] ?? ''),
+                    'max_open' => 3,
+                ],
+            );
+        }
+
+        return [
+            'guest_token' => $rawToken,
+            'token_type' => 'Guest',
+            'expires_at' => $expiresAt,
+            'visitor_id' => $visitorId,
+            'visitor_token_id' => $tokenId,
+            'organization' => $organization,
+            'entry' => $this->formatEntry($entry),
+            'conversation' => $openConversation,
+            'cookie' => [
+                'name' => 'b8im_cs_guest',
+                'max_age' => self::GUEST_TTL_SECONDS,
+                'path' => '/',
+                'same_site' => 'Lax',
+                'secure' => true,
+                'http_only' => true,
+            ],
+        ];
+    }
+
+    /**
+     * @return array{organization:int,visitor_id:string,entry_id:?int,token_id:int,origin:string}
+     */
+    public function authenticateGuestToken(string $rawToken): array
+    {
+        $rawToken = trim($rawToken);
+        if ($rawToken === '' || !preg_match('/^[a-f0-9]{64}$/', $rawToken)) {
+            throw new ApiException('guest token 无效。', 401);
+        }
+        $hash = hash('sha256', $rawToken);
+        $row = Db::table(self::VISITOR_TOKEN)->where('token_hash', $hash)->find();
+        if ($row === null) {
+            throw new ApiException('guest token 无效。', 401);
+        }
+        if (!empty($row['revoked_at'])) {
+            throw new ApiException('guest token 已撤销。', 401);
+        }
+        if (strtotime((string) $row['expires_at']) < time()) {
+            throw new ApiException('guest token 已过期。', 401);
+        }
+        $visitor = Db::table(self::VISITOR)
+            ->where('organization', $row['organization'])
+            ->where('visitor_id', $row['visitor_id'])
+            ->whereNull('delete_time')
+            ->find();
+        if ($visitor === null || (int) $visitor['status'] !== 1) {
+            throw new ApiException('访客不可用。', 403);
+        }
+        $now = date('Y-m-d H:i:s');
+        Db::table(self::VISITOR_TOKEN)->where('id', $row['id'])->update([
+            'last_seen_at' => $now,
+            'update_time' => $now,
+        ]);
+        Db::table(self::VISITOR)->where('id', $visitor['id'])->update([
+            'last_seen_at' => $now,
+            'update_time' => $now,
+        ]);
+
+        return [
+            'organization' => (int) $row['organization'],
+            'visitor_id' => (string) $row['visitor_id'],
+            'entry_id' => $row['entry_id'] !== null ? (int) $row['entry_id'] : null,
+            'token_id' => (int) $row['id'],
+            'origin' => (string) $row['origin'],
+        ];
+    }
+
+    public function revokeGuestToken(string $rawToken): void
+    {
+        $guest = $this->authenticateGuestToken($rawToken);
+        $now = date('Y-m-d H:i:s');
+        Db::table(self::VISITOR_TOKEN)->where('id', $guest['token_id'])->update([
+            'revoked_at' => $now,
+            'update_time' => $now,
+        ]);
+    }
+
+    /**
+     * @param array<string, mixed> $filters
+     * @return array{current_page:int,data:list<array<string,mixed>>,per_page:int,total:int}
+     */
+    public function guestConversationList(array $guest, array $filters): array
+    {
+        $filters['customer_subject_type'] = 'external_visitor';
+        $filters['customer_subject_id'] = $guest['visitor_id'];
+
+        return $this->conversationList((int) $guest['organization'], $filters);
+    }
+
+    /** @return array<string, mixed> */
+    public function guestConversationRead(array $guest, int $id): array
+    {
+        $row = $this->conversationRead((int) $guest['organization'], $id);
+        if ($row['customer_subject_type'] !== 'external_visitor'
+            || (string) $row['customer_subject_id'] !== (string) $guest['visitor_id']) {
+            throw new ApiException('会话不存在。', 404);
+        }
+
+        return $row;
+    }
+
+    /**
+     * @param array<string, mixed> $input
+     * @return array<string, mixed>
+     */
+    public function guestConversationCreate(array $guest, array $input): array
+    {
+        if (!empty($guest['entry_id'])) {
+            $input['entry_id'] = $guest['entry_id'];
+        }
+
+        return $this->conversationCreateBySubject(
+            (int) $guest['organization'],
+            'external_visitor',
+            (string) $guest['visitor_id'],
+            $input,
+        );
+    }
+
+    /**
+     * Shared conversation create for im_user / external_visitor.
+     *
+     * @param array<string, mixed> $input
+     * @return array<string, mixed>
+     */
+    public function conversationCreateBySubject(
+        int $organization,
+        string $subjectType,
+        string $subjectId,
+        array $input,
+    ): array {
+        $this->assertOrg($organization, false);
+        if (!in_array($subjectType, self::SUBJECT_TYPES, true)) {
+            throw new ApiException('客户主体类型无效。', 422);
+        }
+        $subjectId = $this->normalizeUserId($subjectId);
+        $maxOpen = max(1, $this->intVal($input['max_open'] ?? 3, '上限'));
+        $open = (int) Db::table(self::CONV)
+            ->where('organization', $organization)
+            ->where('customer_subject_type', $subjectType)
+            ->where('customer_subject_id', $subjectId)
+            ->whereIn('status', ['queued', 'assigned', 'active'])
+            ->whereNull('delete_time')
+            ->count();
+        if ($open >= $maxOpen) {
+            throw new ApiException('未关闭客服会话已达上限。', 422);
+        }
+
+        $queueId = null;
+        $entryId = null;
+        $channel = $this->limitStr((string) ($input['channel'] ?? 'web'), 32) ?: 'web';
+        if (isset($input['entry_id']) && $input['entry_id'] !== '' && $input['entry_id'] !== null) {
+            $entryId = $this->intVal($input['entry_id'], '入口编号');
+            $entry = $this->row(self::ENTRY, $organization, $entryId, '入口');
+            if ((int) $entry['status'] !== 1) {
+                throw new ApiException('客服入口已停用。', 422);
+            }
+            $queueId = (int) $entry['queue_id'];
+            $channel = (string) $entry['channel'];
+        } elseif (isset($input['queue_id']) && $input['queue_id'] !== '' && $input['queue_id'] !== null) {
+            $queueId = $this->intVal($input['queue_id'], '队列编号');
+            $this->row(self::QUEUE, $organization, $queueId, '队列');
+        } else {
+            $code = trim((string) ($input['queue_code'] ?? 'default'));
+            $queue = Db::table(self::QUEUE)
+                ->where('organization', $organization)
+                ->where('code', $code)
+                ->where('status', 1)
+                ->whereNull('delete_time')
+                ->find();
+            if ($queue === null) {
+                $now = date('Y-m-d H:i:s');
+                $queueId = (int) Db::table(self::QUEUE)->insertGetId([
+                    'organization' => $organization,
+                    'code' => 'default',
+                    'name' => '默认队列',
+                    'description' => '系统自动创建',
+                    'priority' => 0,
+                    'status' => 1,
+                    'create_time' => $now,
+                    'update_time' => $now,
+                ]);
+            } else {
+                $queueId = (int) $queue['id'];
+            }
+        }
+
+        $now = date('Y-m-d H:i:s');
+        $no = 'CS' . date('YmdHis') . bin2hex(random_bytes(3));
+        $id = (int) Db::table(self::CONV)->insertGetId([
+            'organization' => $organization,
+            'conversation_no' => $no,
+            'entry_id' => $entryId,
+            'queue_id' => $queueId,
+            'agent_id' => null,
+            'customer_subject_type' => $subjectType,
+            'customer_subject_id' => $subjectId,
+            'status' => 'queued',
+            'channel' => $channel,
+            'subject' => $this->limitStr((string) ($input['subject'] ?? ''), 200),
+            'close_reason' => '',
+            'queued_at' => $now,
+            'assigned_at' => null,
+            'closed_at' => null,
+            'create_time' => $now,
+            'update_time' => $now,
+        ]);
+
+        return $this->conversationRead($organization, $id);
     }
 
     // ---------- helpers ----------
@@ -637,5 +856,53 @@ final class CustomerServiceService
         $limit = max(1, min(100, $this->intVal($filters['limit'] ?? 20, '每页数量')));
 
         return [$page, $limit];
+    }
+
+    /** @return array<string, mixed> */
+    private function findActiveEntry(string $publicEntryCode): array
+    {
+        $code = $this->normalizeCode($publicEntryCode);
+        $entry = Db::table(self::ENTRY)
+            ->where('public_entry_code', $code)
+            ->where('status', 1)
+            ->whereNull('delete_time')
+            ->find();
+        if ($entry === null) {
+            throw new ApiException('客服入口不存在或已停用。', 404);
+        }
+
+        return $entry;
+    }
+
+    /** @param array<string, mixed> $entry @return array<string, mixed> */
+    private function formatEntry(array $entry): array
+    {
+        return [
+            'id' => (int) $entry['id'],
+            'organization' => (int) $entry['organization'],
+            'public_entry_code' => (string) $entry['public_entry_code'],
+            'name' => (string) $entry['name'],
+            'channel' => (string) $entry['channel'],
+            'queue_id' => (int) $entry['queue_id'],
+        ];
+    }
+
+    /** @param array<string, mixed> $entry */
+    private function assertOriginAllowed(array $entry, string $origin): void
+    {
+        $allowed = trim((string) ($entry['allowed_origins'] ?? ''));
+        if ($allowed === '') {
+            return;
+        }
+        if ($origin === '') {
+            throw new ApiException('Origin 必填。', 422);
+        }
+        $list = array_values(array_filter(array_map('trim', preg_split('/[\s,]+/', $allowed) ?: [])));
+        if ($list === []) {
+            return;
+        }
+        if (!in_array($origin, $list, true) && !in_array('*', $list, true)) {
+            throw new ApiException('Origin 不被允许。', 403);
+        }
     }
 }

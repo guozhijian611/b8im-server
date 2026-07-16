@@ -20,9 +20,30 @@ Route::post('/saimulti/tenant/login', [plugin\saimulti\app\controller\LoginContr
 // 应用信息
 Route::get("/saimulti/appInfo", [plugin\saimulti\app\controller\LoginController::class, 'appInfo']);
 Route::options("/saimulti/appInfo", [plugin\saimulti\app\controller\LoginController::class, 'appInfoOptions']);
-// 客服公开入口解析（无需登录；organization 由入口记录决定）
-Route::get('/saimulti/public/customer-service/entry/resolve', [\plugin\saimulti\app\controller\publicapi\CustomerServicePublicController::class, 'resolveEntry']);
-Route::options('/saimulti/public/customer-service/entry/resolve', static fn () => response('', 204));
+// 客服公开接口（无需登录；organization 由入口/guest token 决定）
+Route::group('/saimulti/public/customer-service', function () {
+	$c = \plugin\saimulti\app\controller\publicapi\CustomerServicePublicController::class;
+	Route::get('/entry/resolve', [$c, 'resolveEntry']);
+	Route::post('/session/create', [$c, 'sessionCreate']);
+	Route::post('/session/close', [$c, 'sessionClose']);
+	Route::get('/session/me', [$c, 'sessionMe']);
+	Route::get('/conversation/index', [$c, 'conversationIndex']);
+	Route::get('/conversation/read', [$c, 'conversationRead']);
+	Route::post('/conversation/save', [$c, 'conversationSave']);
+	foreach ([
+		'/entry/resolve',
+		'/session/create',
+		'/session/close',
+		'/session/me',
+		'/conversation/index',
+		'/conversation/read',
+		'/conversation/save',
+	] as $path) {
+		Route::options($path, static fn () => response('', 204));
+	}
+})->middleware([
+	WebCors::class,
+]);
 
 // Web 普通用户公开登录。App-Id 和 Origin 由 WebCors/OrganizationResolver 校验。
 Route::group('/saimulti', function () {
