@@ -70,6 +70,11 @@ Route::group('/saimulti', function () {
 	Route::get('/app/im/conversations', [\plugin\saimulti\app\controller\web\ImController::class, 'conversations']);
 	Route::get('/app/im/messages', [\plugin\saimulti\app\controller\web\ImController::class, 'messages']);
 	Route::post('/app/im/markRead', [\plugin\saimulti\app\controller\web\ImController::class, 'markRead']);
+	Route::get('/app/im/contacts', [\plugin\saimulti\app\controller\web\ImController::class, 'contacts']);
+	Route::get('/app/im/searchUsers', [\plugin\saimulti\app\controller\web\ImController::class, 'searchUsers']);
+	Route::get('/app/im/requests', [\plugin\saimulti\app\controller\web\ImController::class, 'requests']);
+	Route::post('/app/im/sendFriendRequest', [\plugin\saimulti\app\controller\web\ImController::class, 'sendFriendRequest']);
+	Route::post('/app/im/handleFriendRequest', [\plugin\saimulti\app\controller\web\ImController::class, 'handleFriendRequest']);
 	Route::post('/app/im/prepareUpload', [\plugin\saimulti\app\controller\web\ImController::class, 'prepareUpload']);
 	Route::post('/app/im/upload', [\plugin\saimulti\app\controller\web\ImController::class, 'upload']);
 	Route::post('/app/im/resolveAssetUrl', [\plugin\saimulti\app\controller\web\ImController::class, 'resolveAssetUrl']);
@@ -80,6 +85,11 @@ Route::group('/saimulti', function () {
 	Route::options('/app/im/conversations', static fn () => response('', 204));
 	Route::options('/app/im/messages', static fn () => response('', 204));
 	Route::options('/app/im/markRead', static fn () => response('', 204));
+	Route::options('/app/im/contacts', static fn () => response('', 204));
+	Route::options('/app/im/searchUsers', static fn () => response('', 204));
+	Route::options('/app/im/requests', static fn () => response('', 204));
+	Route::options('/app/im/sendFriendRequest', static fn () => response('', 204));
+	Route::options('/app/im/handleFriendRequest', static fn () => response('', 204));
 	Route::options('/app/im/prepareUpload', static fn () => response('', 204));
 	Route::options('/app/im/upload', static fn () => response('', 204));
 	Route::options('/app/im/resolveAssetUrl', static fn () => response('', 204));
