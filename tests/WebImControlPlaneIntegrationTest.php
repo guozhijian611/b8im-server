@@ -80,6 +80,8 @@ $pdo = new PDO(
 $pdo->exec(<<<'SQL'
 CREATE TABLE sm_system_organization (
   id int unsigned NOT NULL PRIMARY KEY,
+  organization_name varchar(100) NOT NULL,
+  title varchar(100) NOT NULL,
   status tinyint unsigned NOT NULL DEFAULT 1,
   delete_time datetime NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
@@ -112,7 +114,7 @@ CREATE TABLE sm_tenant_config (
   UNIQUE KEY uni_org_group (organization, group_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 SQL);
-$pdo->exec('INSERT INTO sm_system_organization (id, status) VALUES (901, 1), (902, 1)');
+$pdo->exec('INSERT INTO sm_system_organization (id, organization_name, title, status) VALUES (901, "Web Test 901", "Web Test 901", 1), (902, "Web Test 902", "Web Test 902", 1)');
 $pdo->exec('INSERT INTO sm_system_config_group (id, code) VALUES (1, "message_config")');
 $pdo->exec(
     'INSERT INTO sm_system_config (group_id, `key`, `value`) VALUES

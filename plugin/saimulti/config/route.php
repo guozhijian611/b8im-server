@@ -381,6 +381,15 @@ Route::group("/saimulti", function () {
 	Route::post('/admin/im/operations/revokeSession', [\plugin\saimulti\app\controller\admin\AdminImOperationsController::class, 'revokeSession']);
 	Route::get('/admin/im/policy/read', [\plugin\saimulti\app\controller\admin\AdminImPolicyController::class, 'read']);
 	Route::put('/admin/im/policy/update', [\plugin\saimulti\app\controller\admin\AdminImPolicyController::class, 'update']);
+	// IM 用户管理（平台跨机构）
+	Route::get('/admin/im/user/index', [\plugin\saimulti\app\controller\admin\AdminImUserController::class, 'index']);
+	Route::get('/admin/im/user/read', [\plugin\saimulti\app\controller\admin\AdminImUserController::class, 'read']);
+	Route::post('/admin/im/user/save', [\plugin\saimulti\app\controller\admin\AdminImUserController::class, 'save']);
+	Route::put('/admin/im/user/update', [\plugin\saimulti\app\controller\admin\AdminImUserController::class, 'update']);
+	Route::post('/admin/im/user/status', [\plugin\saimulti\app\controller\admin\AdminImUserController::class, 'status']);
+	Route::post('/admin/im/user/reset', [\plugin\saimulti\app\controller\admin\AdminImUserController::class, 'reset']);
+	Route::get('/admin/im/user/quota', [\plugin\saimulti\app\controller\admin\AdminImUserController::class, 'quota']);
+	Route::put('/admin/im/user/quota', [\plugin\saimulti\app\controller\admin\AdminImUserController::class, 'updateQuota']);
 
 	//--------------------------- 系统维护 ------------------------- //
 	// 数据表维护
@@ -539,6 +548,14 @@ Route::group("/saimulti", function () {
 	// 租户 IM 运行策略（organization 只取认证上下文）
 	Route::get('/tenant/im/policy/read', [\plugin\saimulti\app\controller\tenant\TenantImPolicyController::class, 'read']);
 	Route::put('/tenant/im/policy/update', [\plugin\saimulti\app\controller\tenant\TenantImPolicyController::class, 'update']);
+	// IM 用户管理（organization 只取认证上下文）
+	Route::get('/tenant/im/user/index', [\plugin\saimulti\app\controller\tenant\TenantImUserController::class, 'index']);
+	Route::get('/tenant/im/user/read', [\plugin\saimulti\app\controller\tenant\TenantImUserController::class, 'read']);
+	Route::post('/tenant/im/user/save', [\plugin\saimulti\app\controller\tenant\TenantImUserController::class, 'save']);
+	Route::put('/tenant/im/user/update', [\plugin\saimulti\app\controller\tenant\TenantImUserController::class, 'update']);
+	Route::post('/tenant/im/user/status', [\plugin\saimulti\app\controller\tenant\TenantImUserController::class, 'status']);
+	Route::post('/tenant/im/user/reset', [\plugin\saimulti\app\controller\tenant\TenantImUserController::class, 'reset']);
+	Route::get('/tenant/im/user/quota', [\plugin\saimulti\app\controller\tenant\TenantImUserController::class, 'quota']);
 	Route::get('/tenant/routing/read', [\plugin\saimulti\app\controller\tenant\TenantRoutingController::class, 'read']);
 
 	// 菜单列表
