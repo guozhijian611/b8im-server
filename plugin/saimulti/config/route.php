@@ -73,6 +73,8 @@ Route::group('/saimulti', function () {
 	// Web 客户端 requestWebApi 仅支持 GET/POST
 	Route::post('/web/favorite/destroy', [\plugin\saimulti\app\controller\web\FavoriteController::class, 'destroy']);
 	Route::delete('/web/favorite/destroy', [\plugin\saimulti\app\controller\web\FavoriteController::class, 'destroy']);
+	Route::get('/web/sticker/packs', [\plugin\saimulti\app\controller\web\StickerController::class, 'packs']);
+	Route::get('/web/sticker/items', [\plugin\saimulti\app\controller\web\StickerController::class, 'items']);
 
 	foreach ([
 		'/web/im/imToken',
@@ -115,6 +117,8 @@ Route::group('/saimulti', function () {
 		'/web/favorite/read',
 		'/web/favorite/save',
 		'/web/favorite/destroy',
+		'/web/sticker/packs',
+		'/web/sticker/items',
 	] as $path) {
 		Route::options($path, static fn () => response('', 204));
 	}
@@ -222,6 +226,13 @@ Route::group("/saimulti", function () {
 	// 商业模块 favorite
 	saiMultiRoute('/admin/favorite', \plugin\saimulti\app\controller\admin\FavoriteController::class);
 
+	// 商业模块 sticker
+	saiMultiRoute('/admin/sticker', \plugin\saimulti\app\controller\admin\StickerController::class);
+	Route::get('/admin/sticker/itemIndex', [\plugin\saimulti\app\controller\admin\StickerController::class, 'itemIndex']);
+	Route::post('/admin/sticker/itemSave', [\plugin\saimulti\app\controller\admin\StickerController::class, 'itemSave']);
+	Route::put('/admin/sticker/itemUpdate', [\plugin\saimulti\app\controller\admin\StickerController::class, 'itemUpdate']);
+	Route::delete('/admin/sticker/itemDestroy', [\plugin\saimulti\app\controller\admin\StickerController::class, 'itemDestroy']);
+
 	// IM 运行管理与安全审计
 	Route::get('/admin/im/operations/overview', [\plugin\saimulti\app\controller\admin\AdminImOperationsController::class, 'overview']);
 	Route::get('/admin/im/operations/users', [\plugin\saimulti\app\controller\admin\AdminImOperationsController::class, 'users']);
@@ -320,6 +331,13 @@ Route::group("/saimulti", function () {
 
 	// 租户 favorite
 	saiMultiRoute('/tenant/favorite', \plugin\saimulti\app\controller\tenant\FavoriteController::class);
+
+	// 租户 sticker
+	saiMultiRoute('/tenant/sticker', \plugin\saimulti\app\controller\tenant\StickerController::class);
+	Route::get('/tenant/sticker/itemIndex', [\plugin\saimulti\app\controller\tenant\StickerController::class, 'itemIndex']);
+	Route::post('/tenant/sticker/itemSave', [\plugin\saimulti\app\controller\tenant\StickerController::class, 'itemSave']);
+	Route::put('/tenant/sticker/itemUpdate', [\plugin\saimulti\app\controller\tenant\StickerController::class, 'itemUpdate']);
+	Route::delete('/tenant/sticker/itemDestroy', [\plugin\saimulti\app\controller\tenant\StickerController::class, 'itemDestroy']);
 
 	// 租户 IM 运行策略（organization 只取认证上下文）
 	Route::get('/tenant/im/policy/read', [\plugin\saimulti\app\controller\tenant\TenantImPolicyController::class, 'read']);

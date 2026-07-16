@@ -39,6 +39,7 @@ $manifestRoots = [$announcementModuleRoot];
 foreach ([
     'b8im/module-i18n' => 'b8im-module-i18n',
     'b8im/module-favorite' => 'b8im-module-favorite',
+    'b8im/module-sticker' => 'b8im-module-sticker',
 ] as $package => $sibling) {
     $root = $resolveModuleRoot($package, $sibling);
     if (is_string($root) && $root !== '') {

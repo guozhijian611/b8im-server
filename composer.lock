@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "9218646745ed0d793a92cfd55cc9e00d",
+    "content-hash": "333b8344beb71efa122170e2c9529dd3",
     "packages": [
         {
             "name": "aliyuncs/oss-sdk-php",
@@ -288,6 +288,33 @@
                 "MIT"
             ],
             "description": "B8IM module manifest, lifecycle and state contracts",
+            "transport-options": {
+                "symlink": true,
+                "relative": true
+            }
+        },
+        {
+            "name": "b8im/module-sticker",
+            "version": "dev-main",
+            "dist": {
+                "type": "path",
+                "url": "../b8im-module-sticker",
+                "reference": "ab38a350f565fd5a78261e10a285e9a1798e3a30"
+            },
+            "require": {
+                "b8im/module-sdk": "dev-main",
+                "php": ">=8.1"
+            },
+            "type": "library",
+            "autoload": {
+                "psr-4": {
+                    "B8im\\Module\\Sticker\\": "src/"
+                }
+            },
+            "license": [
+                "proprietary"
+            ],
+            "description": "B8IM sticker commercial module",
             "transport-options": {
                 "symlink": true,
                 "relative": true
@@ -8604,7 +8631,8 @@
     "stability-flags": {
         "b8im/module-favorite": 20,
         "b8im/module-i18n": 20,
-        "b8im/module-sdk": 20
+        "b8im/module-sdk": 20,
+        "b8im/module-sticker": 20
     },
     "prefer-stable": true,
     "prefer-lowest": false,
