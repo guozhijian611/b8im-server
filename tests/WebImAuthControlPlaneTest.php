@@ -328,7 +328,7 @@ $assert($login['organization'] === 7 && $login['deployment_id'] === 'deployment-
 $assert($login['user']['user_id'] === 'user_9' && $login['user']['is_system'] === false, 'Web user model mismatch.');
 $assert(!array_key_exists('password_hash', $login['user']) && !array_key_exists('password', $login['user']), 'Password leaked.');
 $assert(count($store->audits) === 1 && $store->audits[0]['login_result'] === 'success', 'Successful login audit missing.');
-$assert($store->audits[0]['audit_scope'] === 'login' && $store->audits[0]['current_online_state'] === 2, 'Successful audit contract mismatch.');
+$assert($store->audits[0]['audit_scope'] === 'password' && $store->audits[0]['current_online_state'] === 2, 'Successful audit contract mismatch.');
 $assert(count($store->accessSessions) === 1, 'Web access session was not persisted with the login transaction.');
 $assert(
     $loginRateLimiter->resetCalls === [[7, 'alice']],

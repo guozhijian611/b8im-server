@@ -7,6 +7,7 @@ declare(strict_types=1);
 
 namespace plugin\saimulti\service\imUser;
 
+use Closure;
 use JsonException;
 use plugin\saimulti\exception\ApiException;
 use plugin\saimulti\service\adminIm\ThinkCacheAdminImRealtimePublisher;
@@ -118,42 +119,9 @@ final class ImUserManagementService
             if ($status === 1) {
                 $this->assertSeatAvailable($organization);
             }
-
-            $userId = Uuid::uuid4()->toString();
-            $id = (int) Db::table('im_user')->insertGetId($data + [
-                'organization' => $organization,
-                'user_id' => $userId,
-                'password_hash' => password_hash($password, PASSWORD_DEFAULT),
-                'is_system' => 2,
-                'status' => $status,
-                'create_time' => $now,
-                'update_time' => $now,
-            ]);
-            Db::table('im_user_profile')->insert([
-                'organization' => $organization,
-                'user_id' => $userId,
-                'signature' => $signature === '' ? null : $signature,
-                'status' => 1,
-                'create_time' => $now,
-                'update_time' => $now,
-            ]);
-            Db::table('im_user_privacy_setting')->insert([
-                'organization' => $organization,
-                'user_id' => $userId,
-                'allow_add_by_mobile' => 1,
-                'allow_add_by_short_no' => 1,
-                'allow_add_by_username' => 1,
-                'create_time' => $now,
-                'update_time' => $now,
-            ]);
-            Db::table('im_user_security_policy')->insert([
-                'organization' => $organization,
-                'user_id' => $userId,
-                'login_ip_policy' => 'disabled',
-                'status' => 1,
-                'create_time' => $now,
-                'update_time' => $now,
-            ]);
+            $user = $this->provisionUser($organization, $data, $password, $signature, $status, $now);
+            $id = (int) $user['id'];
+            $userId = (string) $user['user_id'];
             $this->syncUsedSeats($organization, $now);
             $this->audit($actor, $organization, '创建 IM 用户', [
                 'target' => ['id' => $id, 'user_id' => $userId],
@@ -164,6 +132,48 @@ final class ImUserManagementService
         });
 
         return $this->read($id, $organization);
+    }
+
+    /**
+     * Public registration shares the canonical user/profile/privacy/security/quota
+     * provisioning path. Both callbacks run inside the same transaction after
+     * organization locking; the first locks/checks account policy, the second
+     * persists the access session before the user can become visible.
+     *
+     * @param Closure(int):void $beforeProvision
+     * @param Closure(array<string,mixed>,string):array<string,mixed> $afterProvision
+     * @return array<string,mixed>
+     */
+    public function register(
+        int $organization,
+        array $input,
+        Closure $beforeProvision,
+        Closure $afterProvision,
+    ): array {
+        $organization = $this->positiveInteger($organization, '机构编号');
+        $data = $this->userWriteData($input);
+        $password = (string) ($input['password'] ?? '');
+        $signature = trim((string) ($input['signature'] ?? ''));
+        $now = date('Y-m-d H:i:s');
+
+        return Db::transaction(function () use (
+            $organization,
+            $data,
+            $password,
+            $signature,
+            $beforeProvision,
+            $afterProvision,
+            $now,
+        ): array {
+            $this->lockActiveOrganization($organization);
+            $beforeProvision($organization);
+            $this->assertUnique($organization, $data['account'], null, null);
+            $this->assertSeatAvailable($organization);
+            $user = $this->provisionUser($organization, $data, $password, $signature, 1, $now);
+            $this->syncUsedSeats($organization, $now);
+
+            return $afterProvision($user, $now);
+        });
     }
 
     /** @param array{type:string,id:int,username:string,ip:string} $actor */
@@ -347,6 +357,54 @@ final class ImUserManagementService
             'gender' => (int) ($input['gender'] ?? 0),
             'remark' => $nullable($input['remark'] ?? null),
         ];
+    }
+
+    /** @param array<string,mixed> $data @return array<string,mixed> */
+    private function provisionUser(
+        int $organization,
+        array $data,
+        string $password,
+        string $signature,
+        int $status,
+        string $now,
+    ): array {
+        $userId = Uuid::uuid4()->toString();
+        $id = (int) Db::table('im_user')->insertGetId($data + [
+            'organization' => $organization,
+            'user_id' => $userId,
+            'password_hash' => password_hash($password, PASSWORD_DEFAULT),
+            'is_system' => 2,
+            'status' => $status,
+            'create_time' => $now,
+            'update_time' => $now,
+        ]);
+        Db::table('im_user_profile')->insert([
+            'organization' => $organization,
+            'user_id' => $userId,
+            'signature' => $signature === '' ? null : $signature,
+            'status' => 1,
+            'create_time' => $now,
+            'update_time' => $now,
+        ]);
+        Db::table('im_user_privacy_setting')->insert([
+            'organization' => $organization,
+            'user_id' => $userId,
+            'allow_add_by_mobile' => 1,
+            'allow_add_by_short_no' => 1,
+            'allow_add_by_username' => 1,
+            'create_time' => $now,
+            'update_time' => $now,
+        ]);
+        Db::table('im_user_security_policy')->insert([
+            'organization' => $organization,
+            'user_id' => $userId,
+            'login_ip_policy' => 'disabled',
+            'status' => 1,
+            'create_time' => $now,
+            'update_time' => $now,
+        ]);
+
+        return $this->read($id, $organization);
     }
 
     private function lockActiveOrganization(int $organization): void

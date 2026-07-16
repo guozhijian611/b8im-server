@@ -49,8 +49,15 @@ Route::group('/saimulti/public/customer-service', function () {
 
 // Web 普通用户公开登录。App-Id 和 Origin 由 WebCors/OrganizationResolver 校验。
 Route::group('/saimulti', function () {
+	Route::get('/web/im/accountPolicy', [\plugin\saimulti\app\controller\web\WebAccountController::class, 'policy']);
+	Route::post('/web/im/register', [\plugin\saimulti\app\controller\web\WebAccountController::class, 'register']);
 	Route::post('/web/im/login', [\plugin\saimulti\app\controller\web\ImController::class, 'login']);
-	Route::options('/web/im/login', static fn () => response('', 204));
+	Route::post('/web/im/qrLogin/create', [\plugin\saimulti\app\controller\web\WebQrLoginController::class, 'create']);
+	Route::post('/web/im/qrLogin/poll', [\plugin\saimulti\app\controller\web\WebQrLoginController::class, 'poll']);
+	Route::post('/web/im/qrLogin/cancel', [\plugin\saimulti\app\controller\web\WebQrLoginController::class, 'cancel']);
+	foreach (['/web/im/accountPolicy', '/web/im/register', '/web/im/login', '/web/im/qrLogin/create', '/web/im/qrLogin/poll', '/web/im/qrLogin/cancel'] as $path) {
+		Route::options($path, static fn () => response('', 204));
+	}
 })->middleware([
 	WebCors::class,
 ]);
@@ -65,6 +72,8 @@ Route::group('/saimulti', function () {
 
 // 原生 App 认证接口。token 必须携带 client_family=app 和 android/ios OS。
 Route::group('/saimulti', function () {
+	Route::post('/app/im/qrLogin/scan', [\plugin\saimulti\app\controller\app\QrLoginController::class, 'scan']);
+	Route::post('/app/im/qrLogin/confirm', [\plugin\saimulti\app\controller\app\QrLoginController::class, 'confirm']);
 	Route::post('/app/im/imToken', [\plugin\saimulti\app\controller\web\ImController::class, 'imToken']);
 	Route::get('/app/im/me', [\plugin\saimulti\app\controller\web\ImController::class, 'me']);
 	Route::get('/app/im/conversations', [\plugin\saimulti\app\controller\web\ImController::class, 'conversations']);
@@ -76,6 +85,8 @@ Route::group('/saimulti', function () {
 	Route::get('/app/file-media/usage', [\plugin\saimulti\app\controller\web\FileMediaController::class, 'appUsage']);
 	Route::post('/app/file-media/checkUpload', [\plugin\saimulti\app\controller\web\FileMediaController::class, 'appCheckUpload']);
 	Route::options('/app/im/imToken', static fn () => response('', 204));
+	Route::options('/app/im/qrLogin/scan', static fn () => response('', 204));
+	Route::options('/app/im/qrLogin/confirm', static fn () => response('', 204));
 	Route::options('/app/im/me', static fn () => response('', 204));
 	Route::options('/app/im/conversations', static fn () => response('', 204));
 	Route::options('/app/im/messages', static fn () => response('', 204));

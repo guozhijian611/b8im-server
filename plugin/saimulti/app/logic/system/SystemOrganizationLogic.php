@@ -11,6 +11,7 @@ use plugin\saimulti\service\OrganizationDiscovery;
 use plugin\saimulti\service\adminIm\OrganizationImAccessService;
 use plugin\saimulti\service\tenantPolicy\TenantImPolicyService;
 use plugin\saimulti\service\tenantPolicy\ThinkOrmTenantImPolicyStore;
+use plugin\saimulti\service\web\TenantAccountPolicyService;
 use support\think\Db;
 
 /**
@@ -150,6 +151,7 @@ class SystemOrganizationLogic extends BaseLogic
                 (int) $this->model->id,
                 TenantImPolicyService::defaults(),
             );
+            (new TenantAccountPolicyService())->createDefault((int) $this->model->id);
             Db::table('sm_tenant_quota')->insert([
                 'organization' => (int) $this->model->id,
                 'quota_key' => 'im_user_seats',

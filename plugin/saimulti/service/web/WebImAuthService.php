@@ -10,7 +10,7 @@ use plugin\saimulti\service\OrganizationDiscovery;
 use plugin\saimulti\service\WebTokenService;
 use plugin\saimulti\service\trace\Telemetry;
 
-final class WebImAuthService
+final class WebImAuthService implements WebAccessIssuerInterface
 {
     private WebImAuthStoreInterface $store;
 
@@ -137,53 +137,16 @@ final class WebImAuthService
             $this->loginRateLimiter->resetAccountAttempts($organizationId, $account);
 
             $failureCode = 'WEB_TOKEN_ISSUE_FAILED';
-            $issued = $this->webTokens->issueAccessSession(
+            return $this->issueAccessForUser(
+                $organization,
                 $user,
-                $organizationId,
-                $deploymentId,
                 $auditDeviceId,
                 $clientFamily,
                 $os,
+                $auditIp,
+                'password',
                 $now,
             );
-            $claims = $issued['claims'];
-            $this->store->recordSuccessfulLogin(
-                $organizationId,
-                (int) $user['id'],
-                $loginAt,
-                $clientFamily,
-                $this->loginAudit(
-                    $organizationId,
-                    (string) $user['user_id'],
-                    $auditDeviceId,
-                    $auditIp,
-                    $loginAt,
-                    $clientFamily,
-                    $os,
-                    'success',
-                    null,
-                ),
-                [
-                    'organization' => $organizationId,
-                    'jti' => (string) $claims['jti'],
-                    'im_user_id' => (int) $user['id'],
-                    'user_id' => (string) $user['user_id'],
-                    'device_id' => $auditDeviceId,
-                    'status' => 1,
-                    'expire_at' => date('Y-m-d H:i:s', (int) $claims['exp']),
-                    'revoked_at' => null,
-                    'create_time' => $loginAt,
-                    'update_time' => $loginAt,
-                ],
-            );
-            $user['login_time'] = $loginAt;
-
-            return [
-                'organization' => $organizationId,
-                'deployment_id' => $deploymentId,
-                'token' => $issued['token'],
-                'user' => $this->userView($organizationId, $user),
-            ];
         } catch (ApiException $exception) {
             if ($exception->getCode() === RedisWebImLoginRateLimiter::RATE_LIMITED) {
                 $failureCode = 'LOGIN_RATE_LIMITED';
@@ -199,10 +162,125 @@ final class WebImAuthService
                 $clientFamily,
                 $os,
                 'failed',
+                'password',
                 $failureCode,
             ));
             throw $exception;
         }
+    }
+
+    public function issueAccessForUser(
+        array $organization,
+        array $user,
+        string $deviceId,
+        string $clientFamily,
+        string $os,
+        string $clientIp,
+        string $auditScope,
+        ?int $now = null,
+    ): array {
+        $organizationId = (int) ($organization['id'] ?? 0);
+        if ($organizationId <= 0 || (int) ($user['id'] ?? 0) <= 0) {
+            throw new ApiException('客户端登录身份无效。', 401);
+        }
+        $deploymentId = OrganizationDiscovery::assertDeploymentId((string) ($organization['deployment_id'] ?? ''));
+        [$clientFamily, $os] = $this->clientRuntime($clientFamily, $os);
+        $deviceId = $this->identifier($deviceId, 'device_id', 100);
+        $clientIp = $this->ip($clientIp);
+        $auditScope = $this->auditScope($auditScope);
+        $this->policies->assertAllowed($organizationId, $clientFamily);
+        $now ??= $this->now();
+        $loginAt = date('Y-m-d H:i:s', $now);
+        $issued = $this->webTokens->issueAccessSession(
+            $user,
+            $organizationId,
+            $deploymentId,
+            $deviceId,
+            $clientFamily,
+            $os,
+            $now,
+        );
+        $claims = $issued['claims'];
+        $this->store->recordSuccessfulLogin(
+            $organizationId,
+            (int) $user['id'],
+            $loginAt,
+            $clientFamily,
+            $this->loginAudit(
+                $organizationId,
+                (string) $user['user_id'],
+                $deviceId,
+                $clientIp,
+                $loginAt,
+                $clientFamily,
+                $os,
+                'success',
+                $auditScope,
+                null,
+            ),
+            [
+                'organization' => $organizationId,
+                'jti' => (string) $claims['jti'],
+                'im_user_id' => (int) $user['id'],
+                'user_id' => (string) $user['user_id'],
+                'device_id' => $deviceId,
+                'status' => 1,
+                'expire_at' => date('Y-m-d H:i:s', (int) $claims['exp']),
+                'revoked_at' => null,
+                'create_time' => $loginAt,
+                'update_time' => $loginAt,
+            ],
+        );
+        $user['login_time'] = $loginAt;
+
+        return [
+            'organization' => $organizationId,
+            'deployment_id' => $deploymentId,
+            'token' => $issued['token'],
+            'user' => $this->userView($organizationId, $user),
+        ];
+    }
+
+    public function recordLoginEvent(
+        int $organization,
+        string $userId,
+        ?string $deviceId,
+        ?string $loginIp,
+        string $clientFamily,
+        string $os,
+        string $result,
+        string $auditScope,
+        ?string $failureCode = null,
+        ?int $now = null,
+    ): void {
+        if ($organization <= 0) {
+            throw new ApiException('登录审计机构无效。', 422);
+        }
+        $userId = $this->identifier($userId, 'user_id', 64);
+        if ($deviceId !== null) {
+            $deviceId = $this->identifier($deviceId, 'device_id', 100);
+        }
+        if ($loginIp !== null) {
+            $loginIp = $this->ip($loginIp);
+        }
+        [$clientFamily, $os] = $this->clientRuntime($clientFamily, $os);
+        if (!in_array($result, ['success', 'failed', 'confirmed'], true)) {
+            throw new ApiException('登录审计结果无效。', 422);
+        }
+        $auditScope = $this->auditScope($auditScope);
+        $now ??= $this->now();
+        $this->store->recordLoginAudit($this->loginAudit(
+            $organization,
+            $userId,
+            $deviceId,
+            $loginIp,
+            date('Y-m-d H:i:s', $now),
+            $clientFamily,
+            $os,
+            $result,
+            $auditScope,
+            $failureCode,
+        ));
     }
 
     /**
@@ -456,6 +534,7 @@ final class WebImAuthService
         string $clientFamily,
         string $os,
         string $result,
+        string $auditScope,
         ?string $failureCode,
     ): array {
         return [
@@ -474,11 +553,21 @@ final class WebImAuthService
             'login_at' => $loginAt,
             'logout_at' => null,
             'login_result' => $result,
-            'audit_scope' => 'login',
+            'audit_scope' => $auditScope,
             'current_online_state' => 2,
             'failure_code' => $failureCode,
             'create_time' => $loginAt,
         ];
+    }
+
+    private function auditScope(string $scope): string
+    {
+        $scope = trim($scope);
+        if (!in_array($scope, ['password', 'register', 'qr_login'], true)) {
+            throw new ApiException('登录审计方式无效。', 422);
+        }
+
+        return $scope;
     }
 
     private function auditSubject(int $organization, string $account): string

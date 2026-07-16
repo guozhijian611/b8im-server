@@ -27,7 +27,7 @@ final class WebCors implements MiddlewareInterface
             }
 
             $organization = $resolver->fromRequest($request);
-            $allowedOrigin = $origin === '' ? '' : $resolver->assertOrganizationOrigin($organization, $origin);
+            $allowedOrigin = $resolver->assertOrganizationOrigin($organization, $origin);
             $response = $handler($request);
         } catch (ApiException $exception) {
             $response = json([
