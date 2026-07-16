@@ -257,7 +257,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             if (!$this->areFriends($organization, $userId, $peerUserId)) {
                 throw new ApiException('只能查看好友会话。', 403);
             }
-            $conversationId = $this->singleConversationId($organization, $userId, $peerUserId);
+            $conversationId = $this->resolveSingleConversationId($organization, $userId, $peerUserId);
             if (!$this->conversationExists($organization, $conversationId)) {
                 return $this->emptyMessagePage($afterSeq, $beforeSeq);
             }
@@ -1430,7 +1430,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             }
             $sql .= ' ORDER BY m.message_seq DESC LIMIT ' . $limit;
             foreach (Db::query($sql, $params) as $message) {
-                $messages[] = $this->formatMessage($message);
+                $messages[] = $this->formatMessage($message, $organization);
             }
         }
         usort($messages, static fn (array $left, array $right): int =>
@@ -2113,7 +2113,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             if (($body['delete_time'] ?? null) !== null || (int) ($body['status'] ?? 0) === 3) {
                 continue;
             }
-            $messages[] = $this->formatMessage($body);
+            $messages[] = $this->formatMessage($body, $organization);
         }
 
         $outgoingMessageIds = [];
@@ -2174,13 +2174,20 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         return $result;
     }
 
-    /** @param array<string, mixed> $message @return array<string, mixed> */
-    private function formatMessage(array $message): array
+    /**
+     * @param array<string, mixed> $message
+     * @return array<string, mixed>
+     */
+    private function formatMessage(array $message, ?int $viewerOrganization = null): array
     {
         $status = (int) ($message['status'] ?? 0);
         $content = json_decode((string) ($message['content'] ?? '{}'), true);
         $senderId = (string) ($message['sender_id'] ?? '');
-        $sender = $this->userById((int) $message['organization'], $senderId, false);
+        $messageOrganization = (int) ($message['organization'] ?? 0);
+        $viewerOrg = $viewerOrganization !== null && $viewerOrganization > 0
+            ? $viewerOrganization
+            : $messageOrganization;
+        $sender = $this->resolveMessageSender($senderId, $messageOrganization);
 
         return [
             'id' => (int) $message['id'],
@@ -2190,7 +2197,9 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             'message_seq' => (int) $message['message_seq'],
             'client_msg_id' => (string) $message['client_msg_id'],
             'sender_id' => $senderId,
-            'sender_user' => $sender !== null ? $this->userView($sender) : null,
+            'sender_user' => $sender !== null
+                ? $this->userView($sender, '', 'none', $viewerOrg)
+                : null,
             'message_type' => (int) $message['message_type'],
             'content' => $status === 1 && is_array($content) ? $content : [],
             'status' => $status,
@@ -2198,6 +2207,48 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             'edit_count' => (int) ($message['edit_count'] ?? 0),
             'create_time' => (string) ($message['create_time'] ?? ''),
         ];
+    }
+
+    /**
+     * Resolve message sender for same-org and dual-home cross-org rows.
+     * Prefer the message organization, then any home org for the user_id.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function resolveMessageSender(string $senderId, int $messageOrganization): ?array
+    {
+        if ($senderId === '') {
+            return null;
+        }
+        if ($messageOrganization > 0) {
+            $sameOrg = $this->userById($messageOrganization, $senderId, false);
+            if ($sameOrg !== null) {
+                return $sameOrg;
+            }
+        }
+
+        // Dual-home cross-org: body may live in recipient org while sender_id is peer home user.
+        $row = Db::query(
+            'SELECT u.*, COALESCE(p.signature, "") AS signature
+               FROM im_user u
+          LEFT JOIN im_user_profile p
+                 ON p.organization = u.organization
+                AND p.user_id = u.user_id
+                AND p.status = 1
+                AND p.delete_time IS NULL
+              WHERE u.user_id = ?
+                AND u.delete_time IS NULL
+           ORDER BY CASE
+                        WHEN u.organization = ? THEN 0
+                        WHEN u.organization = 0 THEN 2
+                        ELSE 1
+                    END,
+                    u.id ASC
+              LIMIT 1',
+            [$senderId, $messageOrganization],
+        )[0] ?? null;
+
+        return is_array($row) ? $row : null;
     }
 
     /** @return array<string, mixed> */
@@ -2636,6 +2687,32 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         sort($pair, SORT_STRING);
 
         return 'single_' . substr(sha1($organization . ':' . implode(':', $pair)), 0, 40);
+    }
+
+    /**
+     * Same-org uses legacy org-scoped id; cross-org friends use org-independent single_x_ id.
+     */
+    private function resolveSingleConversationId(int $organization, string $left, string $right): string
+    {
+        $forward = Db::query(
+            'SELECT friend_organization FROM im_friend_relation
+              WHERE organization = ?
+                AND user_id = ?
+                AND friend_user_id = ?
+                AND status = 1
+                AND delete_time IS NULL
+              LIMIT 1',
+            [$organization, $left, $right],
+        )[0] ?? null;
+        $peerOrg = (int) ($forward['friend_organization'] ?? 0);
+        if ($peerOrg > 0 && $peerOrg !== $organization) {
+            $pair = [$left, $right];
+            sort($pair, SORT_STRING);
+
+            return 'single_x_' . substr(sha1(implode(':', $pair)), 0, 40);
+        }
+
+        return $this->singleConversationId($organization, $left, $right);
     }
 
     private function quoteShard(string $table): string

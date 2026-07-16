@@ -638,7 +638,12 @@ final class WebImControlService
     private function projectMessage(int $organization, array $message): array
     {
         if (is_array($message['sender_user'] ?? null)) {
-            $message['sender_user'] = $this->projectUser($organization, $message['sender_user']);
+            // Avatar assets are stored under the sender's home organization (may differ for dual-home).
+            $senderOrg = (int) ($message['sender_user']['organization'] ?? 0);
+            if ($senderOrg <= 0) {
+                $senderOrg = $organization;
+            }
+            $message['sender_user'] = $this->projectUser($senderOrg, $message['sender_user']);
         }
 
         return $message;
