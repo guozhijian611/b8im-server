@@ -12,26 +12,38 @@ if (!is_file($announcementModuleRoot . DIRECTORY_SEPARATOR . 'module.json')) {
     throw new RuntimeException('b8im/module-sdk 安装包缺少 examples/announcement/module.json。');
 }
 
-$i18nModuleRoot = null;
-$i18nInstallPath = \Composer\InstalledVersions::isInstalled('b8im/module-i18n')
-    ? \Composer\InstalledVersions::getInstallPath('b8im/module-i18n')
-    : false;
-if (is_string($i18nInstallPath) && $i18nInstallPath !== '') {
-    $candidate = rtrim($i18nInstallPath, DIRECTORY_SEPARATOR);
-    if (is_file($candidate . DIRECTORY_SEPARATOR . 'module.json')) {
-        $i18nModuleRoot = $candidate;
+/**
+ * Resolve a commercial module root from Composer path install or workspace sibling.
+ */
+$resolveModuleRoot = static function (string $packageName, string $siblingDir): ?string {
+    $installPath = \Composer\InstalledVersions::isInstalled($packageName)
+        ? \Composer\InstalledVersions::getInstallPath($packageName)
+        : false;
+    if (is_string($installPath) && $installPath !== '') {
+        $candidate = rtrim($installPath, DIRECTORY_SEPARATOR);
+        if (is_file($candidate . DIRECTORY_SEPARATOR . 'module.json')) {
+            return $candidate;
+        }
     }
-}
-if ($i18nModuleRoot === null) {
-    $workspaceSibling = dirname(base_path()) . DIRECTORY_SEPARATOR . 'b8im-module-i18n';
-    if (is_file($workspaceSibling . DIRECTORY_SEPARATOR . 'module.json')) {
-        $i18nModuleRoot = $workspaceSibling;
+    if (function_exists('base_path')) {
+        $workspaceSibling = dirname(base_path()) . DIRECTORY_SEPARATOR . $siblingDir;
+        if (is_file($workspaceSibling . DIRECTORY_SEPARATOR . 'module.json')) {
+            return $workspaceSibling;
+        }
     }
-}
+
+    return null;
+};
 
 $manifestRoots = [$announcementModuleRoot];
-if (is_string($i18nModuleRoot) && $i18nModuleRoot !== '') {
-    $manifestRoots[] = $i18nModuleRoot;
+foreach ([
+    'b8im/module-i18n' => 'b8im-module-i18n',
+    'b8im/module-favorite' => 'b8im-module-favorite',
+] as $package => $sibling) {
+    $root = $resolveModuleRoot($package, $sibling);
+    if (is_string($root) && $root !== '') {
+        $manifestRoots[] = $root;
+    }
 }
 
 return [

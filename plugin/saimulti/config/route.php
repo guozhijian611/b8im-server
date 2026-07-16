@@ -67,6 +67,12 @@ Route::group('/saimulti', function () {
 	Route::post('/web/announcement/acknowledge', [\plugin\saimulti\app\controller\web\AnnouncementController::class, 'acknowledge']);
 	Route::get('/web/i18n/locales', [\plugin\saimulti\app\controller\web\I18nController::class, 'locales']);
 	Route::get('/web/i18n/messages', [\plugin\saimulti\app\controller\web\I18nController::class, 'messages']);
+	Route::get('/web/favorite/index', [\plugin\saimulti\app\controller\web\FavoriteController::class, 'index']);
+	Route::get('/web/favorite/read', [\plugin\saimulti\app\controller\web\FavoriteController::class, 'read']);
+	Route::post('/web/favorite/save', [\plugin\saimulti\app\controller\web\FavoriteController::class, 'save']);
+	// Web 客户端 requestWebApi 仅支持 GET/POST
+	Route::post('/web/favorite/destroy', [\plugin\saimulti\app\controller\web\FavoriteController::class, 'destroy']);
+	Route::delete('/web/favorite/destroy', [\plugin\saimulti\app\controller\web\FavoriteController::class, 'destroy']);
 
 	foreach ([
 		'/web/im/imToken',
@@ -105,6 +111,10 @@ Route::group('/saimulti', function () {
 		'/web/announcement/acknowledge',
 		'/web/i18n/locales',
 		'/web/i18n/messages',
+		'/web/favorite/index',
+		'/web/favorite/read',
+		'/web/favorite/save',
+		'/web/favorite/destroy',
 	] as $path) {
 		Route::options($path, static fn () => response('', 204));
 	}
@@ -209,6 +219,9 @@ Route::group("/saimulti", function () {
 	Route::put('/admin/i18n/entryUpdate', [\plugin\saimulti\app\controller\admin\I18nController::class, 'entryUpdate']);
 	Route::delete('/admin/i18n/entryDestroy', [\plugin\saimulti\app\controller\admin\I18nController::class, 'entryDestroy']);
 
+	// 商业模块 favorite
+	saiMultiRoute('/admin/favorite', \plugin\saimulti\app\controller\admin\FavoriteController::class);
+
 	// IM 运行管理与安全审计
 	Route::get('/admin/im/operations/overview', [\plugin\saimulti\app\controller\admin\AdminImOperationsController::class, 'overview']);
 	Route::get('/admin/im/operations/users', [\plugin\saimulti\app\controller\admin\AdminImOperationsController::class, 'users']);
@@ -304,6 +317,9 @@ Route::group("/saimulti", function () {
 	Route::post('/tenant/i18n/entrySave', [\plugin\saimulti\app\controller\tenant\I18nController::class, 'entrySave']);
 	Route::put('/tenant/i18n/entryUpdate', [\plugin\saimulti\app\controller\tenant\I18nController::class, 'entryUpdate']);
 	Route::delete('/tenant/i18n/entryDestroy', [\plugin\saimulti\app\controller\tenant\I18nController::class, 'entryDestroy']);
+
+	// 租户 favorite
+	saiMultiRoute('/tenant/favorite', \plugin\saimulti\app\controller\tenant\FavoriteController::class);
 
 	// 租户 IM 运行策略（organization 只取认证上下文）
 	Route::get('/tenant/im/policy/read', [\plugin\saimulti\app\controller\tenant\TenantImPolicyController::class, 'read']);

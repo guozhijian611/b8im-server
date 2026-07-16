@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "2595314c94b7037d436e77e1ae147ddf",
+    "content-hash": "9218646745ed0d793a92cfd55cc9e00d",
     "packages": [
         {
             "name": "aliyuncs/oss-sdk-php",
@@ -201,6 +201,33 @@
                 "source": "https://github.com/aws/aws-sdk-php/tree/3.388.3"
             },
             "time": "2026-07-09T18:07:47+00:00"
+        },
+        {
+            "name": "b8im/module-favorite",
+            "version": "dev-main",
+            "dist": {
+                "type": "path",
+                "url": "../b8im-module-favorite",
+                "reference": "197b710a3bdc6b4c42f197eb8009e86176084597"
+            },
+            "require": {
+                "b8im/module-sdk": "dev-main",
+                "php": ">=8.1"
+            },
+            "type": "library",
+            "autoload": {
+                "psr-4": {
+                    "B8im\\Module\\Favorite\\": "src/"
+                }
+            },
+            "license": [
+                "proprietary"
+            ],
+            "description": "B8IM favorite commercial module",
+            "transport-options": {
+                "symlink": true,
+                "relative": true
+            }
         },
         {
             "name": "b8im/module-i18n",
@@ -8575,6 +8602,7 @@
     "aliases": [],
     "minimum-stability": "dev",
     "stability-flags": {
+        "b8im/module-favorite": 20,
         "b8im/module-i18n": 20,
         "b8im/module-sdk": 20
     },
