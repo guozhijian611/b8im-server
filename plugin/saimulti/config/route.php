@@ -106,6 +106,13 @@ Route::group('/saimulti', function () {
 	Route::get('/web/robot-single/index', [\plugin\saimulti\app\controller\web\RobotSingleController::class, 'index']);
 	Route::get('/web/robot-single/read', [\plugin\saimulti\app\controller\web\RobotSingleController::class, 'read']);
 	Route::post('/web/robot-single/match', [\plugin\saimulti\app\controller\web\RobotSingleController::class, 'match']);
+	Route::get('/web/file-media/usage', [\plugin\saimulti\app\controller\web\FileMediaController::class, 'usage']);
+	Route::post('/web/file-media/checkUpload', [\plugin\saimulti\app\controller\web\FileMediaController::class, 'checkUpload']);
+	Route::get('/web/file-media/folderIndex', [\plugin\saimulti\app\controller\web\FileMediaController::class, 'folderIndex']);
+	Route::post('/web/file-media/folderSave', [\plugin\saimulti\app\controller\web\FileMediaController::class, 'folderSave']);
+	Route::get('/web/file-media/itemIndex', [\plugin\saimulti\app\controller\web\FileMediaController::class, 'itemIndex']);
+	Route::post('/web/file-media/itemSave', [\plugin\saimulti\app\controller\web\FileMediaController::class, 'itemSave']);
+	Route::post('/web/file-media/itemDestroy', [\plugin\saimulti\app\controller\web\FileMediaController::class, 'itemDestroy']);
 
 	foreach ([
 		'/web/im/imToken',
@@ -156,6 +163,13 @@ Route::group('/saimulti', function () {
 		'/web/robot-single/index',
 		'/web/robot-single/read',
 		'/web/robot-single/match',
+		'/web/file-media/usage',
+		'/web/file-media/checkUpload',
+		'/web/file-media/folderIndex',
+		'/web/file-media/folderSave',
+		'/web/file-media/itemIndex',
+		'/web/file-media/itemSave',
+		'/web/file-media/itemDestroy',
 	] as $path) {
 		Route::options($path, static fn () => response('', 204));
 	}
@@ -280,6 +294,13 @@ Route::group("/saimulti", function () {
 	Route::get('/admin/robot-single/ruleIndex', [\plugin\saimulti\app\controller\admin\RobotSingleController::class, 'ruleIndex']);
 	Route::get('/admin/robot-single/kbIndex', [\plugin\saimulti\app\controller\admin\RobotSingleController::class, 'kbIndex']);
 
+	// 商业模块 file_media（平台）
+	Route::get('/admin/file-media/quotaIndex', [\plugin\saimulti\app\controller\admin\FileMediaController::class, 'quotaIndex']);
+	Route::get('/admin/file-media/quotaRead', [\plugin\saimulti\app\controller\admin\FileMediaController::class, 'quotaRead']);
+	Route::put('/admin/file-media/quotaUpdate', [\plugin\saimulti\app\controller\admin\FileMediaController::class, 'quotaUpdate']);
+	Route::get('/admin/file-media/itemIndex', [\plugin\saimulti\app\controller\admin\FileMediaController::class, 'itemIndex']);
+	Route::get('/admin/file-media/folderIndex', [\plugin\saimulti\app\controller\admin\FileMediaController::class, 'folderIndex']);
+
 	// IM 运行管理与安全审计
 	Route::get('/admin/im/operations/overview', [\plugin\saimulti\app\controller\admin\AdminImOperationsController::class, 'overview']);
 	Route::get('/admin/im/operations/users', [\plugin\saimulti\app\controller\admin\AdminImOperationsController::class, 'users']);
@@ -385,6 +406,19 @@ Route::group("/saimulti", function () {
 	Route::post('/tenant/sticker/itemSave', [\plugin\saimulti\app\controller\tenant\StickerController::class, 'itemSave']);
 	Route::put('/tenant/sticker/itemUpdate', [\plugin\saimulti\app\controller\tenant\StickerController::class, 'itemUpdate']);
 	Route::delete('/tenant/sticker/itemDestroy', [\plugin\saimulti\app\controller\tenant\StickerController::class, 'itemDestroy']);
+
+	// 租户 file_media
+	$fm = \plugin\saimulti\app\controller\tenant\FileMediaController::class;
+	Route::get('/tenant/file-media/quotaRead', [$fm, 'quotaRead']);
+	Route::put('/tenant/file-media/quotaUpdate', [$fm, 'quotaUpdate']);
+	Route::get('/tenant/file-media/folderIndex', [$fm, 'folderIndex']);
+	Route::post('/tenant/file-media/folderSave', [$fm, 'folderSave']);
+	Route::put('/tenant/file-media/folderUpdate', [$fm, 'folderUpdate']);
+	Route::delete('/tenant/file-media/folderDestroy', [$fm, 'folderDestroy']);
+	Route::get('/tenant/file-media/itemIndex', [$fm, 'itemIndex']);
+	Route::post('/tenant/file-media/itemSave', [$fm, 'itemSave']);
+	Route::put('/tenant/file-media/itemUpdate', [$fm, 'itemUpdate']);
+	Route::delete('/tenant/file-media/itemDestroy', [$fm, 'itemDestroy']);
 
 	// 租户 robot_single
 	$rs = \plugin\saimulti\app\controller\tenant\RobotSingleController::class;

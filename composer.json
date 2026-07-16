@@ -71,6 +71,14 @@
                 "symlink": true,
                 "reference": "auto"
             }
+        },
+        {
+            "type": "path",
+            "url": "../b8im-module-file-media",
+            "options": {
+                "symlink": true,
+                "reference": "auto"
+            }
         }
     ],
     "require": {
@@ -110,7 +118,8 @@
         "b8im/module-favorite": "dev-main",
         "b8im/module-sticker": "dev-main",
         "b8im/module-customer-service": "dev-main",
-        "b8im/module-robot-single": "dev-main"
+        "b8im/module-robot-single": "dev-main",
+        "b8im/module-file-media": "dev-main"
     },
     "suggest": {
         "ext-event": "For better performance. "

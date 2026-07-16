@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "dc4f8b7d8194879896b9ba5d59878430",
+    "content-hash": "936c23858a1a745c1439cb61341078e6",
     "packages": [
         {
             "name": "aliyuncs/oss-sdk-php",
@@ -251,6 +251,33 @@
                 "proprietary"
             ],
             "description": "B8IM favorite commercial module",
+            "transport-options": {
+                "symlink": true,
+                "relative": true
+            }
+        },
+        {
+            "name": "b8im/module-file-media",
+            "version": "dev-main",
+            "dist": {
+                "type": "path",
+                "url": "../b8im-module-file-media",
+                "reference": "bd8c4e79f3482441acbdfd8ff042f0b798b199d9"
+            },
+            "require": {
+                "b8im/module-sdk": "dev-main",
+                "php": ">=8.1"
+            },
+            "type": "library",
+            "autoload": {
+                "psr-4": {
+                    "B8im\\Module\\FileMedia\\": "src/"
+                }
+            },
+            "license": [
+                "proprietary"
+            ],
+            "description": "B8IM file_media commercial module",
             "transport-options": {
                 "symlink": true,
                 "relative": true
@@ -8685,6 +8712,7 @@
     "stability-flags": {
         "b8im/module-customer-service": 20,
         "b8im/module-favorite": 20,
+        "b8im/module-file-media": 20,
         "b8im/module-i18n": 20,
         "b8im/module-robot-single": 20,
         "b8im/module-sdk": 20,
