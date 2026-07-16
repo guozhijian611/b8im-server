@@ -12,6 +12,7 @@ use B8im\ModuleSdk\Manifest\Manifest;
 use B8im\ModuleSdk\State\SystemModuleStatus;
 use B8im\ModuleSdk\State\TenantModuleStatus;
 use Composer\InstalledVersions;
+use plugin\saimulti\exception\ApiException;
 use plugin\saimulti\service\ModuleRequired;
 use plugin\saimulti\service\module\ClientConfigProjectionService;
 use plugin\saimulti\service\module\DistributedLockInterface;
@@ -838,6 +839,28 @@ $assert(
     $projected['modules'][0]['config'] === ['display_mode' => 'both', 'require_read_ack' => true],
     '非敏感租户模块配置未投影给 Web，或敏感配置被投影',
 );
+$defaultProjection = (new ClientConfigProjectionService(
+    $access,
+    static fn (): array => [$secureManifest],
+    static fn (int $organization): int => 12,
+    static fn (int $organization, string $moduleKey): ?array => null,
+))->project(1, 'b8im-local', 'web');
+$assert(
+    $defaultProjection['modules'][0]['config'] === ['display_mode' => 'list', 'require_read_ack' => false],
+    '租户未保存模块配置时没有投影 manifest 默认值',
+);
+$invalidListRejected = false;
+try {
+    (new ClientConfigProjectionService(
+        $access,
+        static fn (): array => [$secureManifest],
+        static fn (int $organization): int => 12,
+        static fn (int $organization, string $moduleKey): array => ['invalid-list-item'],
+    ))->project(1, 'b8im-local', 'web');
+} catch (ApiException $exception) {
+    $invalidListRejected = $exception->getCode() === 500;
+}
+$assert($invalidListRejected, '非空列表模块配置未被拒绝');
 $assert(array_is_list($projected['modules'][0]['capabilities']), 'Web capabilities 未投影为扁平数组');
 $assert(
     $projected['tabbar'] === [['module_key' => 'announcement', 'title' => '公告']],

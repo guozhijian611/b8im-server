@@ -214,7 +214,7 @@ final class ClientConfigProjectionService
         }
 
         $stored = ($this->tenantConfigProvider)($organization, $manifest->moduleKey()) ?? [];
-        if (!is_array($stored) || array_is_list($stored)) {
+        if (!is_array($stored) || ($stored !== [] && array_is_list($stored))) {
             throw new ApiException('租户模块配置格式无效。', 500);
         }
 
@@ -242,7 +242,7 @@ final class ClientConfigProjectionService
         }
 
         $stored = json_decode((string) $row['config_json'], true, flags: JSON_THROW_ON_ERROR);
-        if (!is_array($stored) || array_is_list($stored)) {
+        if (!is_array($stored) || ($stored !== [] && array_is_list($stored))) {
             throw new ApiException('租户模块配置格式无效。', 500);
         }
 
