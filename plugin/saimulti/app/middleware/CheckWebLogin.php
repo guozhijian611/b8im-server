@@ -31,9 +31,9 @@ final class CheckWebLogin implements MiddlewareInterface
     public function process(Request $request, callable $handler): Response
     {
         Telemetry::inSpan(
-            'b8im.auth.web.session',
-            'auth.web.session',
-            ['b8im.auth.scope' => 'web'],
+            'b8im.auth.client.session',
+            'auth.client.session',
+            ['b8im.auth.scope' => 'client'],
             fn () => $this->authenticate($request),
         );
 
@@ -50,16 +50,22 @@ final class CheckWebLogin implements MiddlewareInterface
         $organizationId = (int) $organization['id'];
         Span::getCurrent()->setAttribute('b8im.organization', $organizationId);
         $deploymentId = (string) $organization['deployment_id'];
+        $clientFamily = $this->clientFamily($request);
         $tokens = new WebTokenService();
         $claims = $tokens->verifyAccess(
             $tokens->extractBearer($request->header('Authorization')),
             $organizationId,
             $deploymentId,
+            $clientFamily,
         );
         ($this->accessSessions ?? new WebImAccessSessionGuard())->assertActive($claims, $organizationId);
 
-        if (WebImPolicyGuard::appliesToPath((string) $request->path())) {
-            ($this->policies ?? new WebImPolicyGuard())->assertWebAllowed($organizationId);
+        $policyFamily = WebImPolicyGuard::familyForPath((string) $request->path());
+        if ($policyFamily !== null) {
+            if (!hash_equals($clientFamily, $policyFamily)) {
+                throw new ApiException('登录凭证不能跨客户端形态使用。', 401);
+            }
+            ($this->policies ?? new WebImPolicyGuard())->assertAllowed($organizationId, $clientFamily);
         }
 
         $user = Db::table('im_user')
@@ -71,7 +77,7 @@ final class CheckWebLogin implements MiddlewareInterface
             ->whereNull('delete_time')
             ->find();
         if (!$user) {
-            throw new ApiException('Web 用户已停用或不存在。', 401);
+            throw new ApiException('客户端用户已停用或不存在。', 401);
         }
 
         $identity = [
@@ -82,7 +88,8 @@ final class CheckWebLogin implements MiddlewareInterface
             'account' => (string) $user['account'],
             'nickname' => (string) $user['nickname'],
             'device_id' => (string) $claims['device_id'],
-            'client_family' => 'web',
+            'client_family' => (string) $claims['client_family'],
+            'os' => (string) $claims['os'],
             'token_exp' => (int) $claims['exp'],
             'web_access_jti' => (string) $claims['jti'],
         ];
@@ -112,5 +119,23 @@ final class CheckWebLogin implements MiddlewareInterface
         $attributes = $class->getAttributes(ModuleRequired::class);
 
         return $attributes === [] ? null : $attributes[0]->newInstance();
+    }
+
+    private function clientFamily(Request $request): string
+    {
+        $path = '/' . ltrim((string) $request->path(), '/');
+        foreach (['web', 'app', 'desktop'] as $clientFamily) {
+            if (str_starts_with($path, '/saimulti/' . $clientFamily . '/')) {
+                return $clientFamily;
+            }
+        }
+        if ($path === '/saimulti/client/config') {
+            $clientFamily = trim((string) $request->get('client_family', ''));
+            if (in_array($clientFamily, ['web', 'app', 'desktop'], true)) {
+                return $clientFamily;
+            }
+        }
+
+        throw new ApiException('无法确定认证客户端形态。', 422);
     }
 }

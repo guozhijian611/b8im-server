@@ -83,6 +83,7 @@ final class InMemoryWebImAuthStore implements WebImAuthStoreInterface
         int $organization,
         int $id,
         string $loginAt,
+        string $clientFamily,
         array $audit,
         array $accessSession,
     ): void
@@ -116,8 +117,8 @@ final class InMemoryWebImAuthStore implements WebImAuthStoreInterface
             $existingDevice
             && (
                 (int) $existingDevice['status'] !== 1
-                || $existingDevice['client_family'] !== 'web'
-                || $existingDevice['os'] !== 'browser'
+                || $existingDevice['client_family'] !== $device['client_family']
+                || $existingDevice['os'] !== $device['os']
             )
         ) {
             throw new ApiException('当前 Web 设备已停用或设备类型不匹配。', 403);
@@ -304,6 +305,8 @@ $login = $service->login(
     'alice',
     'correct-password',
     'web-login-device',
+    'web',
+    'browser',
     '203.0.113.10',
 );
 $assert(array_keys($login) === ['organization', 'deployment_id', 'token', 'user'], 'Login contract is not exact.');
@@ -320,6 +323,8 @@ $expectApiCode(401, static fn () => $service->login(
     'alice',
     'wrong-password',
     'web-login-device',
+    'web',
+    'browser',
     '203.0.113.10',
 ));
 $assert(count($store->audits) === 2 && $store->audits[1]['login_result'] === 'failed', 'Failed login audit missing.');
@@ -330,6 +335,8 @@ $expectApiCode(RedisWebImLoginRateLimiter::RATE_LIMITED, static fn () => $servic
     'alice',
     'correct-password',
     'web-login-device',
+    'web',
+    'browser',
     '203.0.113.10',
 ));
 $assert(
@@ -350,6 +357,7 @@ $accessClaims = $webTokens->verifyAccess(
     $login['token']['access_token'],
     7,
     'deployment-1',
+    'web',
 );
 $identity = [
     'id' => $accessClaims['id'],
@@ -358,7 +366,8 @@ $identity = [
     'user_id' => $accessClaims['user_id'],
     'account' => $accessClaims['account'],
     'device_id' => $accessClaims['device_id'],
-    'client_family' => 'web',
+    'client_family' => $accessClaims['client_family'],
+    'os' => $accessClaims['os'],
     'token_exp' => $accessClaims['exp'],
     'web_access_jti' => $accessClaims['jti'],
 ];
@@ -467,12 +476,62 @@ $assert(
     'Revoked client_id was revived by challenge upsert.',
 );
 
+$appLogin = $service->login(
+    $organization,
+    'alice',
+    'correct-password',
+    'app-login-device',
+    'app',
+    'ios',
+    '203.0.113.20',
+);
+$appAccessClaims = $webTokens->verifyAccess(
+    $appLogin['token']['access_token'],
+    7,
+    'deployment-1',
+    'app',
+);
+$appIdentity = [
+    'id' => $appAccessClaims['id'],
+    'organization' => $appAccessClaims['organization'],
+    'deployment_id' => $appAccessClaims['deployment_id'],
+    'user_id' => $appAccessClaims['user_id'],
+    'account' => $appAccessClaims['account'],
+    'device_id' => $appAccessClaims['device_id'],
+    'client_family' => $appAccessClaims['client_family'],
+    'os' => $appAccessClaims['os'],
+    'token_exp' => $appAccessClaims['exp'],
+    'web_access_jti' => $appAccessClaims['jti'],
+];
+$appChallenge = $service->issueImToken(
+    $appIdentity,
+    'app-login-device',
+    'gateway-app-client-1',
+    '203.0.113.21',
+);
+$appImClaims = (array) JWT::decode($appChallenge['token'], new Key($imSecret, 'HS256'));
+$assert(
+    $appImClaims['client_family'] === 'app'
+    && $appImClaims['os'] === 'ios'
+    && $appImClaims['aud'] === 'im',
+    'App IM challenge runtime claims mismatch.',
+);
+$appDevice = $store->devices['7:user_9:app-login-device'] ?? null;
+$assert(
+    is_array($appDevice)
+    && $appDevice['client_family'] === 'app'
+    && $appDevice['os'] === 'ios',
+    'App device runtime was not persisted.',
+);
+
 $policyStore->rows[7]['status'] = 'DISABLED';
 $expectApiCode(403, static fn () => $service->login(
     $organization,
     'alice',
     'correct-password',
     'web-login-device',
+    'web',
+    'browser',
     '203.0.113.10',
 ));
 $policyStore->rows[7]['status'] = 'ENABLED';

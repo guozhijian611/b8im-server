@@ -67,11 +67,12 @@ final class ThinkOrmWebImAuthStore implements WebImAuthStoreInterface
         int $organization,
         int $id,
         string $loginAt,
+        string $clientFamily,
         array $audit,
         array $accessSession,
     ): void
     {
-        Db::transaction(function () use ($organization, $id, $loginAt, $audit, $accessSession): void {
+        Db::transaction(function () use ($organization, $id, $loginAt, $clientFamily, $audit, $accessSession): void {
             // Global lock order for organization access transitions is:
             // organization -> user/policy -> auth/access sessions. This makes
             // login serialize before or after organization disable, never in
@@ -97,14 +98,18 @@ final class ThinkOrmWebImAuthStore implements WebImAuthStoreInterface
                 ->lock(true)
                 ->find();
             if (!$user) {
-                throw new ApiException('当前 Web 用户已停用或不存在。', 401);
+                throw new ApiException('当前客户端用户已停用或不存在。', 401);
             }
 
             $policy = Db::table('sm_tenant_im_policy')
                 ->where('organization', $organization)
                 ->lock(true)
                 ->find();
-            WebImPolicyGuard::assertRowAllowsWeb(is_array($policy) ? $policy : null, $organization);
+            WebImPolicyGuard::assertRowAllows(
+                is_array($policy) ? $policy : null,
+                $organization,
+                $clientFamily,
+            );
 
             $affected = Db::table('im_user')
                 ->where('organization', $organization)
@@ -133,13 +138,13 @@ final class ThinkOrmWebImAuthStore implements WebImAuthStoreInterface
                     || !hash_equals($loginAt, (string) ($current['login_time'] ?? ''))
                     || !hash_equals($loginAt, (string) ($current['update_time'] ?? ''))
                 ) {
-                    throw new \RuntimeException('Web login state update was not persisted.');
+                    throw new \RuntimeException('Client login state update was not persisted.');
                 }
             }
 
             $inserted = Db::table('im_web_access_session')->insert($accessSession);
             if ((int) $inserted !== 1) {
-                throw new \RuntimeException('Web access session was not persisted.');
+                throw new \RuntimeException('Client access session was not persisted.');
             }
             Db::table('im_user_login_audit')->insert($audit);
         });
@@ -217,10 +222,10 @@ final class ThinkOrmWebImAuthStore implements WebImAuthStoreInterface
         if (
             (int) ($row['status'] ?? 0) !== 1
             || ($row['delete_time'] ?? null) !== null
-            || !hash_equals('web', (string) ($row['client_family'] ?? ''))
-            || !hash_equals('browser', (string) ($row['os'] ?? ''))
+            || !hash_equals((string) $device['client_family'], (string) ($row['client_family'] ?? ''))
+            || !hash_equals((string) $device['os'], (string) ($row['os'] ?? ''))
         ) {
-            throw new ApiException('当前 Web 设备已停用或设备类型不匹配。', 403);
+            throw new ApiException('当前客户端设备已停用或设备类型不匹配。', 403);
         }
 
         Db::table('im_user_device')
@@ -325,7 +330,7 @@ final class ThinkOrmWebImAuthStore implements WebImAuthStoreInterface
             || $expireAt <= (int) $accessSession['now']
             || (int) $accessSession['token_exp'] > $expireAt
         ) {
-            throw new ApiException('Web 登录会话已撤销或过期。', 401);
+            throw new ApiException('客户端登录会话已撤销或过期。', 401);
         }
     }
 }

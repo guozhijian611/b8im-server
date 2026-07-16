@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace plugin\saimulti\app\controller\web;
 
 use plugin\saimulti\basic\WebController;
+use plugin\saimulti\exception\ApiException;
 use plugin\saimulti\service\web\WebImAssetForwardService;
 use plugin\saimulti\service\web\WebImAssetUrlService;
 use plugin\saimulti\service\web\WebImControlService;
@@ -47,11 +48,14 @@ final class ImController extends WebController
 
     public function login(Request $request): Response
     {
+        [$clientFamily, $os] = $this->clientRuntime($request);
         return $this->success($this->auth->login(
             $this->organizations->fromRequest($request),
             (string) $request->input('account', ''),
             (string) $request->input('password', ''),
             (string) $request->input('device_id', ''),
+            $clientFamily,
+            $os,
             $request->getRealIp(),
         ));
     }
@@ -318,5 +322,19 @@ final class ImController extends WebController
     protected function publicActions(): array
     {
         return ['login'];
+    }
+
+    /** @return array{0: string, 1: string} */
+    private function clientRuntime(Request $request): array
+    {
+        $path = '/' . ltrim((string) $request->path(), '/');
+        if (str_starts_with($path, '/saimulti/web/im/')) {
+            return ['web', 'browser'];
+        }
+        if (str_starts_with($path, '/saimulti/app/im/')) {
+            return ['app', trim((string) $request->input('os', ''))];
+        }
+
+        throw new ApiException('客户端登录路由无效。', 404);
     }
 }

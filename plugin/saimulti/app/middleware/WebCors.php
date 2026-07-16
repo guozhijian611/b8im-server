@@ -27,7 +27,7 @@ final class WebCors implements MiddlewareInterface
             }
 
             $organization = $resolver->fromRequest($request);
-            $allowedOrigin = $resolver->registeredWebOrigin($organization);
+            $allowedOrigin = $origin === '' ? '' : $resolver->registeredWebOrigin($organization);
             if ($origin !== '' && !hash_equals($allowedOrigin, strtolower($origin))) {
                 throw new ApiException('当前 Origin 未在目标部署登记。', 403);
             }

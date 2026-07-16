@@ -1,6 +1,7 @@
 <?php
 
 use plugin\saimulti\app\middleware\AdminLog;
+use plugin\saimulti\app\middleware\AppClientRequest;
 use plugin\saimulti\app\middleware\CheckAdminAuth;
 use plugin\saimulti\app\middleware\CheckAdminLogin;
 use plugin\saimulti\app\middleware\CheckTenantAuth;
@@ -52,6 +53,25 @@ Route::group('/saimulti', function () {
 	Route::options('/web/im/login', static fn () => response('', 204));
 })->middleware([
 	WebCors::class,
+]);
+
+// 原生 App 普通用户公开登录。只接受无浏览器 Origin 的 App-Id 请求。
+Route::group('/saimulti', function () {
+	Route::post('/app/im/login', [\plugin\saimulti\app\controller\web\ImController::class, 'login']);
+	Route::options('/app/im/login', static fn () => response('', 204));
+})->middleware([
+	AppClientRequest::class,
+]);
+
+// 原生 App 认证接口。token 必须携带 client_family=app 和 android/ios OS。
+Route::group('/saimulti', function () {
+	Route::post('/app/im/imToken', [\plugin\saimulti\app\controller\web\ImController::class, 'imToken']);
+	Route::get('/app/im/me', [\plugin\saimulti\app\controller\web\ImController::class, 'me']);
+	Route::options('/app/im/imToken', static fn () => response('', 204));
+	Route::options('/app/im/me', static fn () => response('', 204));
+})->middleware([
+	AppClientRequest::class,
+	CheckWebLogin::class,
 ]);
 
 // Web 普通用户认证接口。organization 只从 Web access token 取得。

@@ -34,7 +34,7 @@ final class ImChallengeTokenService
     }
 
     /**
-     * @param array{organization: int, deployment_id: string, user_id: string, device_id: string, client_id: string, username: string} $identity
+     * @param array{organization: int, deployment_id: string, user_id: string, device_id: string, client_id: string, client_family: string, os: string, username: string} $identity
      * @return array{token: string, expire_at: int, session_id: string, claims: array<string, mixed>}
      */
     public function issue(array $identity, int $accessExpireAt, int $now): array
@@ -50,17 +50,21 @@ final class ImChallengeTokenService
         $userId = $this->identifier((string) ($identity['user_id'] ?? ''), 'user_id', 64);
         $deviceId = $this->identifier((string) ($identity['device_id'] ?? ''), 'device_id', 100);
         $clientId = $this->identifier((string) ($identity['client_id'] ?? ''), 'client_id', 120);
+        [$clientFamily, $os] = $this->clientRuntime(
+            (string) ($identity['client_family'] ?? ''),
+            (string) ($identity['os'] ?? ''),
+        );
         $username = trim((string) ($identity['username'] ?? ''));
         if ($username === '' || mb_strlen($username) > 64) {
             throw new ApiException('IM 凭证用户名无效。', 401);
         }
         if ($now <= 0 || $accessExpireAt <= $now) {
-            throw new ApiException('Web 登录会话已过期。', 401);
+            throw new ApiException('客户端登录会话已过期。', 401);
         }
 
         $expireAt = min($now + $this->ttlSeconds, $accessExpireAt);
         if ($expireAt <= $now) {
-            throw new ApiException('Web 登录会话剩余有效期不足。', 401);
+            throw new ApiException('客户端登录会话剩余有效期不足。', 401);
         }
 
         $credentialSessionId = bin2hex(random_bytes(16));
@@ -76,8 +80,8 @@ final class ImChallengeTokenService
             'device_id' => $deviceId,
             'client_id' => $clientId,
             'session_id' => $credentialSessionId,
-            'client_family' => 'web',
-            'os' => 'browser',
+            'client_family' => $clientFamily,
+            'os' => $os,
             'username' => $username,
         ];
 
@@ -101,5 +105,23 @@ final class ImChallengeTokenService
         }
 
         return $value;
+    }
+
+    /** @return array{0: string, 1: string} */
+    private function clientRuntime(string $clientFamily, string $os): array
+    {
+        $clientFamily = trim($clientFamily);
+        $os = trim($os);
+        $valid = match ($clientFamily) {
+            'web' => $os === 'browser',
+            'app' => in_array($os, ['android', 'ios', 'other'], true),
+            'desktop' => in_array($os, ['windows', 'macos', 'linux', 'other'], true),
+            default => false,
+        };
+        if (!$valid) {
+            throw new ApiException('IM 凭证 client_family 与 os 组合无效。', 422);
+        }
+
+        return [$clientFamily, $os];
     }
 }

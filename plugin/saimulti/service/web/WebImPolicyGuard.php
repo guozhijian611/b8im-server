@@ -13,25 +13,33 @@ final class WebImPolicyGuard
     {
     }
 
-    public function assertWebAllowed(int $organization): void
+    public function assertAllowed(int $organization, string $clientFamily): void
     {
         if ($organization <= 0) {
-            throw new ApiException('Web IM 租户策略不可用。', 403);
+            throw new ApiException('客户端 IM 租户策略不可用。', 403);
         }
         try {
             $row = ($this->store ?? new ThinkOrmWebImPolicyStore())->findPolicy($organization);
-            self::assertRowAllowsWeb($row, $organization);
+            self::assertRowAllows($row, $organization, $clientFamily);
             return;
         } catch (ApiException $exception) {
             throw $exception;
         } catch (Throwable) {
-            throw new ApiException('Web IM 租户策略不可用。', 403);
+            throw new ApiException('客户端 IM 租户策略不可用。', 403);
         }
     }
 
     /** @param array<string, mixed>|null $row */
-    public static function assertRowAllowsWeb(?array $row, int $organization): void
+    public static function assertRowAllows(
+        ?array $row,
+        int $organization,
+        string $clientFamily,
+    ): void
     {
+        $clientFamily = trim($clientFamily);
+        if (!in_array($clientFamily, ['web', 'app', 'desktop'], true)) {
+            throw new ApiException('client_family 无效。', 422);
+        }
         try {
             if (!is_array($row) || (int) ($row['organization'] ?? 0) !== $organization) {
                 throw new \UnexpectedValueException('tenant IM policy is missing');
@@ -57,17 +65,23 @@ final class WebImPolicyGuard
                 throw new \UnexpectedValueException('allowed client families contain an invalid value');
             }
         } catch (Throwable) {
-            throw new ApiException('Web IM 租户策略不可用。', 403);
+            throw new ApiException('客户端 IM 租户策略不可用。', 403);
         }
-        if (($row['status'] ?? null) !== 'ENABLED' || !in_array('web', $families, true)) {
-            throw new ApiException('当前租户未启用 Web IM。', 403);
+        if (($row['status'] ?? null) !== 'ENABLED' || !in_array($clientFamily, $families, true)) {
+            throw new ApiException('当前租户未启用目标客户端 IM。', 403);
         }
     }
 
-    public static function appliesToPath(string $path): bool
+    public static function familyForPath(string $path): ?string
     {
         $path = '/' . ltrim(trim($path), '/');
+        foreach (['web', 'app', 'desktop'] as $clientFamily) {
+            $prefix = '/saimulti/' . $clientFamily . '/im';
+            if ($path === $prefix || str_starts_with($path, $prefix . '/')) {
+                return $clientFamily;
+            }
+        }
 
-        return $path === '/saimulti/web/im' || str_starts_with($path, '/saimulti/web/im/');
+        return null;
     }
 }

@@ -105,21 +105,24 @@ $policyStore->row = [
     'allowed_client_families_json' => '["web","app"]',
 ];
 $policyGuard = new WebImPolicyGuard($policyStore);
-$policyGuard->assertWebAllowed(7);
+$policyGuard->assertAllowed(7, 'web');
 $assert(true, 'enabled Web IM policy was rejected');
+$policyGuard->assertAllowed(7, 'app');
+$assert(true, 'enabled App IM policy was rejected');
 $policyStore->row['status'] = 'DISABLED';
-$expectCode(403, static fn () => $policyGuard->assertWebAllowed(7));
+$expectCode(403, static fn () => $policyGuard->assertAllowed(7, 'web'));
 $policyStore->row['status'] = 'ENABLED';
 $policyStore->row['allowed_client_families_json'] = '["app"]';
-$expectCode(403, static fn () => $policyGuard->assertWebAllowed(7));
+$expectCode(403, static fn () => $policyGuard->assertAllowed(7, 'web'));
+$policyGuard->assertAllowed(7, 'app');
 $policyStore->row['allowed_client_families_json'] = '{"0":"web"}';
-$expectCode(403, static fn () => $policyGuard->assertWebAllowed(7));
+$expectCode(403, static fn () => $policyGuard->assertAllowed(7, 'web'));
 $policyStore->fail = true;
-$expectCode(403, static fn () => $policyGuard->assertWebAllowed(7));
+$expectCode(403, static fn () => $policyGuard->assertAllowed(7, 'app'));
 
-$assert(WebImPolicyGuard::appliesToPath('/saimulti/web/im/messages'), 'Web IM route escaped policy guard');
-$assert(WebImPolicyGuard::appliesToPath('saimulti/web/im'), 'Web IM root escaped policy guard');
-$assert(!WebImPolicyGuard::appliesToPath('/saimulti/client/config'), 'client config was accidentally policy gated');
-$assert(!WebImPolicyGuard::appliesToPath('/saimulti/web/announcement/index'), 'announcement route was accidentally policy gated');
+$assert(WebImPolicyGuard::familyForPath('/saimulti/web/im/messages') === 'web', 'Web IM route escaped policy guard');
+$assert(WebImPolicyGuard::familyForPath('saimulti/app/im') === 'app', 'App IM root escaped policy guard');
+$assert(WebImPolicyGuard::familyForPath('/saimulti/client/config') === null, 'client config was accidentally policy gated');
+$assert(WebImPolicyGuard::familyForPath('/saimulti/web/announcement/index') === null, 'announcement route was accidentally policy gated');
 
 fwrite(STDOUT, sprintf("Web IM session and policy guards: %d assertions passed.\n", $assertions));

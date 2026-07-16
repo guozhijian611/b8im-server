@@ -31,14 +31,22 @@ $token = $service->issueAccess([
     'id' => 9,
     'user_id' => 'user_9',
     'account' => 'alice',
-], 1, 'b8im-local', 'web-window_9');
+], 1, 'b8im-local', 'web-window_9', 'web', 'browser');
 $assert($token['expires_in'] >= 300 && $token['refresh_token'] === '', 'Web token 返回模型无效');
-$claims = $service->verifyAccess($token['access_token'], 1, 'b8im-local');
+$claims = $service->verifyAccess($token['access_token'], 1, 'b8im-local', 'web');
 $assert($claims['aud'] === 'web-api', 'Web token audience 无效');
 $assert($claims['organization'] === 1 && $claims['deployment_id'] === 'b8im-local', 'Web token 租户上下文无效');
 $assert($claims['device_id'] === 'web-window_9', 'Web token 设备上下文无效');
-$expectCode(401, static fn () => $service->verifyAccess($token['access_token'], 2, 'b8im-local'));
-$expectCode(401, static fn () => $service->verifyAccess($token['access_token'], 1, 'other-deployment'));
+$expectCode(401, static fn () => $service->verifyAccess($token['access_token'], 2, 'b8im-local', 'web'));
+$expectCode(401, static fn () => $service->verifyAccess($token['access_token'], 1, 'other-deployment', 'web'));
+$expectCode(401, static fn () => $service->verifyAccess($token['access_token'], 1, 'b8im-local', 'app'));
+$appToken = $service->issueAccess([
+    'id' => 9,
+    'user_id' => 'user_9',
+    'account' => 'alice',
+], 1, 'b8im-local', 'app-device_9', 'app', 'ios');
+$appClaims = $service->verifyAccess($appToken['access_token'], 1, 'b8im-local', 'app');
+$assert($appClaims['aud'] === 'app-api' && $appClaims['os'] === 'ios', 'App token runtime context 无效');
 $expectCode(401, static fn () => $service->extractBearer('Basic ' . $token['access_token']));
 $assert($service->extractBearer('Bearer ' . $token['access_token']) === $token['access_token'], 'Bearer 解析失败');
 $assert(WebOrganizationResolver::originFromUrl('https://IM.Example.com/path') === 'https://im.example.com', 'Origin 规范化失败');

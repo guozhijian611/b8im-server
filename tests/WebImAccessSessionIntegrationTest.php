@@ -293,8 +293,8 @@ SQL);
         new WebImPolicyGuard(new ThinkOrmWebImPolicyStore()),
     );
     $organization = ['id' => 7, 'deployment_id' => 'access-test-deployment'];
-    $login = $auth->login($organization, 'alice', 'correct-password', 'web-device-a', '203.0.113.10');
-    $claims = $webTokens->verifyAccess($login['token']['access_token'], 7, 'access-test-deployment', $now);
+    $login = $auth->login($organization, 'alice', 'correct-password', 'web-device-a', 'web', 'browser', '203.0.113.10');
+    $claims = $webTokens->verifyAccess($login['token']['access_token'], 7, 'access-test-deployment', 'web', $now);
     $jti = (string) $claims['jti'];
     $assert(preg_match('/^[a-f0-9]{32}$/', $jti) === 1, 'issued access jti is not canonical');
     $assert(!array_key_exists('jti', $login['token']) && !array_key_exists('jti', $login['user']), 'jti leaked as an API response field');
@@ -321,6 +321,8 @@ SQL);
         'deployment_id' => 'access-test-deployment',
         'user_id' => 'user_9',
         'device_id' => 'web-device-a',
+        'client_family' => 'web',
+        'os' => 'browser',
         'token_exp' => (int) $claims['exp'],
         'web_access_jti' => $jti,
     ];
@@ -398,8 +400,8 @@ SQL);
     $auditPayloads = Db::table('sm_tool_oper_log')->column('request_data');
     $assert(!str_contains(json_encode($auditPayloads, JSON_THROW_ON_ERROR), $jti), 'admin operation audit leaked jti');
 
-    $loginB = $auth->login($organization, 'alice', 'correct-password', 'web-device-b', '203.0.113.20');
-    $claimsB = $webTokens->verifyAccess($loginB['token']['access_token'], 7, 'access-test-deployment', $now);
+    $loginB = $auth->login($organization, 'alice', 'correct-password', 'web-device-b', 'web', 'browser', '203.0.113.20');
+    $claimsB = $webTokens->verifyAccess($loginB['token']['access_token'], 7, 'access-test-deployment', 'web', $now);
     $jtiB = (string) $claimsB['jti'];
     $identityB = [
         'id' => (int) $claimsB['id'],
@@ -407,6 +409,8 @@ SQL);
         'deployment_id' => 'access-test-deployment',
         'user_id' => 'user_9',
         'device_id' => 'web-device-b',
+        'client_family' => 'web',
+        'os' => 'browser',
         'token_exp' => (int) $claimsB['exp'],
         'web_access_jti' => $jtiB,
     ];
@@ -422,8 +426,8 @@ SQL);
         'admin device disable did not revoke its bearer',
     );
 
-    $loginC = $auth->login($organization, 'alice', 'correct-password', 'web-device-c', '203.0.113.30');
-    $claimsC = $webTokens->verifyAccess($loginC['token']['access_token'], 7, 'access-test-deployment', $now);
+    $loginC = $auth->login($organization, 'alice', 'correct-password', 'web-device-c', 'web', 'browser', '203.0.113.30');
+    $claimsC = $webTokens->verifyAccess($loginC['token']['access_token'], 7, 'access-test-deployment', 'web', $now);
     $jtiC = (string) $claimsC['jti'];
     $identityC = [
         'id' => (int) $claimsC['id'],
@@ -431,6 +435,8 @@ SQL);
         'deployment_id' => 'access-test-deployment',
         'user_id' => 'user_9',
         'device_id' => 'web-device-c',
+        'client_family' => 'web',
+        'os' => 'browser',
         'token_exp' => (int) $claimsC['exp'],
         'web_access_jti' => $jtiC,
     ];
@@ -465,6 +471,7 @@ SQL);
         7,
         (int) $claimsC['id'],
         $nowText,
+        'web',
         [],
         [
             'organization' => 7,
@@ -492,6 +499,7 @@ SQL);
         7,
         (int) $claimsC['id'],
         $nowText,
+        'web',
         [],
         [
             'organization' => 7,
@@ -523,6 +531,8 @@ SQL);
         'alice',
         'correct-password',
         'web-device-policy-denied',
+        'web',
+        'browser',
         '203.0.113.40',
     ));
     $assert(

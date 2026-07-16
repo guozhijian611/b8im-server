@@ -15,8 +15,10 @@ final class ClientConfigController extends WebController
     public function index(Request $request): Response
     {
         $clientFamily = trim((string) $request->get('client_family', ''));
-        if ($clientFamily !== 'web') {
-            throw new ApiException('Web 客户端只允许 client_family=web。', 422);
+        $authenticatedFamily = trim((string) ($this->webIdentity['client_family'] ?? ''));
+        if (!in_array($clientFamily, ['web', 'app', 'desktop'], true)
+            || !hash_equals($authenticatedFamily, $clientFamily)) {
+            throw new ApiException('client_family 与认证客户端形态不一致。', 422);
         }
 
         return $this->success(ModuleServiceFactory::clientConfigProjection()->project(

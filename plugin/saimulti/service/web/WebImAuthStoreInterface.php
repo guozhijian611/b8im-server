@@ -20,6 +20,7 @@ interface WebImAuthStoreInterface
         int $organization,
         int $id,
         string $loginAt,
+        string $clientFamily,
         array $audit,
         array $accessSession,
     ): void;

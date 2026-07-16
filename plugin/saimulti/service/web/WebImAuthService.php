@@ -53,20 +53,26 @@ final class WebImAuthService
         string $account,
         string $password,
         string $deviceId,
+        string $clientFamily,
+        string $os,
         string $clientIp,
     ): array {
+        [$clientFamily, $os] = $this->clientRuntime($clientFamily, $os);
         return Telemetry::inSpan(
-            'b8im.auth.web.login',
-            'auth.web.login',
+            'b8im.auth.client.login',
+            'auth.client.login',
             [
-                'b8im.auth.scope' => 'web',
+                'b8im.auth.scope' => 'client',
                 'b8im.organization' => (int) ($organization['id'] ?? 0),
+                'b8im.client_family' => $clientFamily,
             ],
             fn (): array => $this->loginInternal(
                 $organization,
                 $account,
                 $password,
                 $deviceId,
+                $clientFamily,
+                $os,
                 $clientIp,
             ),
         );
@@ -78,6 +84,8 @@ final class WebImAuthService
         string $account,
         string $password,
         string $deviceId,
+        string $clientFamily,
+        string $os,
         string $clientIp,
     ): array {
         $organizationId = (int) ($organization['id'] ?? 0);
@@ -104,7 +112,7 @@ final class WebImAuthService
             $auditIp = $this->ip($clientIp);
 
             $failureCode = 'TENANT_IM_POLICY_FORBIDDEN';
-            $this->policies->assertWebAllowed($organizationId);
+            $this->policies->assertAllowed($organizationId, $clientFamily);
 
             $failureCode = 'LOGIN_RATE_LIMITED';
             $this->loginRateLimiter->assertAllowed($organizationId, $account, $auditIp);
@@ -131,6 +139,8 @@ final class WebImAuthService
                 $organizationId,
                 $deploymentId,
                 $auditDeviceId,
+                $clientFamily,
+                $os,
                 $now,
             );
             $claims = $issued['claims'];
@@ -138,12 +148,15 @@ final class WebImAuthService
                 $organizationId,
                 (int) $user['id'],
                 $loginAt,
+                $clientFamily,
                 $this->loginAudit(
                     $organizationId,
                     (string) $user['user_id'],
                     $auditDeviceId,
                     $auditIp,
                     $loginAt,
+                    $clientFamily,
+                    $os,
                     'success',
                     null,
                 ),
@@ -180,6 +193,8 @@ final class WebImAuthService
                 $auditDeviceId,
                 $auditIp,
                 $loginAt,
+                $clientFamily,
+                $os,
                 'failed',
                 $failureCode,
             ));
@@ -197,13 +212,14 @@ final class WebImAuthService
         string $clientId,
         string $clientIp,
     ): array {
+        $clientFamily = (string) ($identity['client_family'] ?? '');
         return Telemetry::inSpan(
             'b8im.auth.im_token.issue',
             'auth.im_token.issue',
             [
                 'b8im.auth.scope' => 'im',
                 'b8im.organization' => (int) ($identity['organization'] ?? 0),
-                'b8im.client_family' => 'web',
+                'b8im.client_family' => $clientFamily,
             ],
             fn (): array => $this->issueImTokenInternal($identity, $deviceId, $clientId, $clientIp),
         );
@@ -217,26 +233,31 @@ final class WebImAuthService
         string $clientIp,
     ): array {
         [$organization, $id, $userId, $deploymentId] = $this->identity($identity);
-        $this->policies->assertWebAllowed($organization);
+        [$clientFamily, $os] = $this->clientRuntime(
+            (string) ($identity['client_family'] ?? ''),
+            (string) ($identity['os'] ?? ''),
+            401,
+        );
+        $this->policies->assertAllowed($organization, $clientFamily);
         $requestedDeviceId = $this->identifier($deviceId, 'device_id', 100);
         $deviceId = $this->identifier((string) ($identity['device_id'] ?? ''), 'device_id', 100, 401);
         if (!hash_equals($deviceId, $requestedDeviceId)) {
-            throw new ApiException('device_id 与 Web 登录会话不一致。', 401);
+            throw new ApiException('device_id 与客户端登录会话不一致。', 401);
         }
         $webAccessJti = trim((string) ($identity['web_access_jti'] ?? ''));
         if (preg_match('/^[a-f0-9]{32}$/', $webAccessJti) !== 1) {
-            throw new ApiException('Web 登录会话标识无效。', 401);
+            throw new ApiException('客户端登录会话标识无效。', 401);
         }
         $clientId = $this->identifier($clientId, 'client_id', 120);
         $clientIp = $this->ip($clientIp);
         $user = $this->store->findActiveUser($organization, $id, $userId);
         if ($user === null || (int) ($user['is_system'] ?? 1) !== 2) {
-            throw new ApiException('Web 用户已停用或不存在。', 401);
+            throw new ApiException('客户端用户已停用或不存在。', 401);
         }
 
         $accessExpireAt = $identity['token_exp'] ?? null;
         if (!is_int($accessExpireAt)) {
-            throw new ApiException('Web 登录上下文缺少有效期。', 401);
+            throw new ApiException('客户端登录上下文缺少有效期。', 401);
         }
         $now = $this->now();
         $credential = $this->imTokens->issue([
@@ -245,6 +266,8 @@ final class WebImAuthService
             'user_id' => (string) $user['user_id'],
             'device_id' => $deviceId,
             'client_id' => $clientId,
+            'client_family' => $clientFamily,
+            'os' => $os,
             'username' => (string) $user['account'],
         ], $accessExpireAt, $now);
 
@@ -254,8 +277,8 @@ final class WebImAuthService
             'organization' => $organization,
             'user_id' => (string) $user['user_id'],
             'device_id' => $deviceId,
-            'client_family' => 'web',
-            'os' => 'browser',
+            'client_family' => $clientFamily,
+            'os' => $os,
             'current_ip' => $clientIp,
             'last_login_ip' => $clientIp,
             'last_login_at' => $nowText,
@@ -300,7 +323,7 @@ final class WebImAuthService
         [$organization, $id, $userId] = $this->identity($identity);
         $user = $this->store->findActiveUser($organization, $id, $userId);
         if ($user === null) {
-            throw new ApiException('Web 用户已停用或不存在。', 401);
+            throw new ApiException('客户端用户已停用或不存在。', 401);
         }
 
         return $this->userView($organization, $user);
@@ -312,7 +335,7 @@ final class WebImAuthService
         [$organization, $id, $userId] = $this->identity($identity);
         $user = $this->store->findActiveUser($organization, $id, $userId);
         if ($user === null || (int) ($user['is_system'] ?? 1) !== 2) {
-            throw new ApiException('Web 用户已停用或不存在。', 401);
+            throw new ApiException('客户端用户已停用或不存在。', 401);
         }
         $avatarFileId = $this->avatars->assertOwnedImage($organization, $userId, $avatarFileId);
         $this->store->updateAvatar(
@@ -324,7 +347,7 @@ final class WebImAuthService
         );
         $updated = $this->store->findActiveUser($organization, $id, $userId);
         if ($updated === null || !hash_equals($avatarFileId, (string) ($updated['avatar'] ?? ''))) {
-            throw new \RuntimeException('Web avatar update was not persisted.');
+            throw new \RuntimeException('Client avatar update was not persisted.');
         }
 
         return $this->userView($organization, $updated);
@@ -339,7 +362,7 @@ final class WebImAuthService
         $organization = (int) ($identity['organization'] ?? 0);
         $id = (int) ($identity['id'] ?? 0);
         if ($organization <= 0 || $id <= 0) {
-            throw new ApiException('Web 登录上下文无效。', 401);
+            throw new ApiException('客户端登录上下文无效。', 401);
         }
         $userId = $this->identifier((string) ($identity['user_id'] ?? ''), 'user_id', 64, 401);
         $deploymentId = OrganizationDiscovery::assertDeploymentId(
@@ -425,6 +448,8 @@ final class WebImAuthService
         ?string $deviceId,
         ?string $loginIp,
         string $loginAt,
+        string $clientFamily,
+        string $os,
         string $result,
         ?string $failureCode,
     ): array {
@@ -433,8 +458,8 @@ final class WebImAuthService
             'user_id' => $userId,
             'device_id' => $deviceId,
             'client_id' => null,
-            'client_family' => 'web',
-            'os' => 'browser',
+            'client_family' => $clientFamily,
+            'os' => $os,
             'device_name' => null,
             'device_model' => null,
             'os_version' => null,
@@ -460,9 +485,27 @@ final class WebImAuthService
     {
         $now = ($this->clock)();
         if ($now <= 0) {
-            throw new \RuntimeException('Web IM clock returned an invalid timestamp.');
+            throw new \RuntimeException('Client IM clock returned an invalid timestamp.');
         }
 
         return $now;
+    }
+
+    /** @return array{0: string, 1: string} */
+    private function clientRuntime(string $clientFamily, string $os, int $errorCode = 422): array
+    {
+        $clientFamily = trim($clientFamily);
+        $os = trim($os);
+        $valid = match ($clientFamily) {
+            'web' => $os === 'browser',
+            'app' => in_array($os, ['android', 'ios', 'other'], true),
+            'desktop' => in_array($os, ['windows', 'macos', 'linux', 'other'], true),
+            default => false,
+        };
+        if (!$valid) {
+            throw new ApiException('client_family 与 os 组合无效。', $errorCode);
+        }
+
+        return [$clientFamily, $os];
     }
 }
