@@ -133,6 +133,9 @@ final class WebImAuthService
                 throw new ApiException('账号或密码错误。', 401);
             }
 
+            $failureCode = 'LOGIN_RATE_LIMITER_UNAVAILABLE';
+            $this->loginRateLimiter->resetAccountAttempts($organizationId, $account);
+
             $failureCode = 'WEB_TOKEN_ISSUE_FAILED';
             $issued = $this->webTokens->issueAccessSession(
                 $user,

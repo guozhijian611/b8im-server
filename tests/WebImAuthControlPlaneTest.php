@@ -191,13 +191,26 @@ final class RecordingWebImLoginRateLimiter implements WebImLoginRateLimiterInter
     /** @var list<array{int, string, string}> */
     public array $calls = [];
 
+    /** @var list<array{int, string}> */
+    public array $resetCalls = [];
+
     public bool $blocked = false;
+
+    public bool $resetUnavailable = false;
 
     public function assertAllowed(int $organization, string $account, string $clientIp): void
     {
         $this->calls[] = [$organization, $account, $clientIp];
         if ($this->blocked) {
             throw new ApiException('登录尝试过于频繁，请稍后再试。', RedisWebImLoginRateLimiter::RATE_LIMITED);
+        }
+    }
+
+    public function resetAccountAttempts(int $organization, string $account): void
+    {
+        $this->resetCalls[] = [$organization, $account];
+        if ($this->resetUnavailable) {
+            throw new ApiException('登录服务暂不可用。', RedisWebImLoginRateLimiter::UNAVAILABLE);
         }
     }
 }
@@ -317,6 +330,10 @@ $assert(!array_key_exists('password_hash', $login['user']) && !array_key_exists(
 $assert(count($store->audits) === 1 && $store->audits[0]['login_result'] === 'success', 'Successful login audit missing.');
 $assert($store->audits[0]['audit_scope'] === 'login' && $store->audits[0]['current_online_state'] === 2, 'Successful audit contract mismatch.');
 $assert(count($store->accessSessions) === 1, 'Web access session was not persisted with the login transaction.');
+$assert(
+    $loginRateLimiter->resetCalls === [[7, 'alice']],
+    'Successful credential verification did not reset the exact account limiter scope.',
+);
 
 $expectApiCode(401, static fn () => $service->login(
     $organization,
@@ -329,6 +346,7 @@ $expectApiCode(401, static fn () => $service->login(
 ));
 $assert(count($store->audits) === 2 && $store->audits[1]['login_result'] === 'failed', 'Failed login audit missing.');
 $assert($store->audits[1]['failure_code'] === 'INVALID_CREDENTIALS', 'Failed login code mismatch.');
+$assert(count($loginRateLimiter->resetCalls) === 1, 'Invalid credentials unexpectedly reset the account limiter.');
 $loginRateLimiter->blocked = true;
 $expectApiCode(RedisWebImLoginRateLimiter::RATE_LIMITED, static fn () => $service->login(
     $organization,
@@ -351,7 +369,24 @@ $assert(
     count($store->audits) === 3 && $store->audits[2]['failure_code'] === 'LOGIN_RATE_LIMITED',
     'Rate-limited login attempt was not audited.',
 );
+$assert(count($loginRateLimiter->resetCalls) === 1, 'Rate-limited login unexpectedly reset the account limiter.');
 $loginRateLimiter->blocked = false;
+$loginRateLimiter->resetUnavailable = true;
+$expectApiCode(RedisWebImLoginRateLimiter::UNAVAILABLE, static fn () => $service->login(
+    $organization,
+    'alice',
+    'correct-password',
+    'web-login-device',
+    'web',
+    'browser',
+    '203.0.113.10',
+));
+$assert(
+    count($store->audits) === 4 && $store->audits[3]['failure_code'] === 'LOGIN_RATE_LIMITER_UNAVAILABLE',
+    'Account limiter reset failure was not audited with the stable failure code.',
+);
+$assert(count($store->accessSessions) === 1, 'A token session was persisted after limiter reset failed.');
+$loginRateLimiter->resetUnavailable = false;
 
 $accessClaims = $webTokens->verifyAccess(
     $login['token']['access_token'],
