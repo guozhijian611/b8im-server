@@ -30,6 +30,18 @@ final class FileMediaController extends WebController
         ));
     }
 
+    #[ModuleRequired('file_media', 'server', 'file_media.app.use')]
+    public function appUsage(Request $request): Response
+    {
+        return $this->usage($request);
+    }
+
+    #[ModuleRequired('file_media', 'server', 'file_media.app.use')]
+    public function appCheckUpload(Request $request): Response
+    {
+        return $this->checkUpload($request);
+    }
+
     public function folderIndex(Request $request): Response
     {
         $filters = $request->get();

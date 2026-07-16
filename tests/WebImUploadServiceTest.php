@@ -164,7 +164,7 @@ $expectApiCode(503, static fn () => (new WebImPrivateS3Config(
 $storage = new UploadStorage();
 $assets = new UploadAssetStore();
 $service = new WebImUploadService($storage, $assets);
-$identity = ['organization' => 901, 'user_id' => 'user_a'];
+$identity = ['organization' => 901, 'user_id' => 'user_a', 'client_family' => 'web'];
 $prepared = $service->prepare($identity, 'image', 'avatar.webp', 12, 'image/webp');
 $assert(
     $prepared === [
@@ -179,6 +179,27 @@ $assert(
     && !array_key_exists('upload_url', $prepared)
     && !array_key_exists('public_url', $prepared),
     'Prepare response leaked a raw URL or changed the proxy metadata contract.',
+);
+$appPrepared = $service->prepare(
+    ['organization' => 901, 'user_id' => 'user_a', 'client_family' => 'app'],
+    'file',
+    'mobile.pdf',
+    1024,
+    'application/pdf',
+);
+$assert(
+    $appPrepared['upload_path'] === '/saimulti/app/im/upload',
+    'Native App upload preparation did not return the App proxy path.',
+);
+$expectApiCode(
+    401,
+    static fn () => $service->prepare(
+        ['organization' => 901, 'user_id' => 'user_a', 'client_family' => 'desktop'],
+        'file',
+        'desktop.pdf',
+        1024,
+        'application/pdf',
+    ),
 );
 $assert(
     $service->prepare(

@@ -42,7 +42,7 @@ final class WebImAssetUrlService
     ): array {
         $organization = (int) ($identity['organization'] ?? 0);
         if ($organization <= 0) {
-            throw new ApiException('Web 登录上下文无效。', 401);
+            throw new ApiException('客户端登录上下文无效。', 401);
         }
         $userId = $this->identifier((string) ($identity['user_id'] ?? ''), 'user_id', 64, 401);
         $fileId = trim($fileId);

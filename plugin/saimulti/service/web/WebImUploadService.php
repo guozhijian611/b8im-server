@@ -42,7 +42,7 @@ final class WebImUploadService
     }
 
     /**
-     * Web IM uses an authenticated proxy endpoint so no object-store URL or
+     * Web and native App IM use an authenticated proxy endpoint so no object-store URL or
      * credential is disclosed during preparation.
      *
      * @param array<string, mixed> $identity
@@ -65,7 +65,7 @@ final class WebImUploadService
 
         return [
             'mode' => 'proxy',
-            'upload_path' => '/saimulti/web/im/upload',
+            'upload_path' => $this->uploadPath($identity),
             'method' => 'POST',
             'filename' => $filename,
             'size' => $size,
@@ -167,8 +167,18 @@ final class WebImUploadService
     {
         if ((int) ($identity['organization'] ?? 0) <= 0
             || trim((string) ($identity['user_id'] ?? '')) === '') {
-            throw new ApiException('Web 登录上下文无效。', 401);
+            throw new ApiException('客户端登录上下文无效。', 401);
         }
+    }
+
+    /** @param array<string, mixed> $identity */
+    private function uploadPath(array $identity): string
+    {
+        return match ((string) ($identity['client_family'] ?? '')) {
+            'web' => '/saimulti/web/im/upload',
+            'app' => '/saimulti/app/im/upload',
+            default => throw new ApiException('上传客户端形态无效。', 401),
+        };
     }
 
     private function kind(string $kind): string

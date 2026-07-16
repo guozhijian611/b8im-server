@@ -266,9 +266,27 @@ $installedSdkRoot = InstalledVersions::getInstallPath('b8im/module-sdk');
 $expectedAnnouncementRoot = is_string($installedSdkRoot)
     ? rtrim($installedSdkRoot, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'examples' . DIRECTORY_SEPARATOR . 'announcement'
     : '';
+$expectedManifestRoots = [$expectedAnnouncementRoot];
+foreach ([
+    'b8im/module-i18n',
+    'b8im/module-favorite',
+    'b8im/module-sticker',
+    'b8im/module-customer-service',
+    'b8im/module-robot-single',
+    'b8im/module-file-media',
+    'b8im/module-search',
+    'b8im/module-moments',
+] as $package) {
+    $root = InstalledVersions::isInstalled($package)
+        ? InstalledVersions::getInstallPath($package)
+        : null;
+    if (is_string($root) && is_file($root . DIRECTORY_SEPARATOR . 'module.json')) {
+        $expectedManifestRoots[] = rtrim($root, DIRECTORY_SEPARATOR);
+    }
+}
 $assert(
-    $moduleConfig['manifest_roots'] === [$expectedAnnouncementRoot],
-    '生产配置未从 Composer 安装路径定位 announcement 模块',
+    $moduleConfig['manifest_roots'] === $expectedManifestRoots,
+    '生产配置未从 Composer 安装路径定位完整模块集合',
 );
 $assert(isset($entries['announcement']), 'SDK announcement manifest 未被受控 catalog 发现');
 $assert(

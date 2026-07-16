@@ -70,11 +70,21 @@ Route::group('/saimulti', function () {
 	Route::get('/app/im/conversations', [\plugin\saimulti\app\controller\web\ImController::class, 'conversations']);
 	Route::get('/app/im/messages', [\plugin\saimulti\app\controller\web\ImController::class, 'messages']);
 	Route::post('/app/im/markRead', [\plugin\saimulti\app\controller\web\ImController::class, 'markRead']);
+	Route::post('/app/im/prepareUpload', [\plugin\saimulti\app\controller\web\ImController::class, 'prepareUpload']);
+	Route::post('/app/im/upload', [\plugin\saimulti\app\controller\web\ImController::class, 'upload']);
+	Route::post('/app/im/resolveAssetUrl', [\plugin\saimulti\app\controller\web\ImController::class, 'resolveAssetUrl']);
+	Route::get('/app/file-media/usage', [\plugin\saimulti\app\controller\web\FileMediaController::class, 'appUsage']);
+	Route::post('/app/file-media/checkUpload', [\plugin\saimulti\app\controller\web\FileMediaController::class, 'appCheckUpload']);
 	Route::options('/app/im/imToken', static fn () => response('', 204));
 	Route::options('/app/im/me', static fn () => response('', 204));
 	Route::options('/app/im/conversations', static fn () => response('', 204));
 	Route::options('/app/im/messages', static fn () => response('', 204));
 	Route::options('/app/im/markRead', static fn () => response('', 204));
+	Route::options('/app/im/prepareUpload', static fn () => response('', 204));
+	Route::options('/app/im/upload', static fn () => response('', 204));
+	Route::options('/app/im/resolveAssetUrl', static fn () => response('', 204));
+	Route::options('/app/file-media/usage', static fn () => response('', 204));
+	Route::options('/app/file-media/checkUpload', static fn () => response('', 204));
 })->middleware([
 	AppClientRequest::class,
 	CheckWebLogin::class,

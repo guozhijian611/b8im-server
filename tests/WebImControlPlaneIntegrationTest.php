@@ -283,7 +283,7 @@ $service = new WebImControlService(
         300,
     ),
 );
-$alice = ['organization' => 901, 'user_id' => 'user_a'];
+$alice = ['organization' => 901, 'user_id' => 'user_a', 'client_family' => 'web'];
 $bob = ['organization' => 901, 'user_id' => 'user_b'];
 $carol = ['organization' => 901, 'user_id' => 'user_c'];
 $dan = ['organization' => 901, 'user_id' => 'user_d'];
