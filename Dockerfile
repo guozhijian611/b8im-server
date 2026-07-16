@@ -27,6 +27,7 @@ COPY --from=module-sticker / /b8im-module-sticker
 COPY --from=module-customer-service / /b8im-module-customer-service
 COPY --from=module-robot-single / /b8im-module-robot-single
 COPY --from=module-file-media / /b8im-module-file-media
+COPY --from=module-search / /b8im-module-search
 COPY composer.json composer.lock ./
 
 RUN --mount=type=cache,id=b8im-composer-cache,target=/tmp/composer-cache,sharing=locked \

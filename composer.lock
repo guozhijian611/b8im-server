@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "936c23858a1a745c1439cb61341078e6",
+    "content-hash": "1c367fc492825ea2efd92336bcae7816",
     "packages": [
         {
             "name": "aliyuncs/oss-sdk-php",
@@ -369,6 +369,33 @@
                 "MIT"
             ],
             "description": "B8IM module manifest, lifecycle and state contracts",
+            "transport-options": {
+                "symlink": true,
+                "relative": true
+            }
+        },
+        {
+            "name": "b8im/module-search",
+            "version": "dev-main",
+            "dist": {
+                "type": "path",
+                "url": "../b8im-module-search",
+                "reference": "2ebacdba45036aab80467118f9dd071212e7f99a"
+            },
+            "require": {
+                "b8im/module-sdk": "dev-main",
+                "php": ">=8.1"
+            },
+            "type": "library",
+            "autoload": {
+                "psr-4": {
+                    "B8im\\Module\\Search\\": "src/"
+                }
+            },
+            "license": [
+                "proprietary"
+            ],
+            "description": "B8IM search commercial module",
             "transport-options": {
                 "symlink": true,
                 "relative": true
@@ -8716,6 +8743,7 @@
         "b8im/module-i18n": 20,
         "b8im/module-robot-single": 20,
         "b8im/module-sdk": 20,
+        "b8im/module-search": 20,
         "b8im/module-sticker": 20
     },
     "prefer-stable": true,

@@ -113,6 +113,8 @@ Route::group('/saimulti', function () {
 	Route::get('/web/file-media/itemIndex', [\plugin\saimulti\app\controller\web\FileMediaController::class, 'itemIndex']);
 	Route::post('/web/file-media/itemSave', [\plugin\saimulti\app\controller\web\FileMediaController::class, 'itemSave']);
 	Route::post('/web/file-media/itemDestroy', [\plugin\saimulti\app\controller\web\FileMediaController::class, 'itemDestroy']);
+	Route::get('/web/search/messages', [\plugin\saimulti\app\controller\web\SearchController::class, 'messages']);
+	Route::get('/web/search/indexStatus', [\plugin\saimulti\app\controller\web\SearchController::class, 'indexStatus']);
 
 	foreach ([
 		'/web/im/imToken',
@@ -170,6 +172,8 @@ Route::group('/saimulti', function () {
 		'/web/file-media/itemIndex',
 		'/web/file-media/itemSave',
 		'/web/file-media/itemDestroy',
+		'/web/search/messages',
+		'/web/search/indexStatus',
 	] as $path) {
 		Route::options($path, static fn () => response('', 204));
 	}
@@ -301,6 +305,13 @@ Route::group("/saimulti", function () {
 	Route::get('/admin/file-media/itemIndex', [\plugin\saimulti\app\controller\admin\FileMediaController::class, 'itemIndex']);
 	Route::get('/admin/file-media/folderIndex', [\plugin\saimulti\app\controller\admin\FileMediaController::class, 'folderIndex']);
 
+	// 商业模块 search（平台）
+	Route::get('/admin/search/indexList', [\plugin\saimulti\app\controller\admin\SearchController::class, 'indexList']);
+	Route::get('/admin/search/indexRead', [\plugin\saimulti\app\controller\admin\SearchController::class, 'indexRead']);
+	Route::post('/admin/search/rebuild', [\plugin\saimulti\app\controller\admin\SearchController::class, 'rebuild']);
+	Route::get('/admin/search/jobIndex', [\plugin\saimulti\app\controller\admin\SearchController::class, 'jobIndex']);
+	Route::post('/admin/search/docUpsert', [\plugin\saimulti\app\controller\admin\SearchController::class, 'docUpsert']);
+
 	// IM 运行管理与安全审计
 	Route::get('/admin/im/operations/overview', [\plugin\saimulti\app\controller\admin\AdminImOperationsController::class, 'overview']);
 	Route::get('/admin/im/operations/users', [\plugin\saimulti\app\controller\admin\AdminImOperationsController::class, 'users']);
@@ -406,6 +417,13 @@ Route::group("/saimulti", function () {
 	Route::post('/tenant/sticker/itemSave', [\plugin\saimulti\app\controller\tenant\StickerController::class, 'itemSave']);
 	Route::put('/tenant/sticker/itemUpdate', [\plugin\saimulti\app\controller\tenant\StickerController::class, 'itemUpdate']);
 	Route::delete('/tenant/sticker/itemDestroy', [\plugin\saimulti\app\controller\tenant\StickerController::class, 'itemDestroy']);
+
+	// 租户 search
+	$se = \plugin\saimulti\app\controller\tenant\SearchController::class;
+	Route::get('/tenant/search/indexRead', [$se, 'indexRead']);
+	Route::post('/tenant/search/rebuild', [$se, 'rebuild']);
+	Route::get('/tenant/search/jobIndex', [$se, 'jobIndex']);
+	Route::post('/tenant/search/docUpsert', [$se, 'docUpsert']);
 
 	// 租户 file_media
 	$fm = \plugin\saimulti\app\controller\tenant\FileMediaController::class;
