@@ -523,6 +523,11 @@ $assert(
     && $appDevice['os'] === 'ios',
     'App device runtime was not persisted.',
 );
+$appSession = $store->sessions['7:gateway-app-client-1'] ?? null;
+$assert(
+    is_array($appSession) && $appSession['web_access_jti'] === null,
+    'App IM credential session must not persist a Web-only access binding.',
+);
 
 $policyStore->rows[7]['status'] = 'DISABLED';
 $expectApiCode(403, static fn () => $service->login(

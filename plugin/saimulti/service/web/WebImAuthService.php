@@ -244,8 +244,8 @@ final class WebImAuthService
         if (!hash_equals($deviceId, $requestedDeviceId)) {
             throw new ApiException('device_id 与客户端登录会话不一致。', 401);
         }
-        $webAccessJti = trim((string) ($identity['web_access_jti'] ?? ''));
-        if (preg_match('/^[a-f0-9]{32}$/', $webAccessJti) !== 1) {
+        $accessJti = trim((string) ($identity['web_access_jti'] ?? ''));
+        if (preg_match('/^[a-f0-9]{32}$/', $accessJti) !== 1) {
             throw new ApiException('客户端登录会话标识无效。', 401);
         }
         $clientId = $this->identifier($clientId, 'client_id', 120);
@@ -293,7 +293,9 @@ final class WebImAuthService
             'device_id' => $deviceId,
             'client_id' => $clientId,
             'session_id' => $credential['session_id'],
-            'web_access_jti' => $webAccessJti,
+            // IM 仅对 Web 凭证做持续 access-session 绑定；App challenge
+            // 已在本事务中校验 access session，持久化非空值会被 IM 拒绝。
+            'web_access_jti' => $clientFamily === 'web' ? $accessJti : null,
             'status' => 1,
             'expire_at' => $expireAtText,
             'revoked_at' => null,
@@ -301,7 +303,7 @@ final class WebImAuthService
             'update_time' => $nowText,
         ], [
             'organization' => $organization,
-            'jti' => $webAccessJti,
+            'jti' => $accessJti,
             'im_user_id' => $id,
             'user_id' => (string) $user['user_id'],
             'device_id' => $deviceId,
