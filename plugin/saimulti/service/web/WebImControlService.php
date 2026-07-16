@@ -196,14 +196,15 @@ final class WebImControlService
         );
         if (is_array($result['_realtime_event'] ?? null)) {
             $event = $result['_realtime_event'];
+            $eventOrganization = (int) ($result['_realtime_event_organization'] ?? $organization);
             if (is_array($event['from_user'] ?? null)) {
                 $event['from_user'] = $this->projectUser($organization, $event['from_user']);
             }
             $this->publishRealtime(static function (WebImRealtimePublisherInterface $publisher) use (
-                $organization,
+                $eventOrganization,
                 $event,
             ): void {
-                $publisher->publishFriendRequestCreated($organization, $event);
+                $publisher->publishFriendRequestCreated($eventOrganization, $event);
             });
         }
 
