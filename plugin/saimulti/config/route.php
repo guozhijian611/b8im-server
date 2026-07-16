@@ -67,8 +67,14 @@ Route::group('/saimulti', function () {
 Route::group('/saimulti', function () {
 	Route::post('/app/im/imToken', [\plugin\saimulti\app\controller\web\ImController::class, 'imToken']);
 	Route::get('/app/im/me', [\plugin\saimulti\app\controller\web\ImController::class, 'me']);
+	Route::get('/app/im/conversations', [\plugin\saimulti\app\controller\web\ImController::class, 'conversations']);
+	Route::get('/app/im/messages', [\plugin\saimulti\app\controller\web\ImController::class, 'messages']);
+	Route::post('/app/im/markRead', [\plugin\saimulti\app\controller\web\ImController::class, 'markRead']);
 	Route::options('/app/im/imToken', static fn () => response('', 204));
 	Route::options('/app/im/me', static fn () => response('', 204));
+	Route::options('/app/im/conversations', static fn () => response('', 204));
+	Route::options('/app/im/messages', static fn () => response('', 204));
+	Route::options('/app/im/markRead', static fn () => response('', 204));
 })->middleware([
 	AppClientRequest::class,
 	CheckWebLogin::class,
