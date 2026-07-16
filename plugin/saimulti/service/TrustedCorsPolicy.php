@@ -14,6 +14,7 @@ final class TrustedCorsPolicy
         'content-type',
         'app-id',
         'x-device-id',
+        'x-cs-guest-token',
         'x-requested-with',
         'traceparent',
         'tracestate',

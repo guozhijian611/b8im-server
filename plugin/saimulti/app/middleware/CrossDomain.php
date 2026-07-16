@@ -55,7 +55,9 @@ final class CrossDomain implements MiddlewareInterface
 
         return str_starts_with($path, '/saimulti/')
             && $path !== '/saimulti/appInfo'
-            && !str_starts_with($path, '/saimulti/web/');
+            && !str_starts_with($path, '/saimulti/web/')
+            // Public guest APIs use PublicGuestCors (no App-Id; entry/token scoped).
+            && !str_starts_with($path, '/saimulti/public/');
     }
 
     private function withCorsHeaders(Response $response, string $allowedOrigin): Response

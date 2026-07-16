@@ -8,6 +8,7 @@ use plugin\saimulti\app\middleware\CheckTenantLogin;
 use plugin\saimulti\app\middleware\CheckWebLogin;
 use plugin\saimulti\app\middleware\CrossDomain;
 use plugin\saimulti\app\middleware\TenantLog;
+use plugin\saimulti\app\middleware\PublicGuestCors;
 use plugin\saimulti\app\middleware\WebCors;
 use Webman\Route;
 
@@ -20,7 +21,7 @@ Route::post('/saimulti/tenant/login', [plugin\saimulti\app\controller\LoginContr
 // 应用信息
 Route::get("/saimulti/appInfo", [plugin\saimulti\app\controller\LoginController::class, 'appInfo']);
 Route::options("/saimulti/appInfo", [plugin\saimulti\app\controller\LoginController::class, 'appInfoOptions']);
-// 客服公开接口（无需登录；organization 由入口/guest token 决定）
+// 客服公开接口（无需登录 / 无需 App-Id；organization 由入口/guest token 决定）
 Route::group('/saimulti/public/customer-service', function () {
 	$c = \plugin\saimulti\app\controller\publicapi\CustomerServicePublicController::class;
 	Route::get('/entry/resolve', [$c, 'resolveEntry']);
@@ -42,7 +43,7 @@ Route::group('/saimulti/public/customer-service', function () {
 		Route::options($path, static fn () => response('', 204));
 	}
 })->middleware([
-	WebCors::class,
+	PublicGuestCors::class,
 ]);
 
 // Web 普通用户公开登录。App-Id 和 Origin 由 WebCors/OrganizationResolver 校验。

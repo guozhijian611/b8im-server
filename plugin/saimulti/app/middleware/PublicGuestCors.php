@@ -5,32 +5,40 @@ declare(strict_types=1);
 namespace plugin\saimulti\app\middleware;
 
 use plugin\saimulti\exception\ApiException;
-use plugin\saimulti\service\WebOrganizationResolver;
+use plugin\saimulti\service\TrustedCorsPolicy;
 use support\Log;
 use Throwable;
 use Webman\Http\Request;
 use Webman\Http\Response;
 use Webman\MiddlewareInterface;
 
-final class WebCors implements MiddlewareInterface
+/**
+ * CORS for public guest APIs (customer-service widget / entry links).
+ *
+ * Organization is resolved from entry code or guest token inside the controller,
+ * not from App-Id. Origin is reflected when well-formed; entry-level origin
+ * allowlists are enforced by the business service.
+ */
+final class PublicGuestCors implements MiddlewareInterface
 {
+    private const ALLOW_METHODS = 'GET, POST, PUT, DELETE, OPTIONS';
+    private const ALLOW_HEADERS = 'Authorization, Content-Type, X-CS-Guest-Token, X-Device-Id, Traceparent, Tracestate';
+
     public function process(Request $request, callable $handler): Response
     {
         $origin = trim((string) $request->header('Origin', ''));
-        $allowedOrigin = '';
+        $allowedOrigin = $this->normalizeOrigin($origin);
+
         try {
-            $resolver = new WebOrganizationResolver();
             if ($request->method() === 'OPTIONS') {
-                $allowedOrigin = $resolver->assertRegisteredOrigin($origin);
+                if ($allowedOrigin === null) {
+                    throw new ApiException('Web 预检请求缺少有效 Origin。', 403);
+                }
                 $response = response('', 204);
-                return $this->withCorsHeaders($response, $origin, $allowedOrigin);
+
+                return $this->withCorsHeaders($response, $allowedOrigin);
             }
 
-            $organization = $resolver->fromRequest($request);
-            $allowedOrigin = $resolver->registeredWebOrigin($organization);
-            if ($origin !== '' && !hash_equals($allowedOrigin, strtolower($origin))) {
-                throw new ApiException('当前 Origin 未在目标部署登记。', 403);
-            }
             $response = $handler($request);
         } catch (ApiException $exception) {
             $response = json([
@@ -38,26 +46,35 @@ final class WebCors implements MiddlewareInterface
                 'message' => $exception->getMessage(),
             ])->withStatus($this->httpStatus($exception));
         } catch (Throwable $exception) {
-            Log::error('Web API request failed', [
+            Log::error('Public guest API request failed', [
                 'path' => $request->path(),
                 'message' => $exception->getMessage(),
             ]);
             $response = json(['code' => 500, 'message' => 'Server internal error'])->withStatus(500);
         }
 
-        return $this->withCorsHeaders($response, $origin, $allowedOrigin);
+        return $this->withCorsHeaders($response, $allowedOrigin);
     }
 
-    private function withCorsHeaders(Response $response, string $origin, string $allowedOrigin): Response
+    private function normalizeOrigin(string $origin): ?string
+    {
+        if ($origin === '') {
+            return null;
+        }
+
+        return TrustedCorsPolicy::normalizeOrigin($origin);
+    }
+
+    private function withCorsHeaders(Response $response, ?string $allowedOrigin): Response
     {
         $headers = [
             'Vary' => 'Origin',
-            'Access-Control-Allow-Methods' => 'GET, POST, PUT, DELETE, OPTIONS',
-            'Access-Control-Allow-Headers' => 'Authorization, Content-Type, App-Id, X-Device-Id, X-CS-Guest-Token, Traceparent, Tracestate',
+            'Access-Control-Allow-Methods' => self::ALLOW_METHODS,
+            'Access-Control-Allow-Headers' => self::ALLOW_HEADERS,
             'Access-Control-Expose-Headers' => 'X-Trace-Id',
             'Access-Control-Max-Age' => '600',
         ];
-        if ($origin !== '' && $allowedOrigin !== '' && hash_equals($allowedOrigin, strtolower($origin))) {
+        if ($allowedOrigin !== null) {
             $headers['Access-Control-Allow-Origin'] = $allowedOrigin;
         }
 
