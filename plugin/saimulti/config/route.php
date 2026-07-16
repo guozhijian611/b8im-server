@@ -20,6 +20,9 @@ Route::post('/saimulti/tenant/login', [plugin\saimulti\app\controller\LoginContr
 // 应用信息
 Route::get("/saimulti/appInfo", [plugin\saimulti\app\controller\LoginController::class, 'appInfo']);
 Route::options("/saimulti/appInfo", [plugin\saimulti\app\controller\LoginController::class, 'appInfoOptions']);
+// 客服公开入口解析（无需登录；organization 由入口记录决定）
+Route::get('/saimulti/public/customer-service/entry/resolve', [\plugin\saimulti\app\controller\publicapi\CustomerServicePublicController::class, 'resolveEntry']);
+Route::options('/saimulti/public/customer-service/entry/resolve', static fn () => response('', 204));
 
 // Web 普通用户公开登录。App-Id 和 Origin 由 WebCors/OrganizationResolver 校验。
 Route::group('/saimulti', function () {
@@ -75,6 +78,9 @@ Route::group('/saimulti', function () {
 	Route::delete('/web/favorite/destroy', [\plugin\saimulti\app\controller\web\FavoriteController::class, 'destroy']);
 	Route::get('/web/sticker/packs', [\plugin\saimulti\app\controller\web\StickerController::class, 'packs']);
 	Route::get('/web/sticker/items', [\plugin\saimulti\app\controller\web\StickerController::class, 'items']);
+	Route::get('/web/customer-service/conversation/index', [\plugin\saimulti\app\controller\web\CustomerServiceController::class, 'conversationIndex']);
+	Route::get('/web/customer-service/conversation/read', [\plugin\saimulti\app\controller\web\CustomerServiceController::class, 'conversationRead']);
+	Route::post('/web/customer-service/conversation/save', [\plugin\saimulti\app\controller\web\CustomerServiceController::class, 'conversationSave']);
 
 	foreach ([
 		'/web/im/imToken',
@@ -119,6 +125,9 @@ Route::group('/saimulti', function () {
 		'/web/favorite/destroy',
 		'/web/sticker/packs',
 		'/web/sticker/items',
+		'/web/customer-service/conversation/index',
+		'/web/customer-service/conversation/read',
+		'/web/customer-service/conversation/save',
 	] as $path) {
 		Route::options($path, static fn () => response('', 204));
 	}
@@ -233,6 +242,10 @@ Route::group("/saimulti", function () {
 	Route::put('/admin/sticker/itemUpdate', [\plugin\saimulti\app\controller\admin\StickerController::class, 'itemUpdate']);
 	Route::delete('/admin/sticker/itemDestroy', [\plugin\saimulti\app\controller\admin\StickerController::class, 'itemDestroy']);
 
+	// 商业模块 customer_service（平台）
+	Route::get('/admin/customer-service/conversation/index', [\plugin\saimulti\app\controller\admin\CustomerServiceController::class, 'conversationIndex']);
+	Route::get('/admin/customer-service/conversation/read', [\plugin\saimulti\app\controller\admin\CustomerServiceController::class, 'conversationRead']);
+
 	// IM 运行管理与安全审计
 	Route::get('/admin/im/operations/overview', [\plugin\saimulti\app\controller\admin\AdminImOperationsController::class, 'overview']);
 	Route::get('/admin/im/operations/users', [\plugin\saimulti\app\controller\admin\AdminImOperationsController::class, 'users']);
@@ -338,6 +351,24 @@ Route::group("/saimulti", function () {
 	Route::post('/tenant/sticker/itemSave', [\plugin\saimulti\app\controller\tenant\StickerController::class, 'itemSave']);
 	Route::put('/tenant/sticker/itemUpdate', [\plugin\saimulti\app\controller\tenant\StickerController::class, 'itemUpdate']);
 	Route::delete('/tenant/sticker/itemDestroy', [\plugin\saimulti\app\controller\tenant\StickerController::class, 'itemDestroy']);
+
+	// 租户 customer_service
+	$cs = \plugin\saimulti\app\controller\tenant\CustomerServiceController::class;
+	Route::get('/tenant/customer-service/queue/index', [$cs, 'queueIndex']);
+	Route::post('/tenant/customer-service/queue/save', [$cs, 'queueSave']);
+	Route::put('/tenant/customer-service/queue/update', [$cs, 'queueUpdate']);
+	Route::delete('/tenant/customer-service/queue/destroy', [$cs, 'queueDestroy']);
+	Route::get('/tenant/customer-service/entry/index', [$cs, 'entryIndex']);
+	Route::post('/tenant/customer-service/entry/save', [$cs, 'entrySave']);
+	Route::put('/tenant/customer-service/entry/update', [$cs, 'entryUpdate']);
+	Route::delete('/tenant/customer-service/entry/destroy', [$cs, 'entryDestroy']);
+	Route::get('/tenant/customer-service/agent/index', [$cs, 'agentIndex']);
+	Route::post('/tenant/customer-service/agent/save', [$cs, 'agentSave']);
+	Route::put('/tenant/customer-service/agent/update', [$cs, 'agentUpdate']);
+	Route::delete('/tenant/customer-service/agent/destroy', [$cs, 'agentDestroy']);
+	Route::get('/tenant/customer-service/conversation/index', [$cs, 'conversationIndex']);
+	Route::get('/tenant/customer-service/conversation/read', [$cs, 'conversationRead']);
+	Route::put('/tenant/customer-service/conversation/update', [$cs, 'conversationUpdate']);
 
 	// 租户 IM 运行策略（organization 只取认证上下文）
 	Route::get('/tenant/im/policy/read', [\plugin\saimulti\app\controller\tenant\TenantImPolicyController::class, 'read']);

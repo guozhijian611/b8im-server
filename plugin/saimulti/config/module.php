@@ -40,6 +40,7 @@ foreach ([
     'b8im/module-i18n' => 'b8im-module-i18n',
     'b8im/module-favorite' => 'b8im-module-favorite',
     'b8im/module-sticker' => 'b8im-module-sticker',
+    'b8im/module-customer-service' => 'b8im-module-customer-service',
 ] as $package => $sibling) {
     $root = $resolveModuleRoot($package, $sibling);
     if (is_string($root) && $root !== '') {

@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "333b8344beb71efa122170e2c9529dd3",
+    "content-hash": "fd8425f65c6d18eade6f32ea5e2c9819",
     "packages": [
         {
             "name": "aliyuncs/oss-sdk-php",
@@ -201,6 +201,33 @@
                 "source": "https://github.com/aws/aws-sdk-php/tree/3.388.3"
             },
             "time": "2026-07-09T18:07:47+00:00"
+        },
+        {
+            "name": "b8im/module-customer-service",
+            "version": "dev-main",
+            "dist": {
+                "type": "path",
+                "url": "../b8im-module-customer-service",
+                "reference": "3a76470ba32ee76e35b50933f9ce832a5d6a8689"
+            },
+            "require": {
+                "b8im/module-sdk": "dev-main",
+                "php": ">=8.1"
+            },
+            "type": "library",
+            "autoload": {
+                "psr-4": {
+                    "B8im\\Module\\CustomerService\\": "src/"
+                }
+            },
+            "license": [
+                "proprietary"
+            ],
+            "description": "B8IM customer service commercial module",
+            "transport-options": {
+                "symlink": true,
+                "relative": true
+            }
         },
         {
             "name": "b8im/module-favorite",
@@ -8629,6 +8656,7 @@
     "aliases": [],
     "minimum-stability": "dev",
     "stability-flags": {
+        "b8im/module-customer-service": 20,
         "b8im/module-favorite": 20,
         "b8im/module-i18n": 20,
         "b8im/module-sdk": 20,
