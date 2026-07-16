@@ -23,14 +23,11 @@ final class WebCors implements MiddlewareInterface
             if ($request->method() === 'OPTIONS') {
                 $allowedOrigin = $resolver->assertRegisteredOrigin($origin);
                 $response = response('', 204);
-                return $this->withCorsHeaders($response, $origin, $allowedOrigin);
+                return $this->withCorsHeaders($response, $allowedOrigin);
             }
 
             $organization = $resolver->fromRequest($request);
-            $allowedOrigin = $origin === '' ? '' : $resolver->registeredWebOrigin($organization);
-            if ($origin !== '' && !hash_equals($allowedOrigin, strtolower($origin))) {
-                throw new ApiException('当前 Origin 未在目标部署登记。', 403);
-            }
+            $allowedOrigin = $origin === '' ? '' : $resolver->assertOrganizationOrigin($organization, $origin);
             $response = $handler($request);
         } catch (ApiException $exception) {
             $response = json([
@@ -45,10 +42,10 @@ final class WebCors implements MiddlewareInterface
             $response = json(['code' => 500, 'message' => 'Server internal error'])->withStatus(500);
         }
 
-        return $this->withCorsHeaders($response, $origin, $allowedOrigin);
+        return $this->withCorsHeaders($response, $allowedOrigin);
     }
 
-    private function withCorsHeaders(Response $response, string $origin, string $allowedOrigin): Response
+    private function withCorsHeaders(Response $response, string $allowedOrigin): Response
     {
         $headers = [
             'Vary' => 'Origin',
@@ -57,7 +54,7 @@ final class WebCors implements MiddlewareInterface
             'Access-Control-Expose-Headers' => 'X-Trace-Id',
             'Access-Control-Max-Age' => '600',
         ];
-        if ($origin !== '' && $allowedOrigin !== '' && hash_equals($allowedOrigin, strtolower($origin))) {
+        if ($allowedOrigin !== '') {
             $headers['Access-Control-Allow-Origin'] = $allowedOrigin;
         }
 

@@ -53,5 +53,10 @@ $assert(WebOrganizationResolver::originFromUrl('https://IM.Example.com/path') ==
 $assert(WebOrganizationResolver::originFromUrl('http://127.0.0.1:16988/') === 'http://127.0.0.1:16988', '开发 Origin 规范化失败');
 $assert(WebOrganizationResolver::originFromUrl('https://IM.Example.com:443/path') === 'https://im.example.com', 'HTTPS 默认端口未规范化');
 $assert(WebOrganizationResolver::originFromUrl('http://IM.Example.com:80/path') === 'http://im.example.com', 'HTTP 默认端口未规范化');
+$assert(WebOrganizationResolver::allowedOriginForUrl('https://www.idev.love', 'https://idev.love') === 'https://www.idev.love', 'www Web Origin 未映射到已登记裸域');
+$assert(WebOrganizationResolver::allowedOriginForUrl('https://idev.love', 'https://www.idev.love') === 'https://idev.love', '裸域 Web Origin 未映射到已登记 www 域名');
+$assert(WebOrganizationResolver::allowedOriginForUrl('https://www.idev.love.evil.example', 'https://idev.love') === null, '后缀混淆 Origin 被错误接受');
+$assert(WebOrganizationResolver::allowedOriginForUrl('http://www.idev.love', 'https://idev.love') === null, '不同协议 Origin 被错误接受');
+$assert(WebOrganizationResolver::allowedOriginForUrl('https://www.idev.love:8443', 'https://idev.love') === null, '不同端口 Origin 被错误接受');
 
 echo sprintf("WebTrustBoundaryTest: %d assertions passed\n", $assertions);

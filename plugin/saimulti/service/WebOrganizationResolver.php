@@ -51,30 +51,35 @@ final class WebOrganizationResolver
         return $row;
     }
 
-    public function registeredWebOrigin(array $organization): string
+    public function assertOrganizationOrigin(array $organization, string $origin): string
     {
-        $routing = (new RoutingConfigService())->read((int) ($organization['id'] ?? 0), 'web');
-        $routes = (array) ($routing['server_info']['routes'] ?? []);
-        $primaryRouteId = (string) ($routing['server_info']['policy']['primary_route_id'] ?? '');
-        $primary = current(array_filter(
-            $routes,
-            static fn (array $route): bool => ($route['route_id'] ?? null) === $primaryRouteId,
-        ));
-        if (!is_array($primary)) {
-            throw new ApiException('Web 主线路配置无效。', 50301);
+        $normalizedOrigin = TrustedCorsPolicy::normalizeOrigin($origin);
+        if ($normalizedOrigin === null) {
+            throw new ApiException('当前 Origin 未在目标部署登记。', 403);
         }
-        $url = OrganizationDiscovery::assertPublicUrl(
-            (string) ($primary['endpoints']['web_server_url'] ?? ''), ['https', 'http'],
-            (bool) config('app.debug', false),
-        );
 
-        return self::originFromUrl($url);
+        $routing = (new RoutingConfigService())->read((int) ($organization['id'] ?? 0), 'web');
+        foreach ((array) ($routing['server_info']['routes'] ?? []) as $route) {
+            try {
+                $url = OrganizationDiscovery::assertPublicUrl(
+                    (string) ($route['endpoints']['web_server_url'] ?? ''), ['https', 'http'],
+                    (bool) config('app.debug', false),
+                );
+            } catch (ApiException) {
+                continue;
+            }
+            if (self::allowedOriginForUrl($normalizedOrigin, $url) !== null) {
+                return $normalizedOrigin;
+            }
+        }
+
+        throw new ApiException('当前 Origin 未在目标部署登记。', 403);
     }
 
     public function assertRegisteredOrigin(string $origin): string
     {
-        $origin = strtolower(trim($origin));
-        if ($origin === '') {
+        $origin = TrustedCorsPolicy::normalizeOrigin($origin);
+        if ($origin === null) {
             throw new ApiException('Web 预检请求缺少 Origin。', 403);
         }
         $deploymentId = OrganizationDiscovery::assertDeploymentId(
@@ -89,23 +94,9 @@ final class WebOrganizationResolver
             ->toArray();
         foreach ($rows as $row) {
             try {
-                $routing = (new RoutingConfigService())->read((int) $row['id'], 'web');
-                $routes = (array) ($routing['server_info']['routes'] ?? []);
+                return $this->assertOrganizationOrigin($row, $origin);
             } catch (ApiException) {
                 continue;
-            }
-            foreach ($routes as $route) {
-                try {
-                    $registered = self::originFromUrl(OrganizationDiscovery::assertPublicUrl(
-                        (string) ($route['endpoints']['web_server_url'] ?? ''), ['https', 'http'],
-                        (bool) config('app.debug', false),
-                    ));
-                } catch (ApiException) {
-                    continue;
-                }
-                if (hash_equals($registered, $origin)) {
-                    return $registered;
-                }
             }
         }
 
@@ -130,5 +121,39 @@ final class WebOrganizationResolver
         }
 
         return $origin;
+    }
+
+    public static function allowedOriginForUrl(string $origin, string $url): ?string
+    {
+        $requestedOrigin = TrustedCorsPolicy::normalizeOrigin($origin);
+        if ($requestedOrigin === null) {
+            return null;
+        }
+
+        $registeredOrigin = self::originFromUrl($url);
+        $requested = parse_url($requestedOrigin);
+        $registered = parse_url($registeredOrigin);
+        if (!is_array($requested) || !is_array($registered)) {
+            return null;
+        }
+
+        $requestedHost = strtolower((string) ($requested['host'] ?? ''));
+        $registeredHost = strtolower((string) ($registered['host'] ?? ''));
+        if (str_starts_with($requestedHost, 'www.')) {
+            $requestedHost = substr($requestedHost, 4);
+        }
+        if (str_starts_with($registeredHost, 'www.')) {
+            $registeredHost = substr($registeredHost, 4);
+        }
+
+        if (
+            hash_equals((string) ($registered['scheme'] ?? ''), (string) ($requested['scheme'] ?? ''))
+            && hash_equals($registeredHost, $requestedHost)
+            && ($registered['port'] ?? null) === ($requested['port'] ?? null)
+        ) {
+            return $requestedOrigin;
+        }
+
+        return null;
     }
 }

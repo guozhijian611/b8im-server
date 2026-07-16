@@ -14,6 +14,7 @@ require dirname(__DIR__) . '/vendor/autoload.php';
 require dirname(__DIR__) . '/support/bootstrap.php';
 
 use plugin\saimulti\service\OrganizationDiscovery;
+use plugin\saimulti\service\WebOrganizationResolver;
 use plugin\saimulti\service\routing\CanonicalJson;
 use plugin\saimulti\service\routing\RoutingConfigService;
 use plugin\saimulti\service\routing\RoutingSnapshotSigner;
@@ -78,6 +79,10 @@ $assert(count($web['server_info']['routes']) === 2, '主备线路没有完整发
 $assert($web['server_info']['policy']['mode'] === 'primary_backup', '线路模式不正确');
 
 $organization = Db::table('sm_system_organization')->where('id', 1)->find();
+$assert(
+    (new WebOrganizationResolver())->assertOrganizationOrigin($organization, 'http://127.0.0.1:16988') === 'http://127.0.0.1:16988',
+    'Web Origin 未按当前机构发布线路校验',
+);
 $payload = [
     'organization' => 1,
     'deployment_id' => 'b8im-local',
