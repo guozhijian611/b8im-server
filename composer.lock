@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "fd8425f65c6d18eade6f32ea5e2c9819",
+    "content-hash": "dc4f8b7d8194879896b9ba5d59878430",
     "packages": [
         {
             "name": "aliyuncs/oss-sdk-php",
@@ -278,6 +278,33 @@
                 "proprietary"
             ],
             "description": "B8IM i18n commercial module",
+            "transport-options": {
+                "symlink": true,
+                "relative": true
+            }
+        },
+        {
+            "name": "b8im/module-robot-single",
+            "version": "dev-main",
+            "dist": {
+                "type": "path",
+                "url": "../b8im-module-robot-single",
+                "reference": "46241e89f5c9fb60c5d93aa4fee8b76c95ecf47a"
+            },
+            "require": {
+                "b8im/module-sdk": "dev-main",
+                "php": ">=8.1"
+            },
+            "type": "library",
+            "autoload": {
+                "psr-4": {
+                    "B8im\\Module\\RobotSingle\\": "src/"
+                }
+            },
+            "license": [
+                "proprietary"
+            ],
+            "description": "B8IM robot_single commercial module",
             "transport-options": {
                 "symlink": true,
                 "relative": true
@@ -8659,6 +8686,7 @@
         "b8im/module-customer-service": 20,
         "b8im/module-favorite": 20,
         "b8im/module-i18n": 20,
+        "b8im/module-robot-single": 20,
         "b8im/module-sdk": 20,
         "b8im/module-sticker": 20
     },

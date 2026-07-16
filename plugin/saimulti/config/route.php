@@ -103,6 +103,9 @@ Route::group('/saimulti', function () {
 	Route::get('/web/customer-service/conversation/index', [\plugin\saimulti\app\controller\web\CustomerServiceController::class, 'conversationIndex']);
 	Route::get('/web/customer-service/conversation/read', [\plugin\saimulti\app\controller\web\CustomerServiceController::class, 'conversationRead']);
 	Route::post('/web/customer-service/conversation/save', [\plugin\saimulti\app\controller\web\CustomerServiceController::class, 'conversationSave']);
+	Route::get('/web/robot-single/index', [\plugin\saimulti\app\controller\web\RobotSingleController::class, 'index']);
+	Route::get('/web/robot-single/read', [\plugin\saimulti\app\controller\web\RobotSingleController::class, 'read']);
+	Route::post('/web/robot-single/match', [\plugin\saimulti\app\controller\web\RobotSingleController::class, 'match']);
 
 	foreach ([
 		'/web/im/imToken',
@@ -150,6 +153,9 @@ Route::group('/saimulti', function () {
 		'/web/customer-service/conversation/index',
 		'/web/customer-service/conversation/read',
 		'/web/customer-service/conversation/save',
+		'/web/robot-single/index',
+		'/web/robot-single/read',
+		'/web/robot-single/match',
 	] as $path) {
 		Route::options($path, static fn () => response('', 204));
 	}
@@ -268,6 +274,12 @@ Route::group("/saimulti", function () {
 	Route::get('/admin/customer-service/conversation/index', [\plugin\saimulti\app\controller\admin\CustomerServiceController::class, 'conversationIndex']);
 	Route::get('/admin/customer-service/conversation/read', [\plugin\saimulti\app\controller\admin\CustomerServiceController::class, 'conversationRead']);
 
+	// 商业模块 robot_single（平台只读）
+	Route::get('/admin/robot-single/index', [\plugin\saimulti\app\controller\admin\RobotSingleController::class, 'index']);
+	Route::get('/admin/robot-single/read', [\plugin\saimulti\app\controller\admin\RobotSingleController::class, 'read']);
+	Route::get('/admin/robot-single/ruleIndex', [\plugin\saimulti\app\controller\admin\RobotSingleController::class, 'ruleIndex']);
+	Route::get('/admin/robot-single/kbIndex', [\plugin\saimulti\app\controller\admin\RobotSingleController::class, 'kbIndex']);
+
 	// IM 运行管理与安全审计
 	Route::get('/admin/im/operations/overview', [\plugin\saimulti\app\controller\admin\AdminImOperationsController::class, 'overview']);
 	Route::get('/admin/im/operations/users', [\plugin\saimulti\app\controller\admin\AdminImOperationsController::class, 'users']);
@@ -373,6 +385,22 @@ Route::group("/saimulti", function () {
 	Route::post('/tenant/sticker/itemSave', [\plugin\saimulti\app\controller\tenant\StickerController::class, 'itemSave']);
 	Route::put('/tenant/sticker/itemUpdate', [\plugin\saimulti\app\controller\tenant\StickerController::class, 'itemUpdate']);
 	Route::delete('/tenant/sticker/itemDestroy', [\plugin\saimulti\app\controller\tenant\StickerController::class, 'itemDestroy']);
+
+	// 租户 robot_single
+	$rs = \plugin\saimulti\app\controller\tenant\RobotSingleController::class;
+	Route::get('/tenant/robot-single/index', [$rs, 'index']);
+	Route::get('/tenant/robot-single/read', [$rs, 'read']);
+	Route::post('/tenant/robot-single/save', [$rs, 'save']);
+	Route::put('/tenant/robot-single/update', [$rs, 'update']);
+	Route::delete('/tenant/robot-single/destroy', [$rs, 'destroy']);
+	Route::get('/tenant/robot-single/ruleIndex', [$rs, 'ruleIndex']);
+	Route::post('/tenant/robot-single/ruleSave', [$rs, 'ruleSave']);
+	Route::put('/tenant/robot-single/ruleUpdate', [$rs, 'ruleUpdate']);
+	Route::delete('/tenant/robot-single/ruleDestroy', [$rs, 'ruleDestroy']);
+	Route::get('/tenant/robot-single/kbIndex', [$rs, 'kbIndex']);
+	Route::post('/tenant/robot-single/kbSave', [$rs, 'kbSave']);
+	Route::put('/tenant/robot-single/kbUpdate', [$rs, 'kbUpdate']);
+	Route::delete('/tenant/robot-single/kbDestroy', [$rs, 'kbDestroy']);
 
 	// 租户 customer_service
 	$cs = \plugin\saimulti\app\controller\tenant\CustomerServiceController::class;
