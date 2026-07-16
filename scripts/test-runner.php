@@ -26,6 +26,7 @@ $environment = [
     'TENANT_IM_POLICY_TEST_DB_NAME' => "nb8im_{$suffix}_im_policy_test",
     'IM_USER_MGMT_TEST_DB_NAME' => "nb8im_{$suffix}_im_user_mgmt_test",
     'WEB_IM_ACCESS_TEST_DB_NAME' => "nb8im_web_access_{$suffix}_test",
+    'WEB_REGISTER_QR_TEST_DB_NAME' => "nb8im_{$suffix}_web_register_qr_test",
     'ANNOUNCEMENT_TEST_DB_NAME' => "nb8im_{$suffix}_announcement_test",
     'WEB_IM_TEST_DB_NAME' => "nb8im_{$suffix}_web_test",
 ];
@@ -66,7 +67,7 @@ if ($suite !== 'unit') {
     if (!is_string($snapshot) || $snapshot === '') {
         throw new RuntimeException('测试数据库快照为空');
     }
-    foreach (['MODULE_TEST_DB_NAME', 'MODULE_ACL_TEST_DB_NAME', 'ROUTING_TEST_DB_NAME', 'TENANT_IM_POLICY_TEST_DB_NAME', 'IM_USER_MGMT_TEST_DB_NAME'] as $key) {
+    foreach (['MODULE_TEST_DB_NAME', 'MODULE_ACL_TEST_DB_NAME', 'ROUTING_TEST_DB_NAME', 'TENANT_IM_POLICY_TEST_DB_NAME', 'IM_USER_MGMT_TEST_DB_NAME', 'WEB_REGISTER_QR_TEST_DB_NAME'] as $key) {
         $database = $environment[$key];
         $admin->exec("DROP DATABASE IF EXISTS `{$database}`");
         $admin->exec("CREATE DATABASE `{$database}` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci");
@@ -109,6 +110,7 @@ $databaseByTest = [
     'ImUserManagementIntegrationTest.php' => 'IM_USER_MGMT_TEST_DB_NAME',
     'WebImAccessSessionIntegrationTest.php' => 'WEB_IM_ACCESS_TEST_DB_NAME',
     'WebImControlPlaneIntegrationTest.php' => 'WEB_IM_TEST_DB_NAME',
+    'WebRegistrationQrLoginIntegrationTest.php' => 'WEB_REGISTER_QR_TEST_DB_NAME',
 ];
 foreach ($selected as $file) {
     $basename = basename($file);
