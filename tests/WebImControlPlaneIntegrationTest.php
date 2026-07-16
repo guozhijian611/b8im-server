@@ -141,7 +141,7 @@ if ($pdoDatabase !== $database
     ));
 }
 
-$imRoot = dirname(__DIR__, 2) . '/b8im-im';
+$imRoot = trim((string) (getenv('B8IM_IM_ROOT') ?: dirname(__DIR__, 2) . '/b8im-im'));
 $configPath = $imRoot . '/phinx.php';
 if (!is_file($configPath)) {
     throw new RuntimeException('b8im-im Phinx 配置不存在。');
@@ -603,9 +603,39 @@ $assert(
     array_keys($messagePage['messages'][0]) === [
         'id', 'conversation_id', 'conversation_type', 'message_id', 'message_seq',
         'client_msg_id', 'sender_id', 'sender_user', 'message_type', 'content',
-        'status', 'edit_time', 'edit_count', 'create_time',
+        'status', 'edit_time', 'edit_count', 'create_time', 'delivery_status',
     ],
     'Message response contract is not exact.',
+);
+$assert(
+    array_column($messagePage['messages'], 'delivery_status') === ['', ''],
+    'Incoming message history exposed an outgoing delivery state.',
+);
+$pdo->prepare(
+    'INSERT INTO im_message_receipt
+        (organization, conversation_id, message_id, user_id, status,
+         delivered_time, read_time, create_time, update_time)
+     VALUES
+        (901, ?, "web-test-message-3", "user_b", 1, NULL, NULL, ?, ?),
+        (901, ?, "web-test-message-3", "user_b", 2, ?, NULL, ?, ?),
+        (901, ?, "web-test-message-3", "user_c", 1, NULL, NULL, ?, ?),
+        (901, ?, "web-test-message-3", "user_c", 2, ?, NULL, ?, ?),
+        (901, ?, "web-test-message-3", "user_c", 3, ?, ?, ?, ?)',
+)->execute([
+    $conversationId, $now, $now,
+    $conversationId, $now, $now, $now,
+    $conversationId, $now, $now,
+    $conversationId, $now, $now, $now,
+    $conversationId, $now, $now, $now, $now,
+]);
+$aliceMessagePage = $service->messages($alice, $conversationId, '', 0, 0, 50);
+$aliceMessage3 = array_values(array_filter(
+    $aliceMessagePage['messages'],
+    static fn (array $message): bool => $message['message_id'] === 'web-test-message-3',
+))[0];
+$assert(
+    $aliceMessage3['delivery_status'] === 'delivered',
+    'Outgoing group delivery state did not use the minimum recipient high-water mark.',
 );
 $assert(
     $service->searchMessages($carol, $conversationId, 'hidden', 0, 50) === [],

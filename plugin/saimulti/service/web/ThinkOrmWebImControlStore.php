@@ -301,7 +301,12 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         );
         $hasMore = count($candidates) > $limit;
         $page = array_slice($candidates, 0, $limit);
-        $messages = $this->loadIndexedMessageBodies($organization, $conversationId, $page);
+        $messages = $this->loadIndexedMessageBodies(
+            $organization,
+            $conversationId,
+            $page,
+            $userId,
+        );
         usort($messages, static fn (array $left, array $right): int =>
             (int) $left['message_seq'] <=> (int) $right['message_seq']);
 
@@ -1875,8 +1880,12 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
     }
 
     /** @param list<array<string, mixed>> $candidates @return list<array<string, mixed>> */
-    private function loadIndexedMessageBodies(int $organization, string $conversationId, array $candidates): array
-    {
+    private function loadIndexedMessageBodies(
+        int $organization,
+        string $conversationId,
+        array $candidates,
+        string $viewerUserId,
+    ): array {
         if ($candidates === []) {
             return [];
         }
@@ -1915,7 +1924,62 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             $messages[] = $this->formatMessage($body);
         }
 
+        $outgoingMessageIds = [];
+        foreach ($messages as $message) {
+            if (hash_equals((string) $message['sender_id'], $viewerUserId)) {
+                $outgoingMessageIds[] = (string) $message['message_id'];
+            }
+        }
+        $deliveryStatuses = $this->outgoingDeliveryStatuses(
+            $organization,
+            $viewerUserId,
+            $outgoingMessageIds,
+        );
+        foreach ($messages as &$message) {
+            $messageId = (string) $message['message_id'];
+            $message['delivery_status'] = hash_equals((string) $message['sender_id'], $viewerUserId)
+                ? ($deliveryStatuses[$messageId] ?? 'sent')
+                : '';
+        }
+        unset($message);
+
         return $messages;
+    }
+
+    /** @param list<string> $messageIds @return array<string, string> */
+    private function outgoingDeliveryStatuses(
+        int $organization,
+        string $senderUserId,
+        array $messageIds,
+    ): array {
+        if ($messageIds === []) {
+            return [];
+        }
+        $placeholders = implode(',', array_fill(0, count($messageIds), '?'));
+        $rows = Db::query(
+            'SELECT recipient.message_id, MIN(recipient.max_status) AS delivery_status
+               FROM (
+                    SELECT r.message_id, r.user_id, MAX(r.status) AS max_status
+                      FROM im_message_receipt r
+                     WHERE r.organization = ?
+                       AND r.message_id IN (' . $placeholders . ')
+                       AND r.user_id <> ?
+                  GROUP BY r.message_id, r.user_id
+               ) recipient
+           GROUP BY recipient.message_id',
+            array_merge([$organization], $messageIds, [$senderUserId]),
+        );
+
+        $result = [];
+        foreach ($rows as $row) {
+            $result[(string) $row['message_id']] = match ((int) $row['delivery_status']) {
+                3 => 'read',
+                2 => 'delivered',
+                default => 'sent',
+            };
+        }
+
+        return $result;
     }
 
     /** @param array<string, mixed> $message @return array<string, mixed> */
