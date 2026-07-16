@@ -107,4 +107,15 @@ HTTP), $handler);
 $assert($cmsActual->getStatusCode() === 200 && $handlerCalls === 2, 'CMS actual request did not reach handler.');
 $assert($cmsActual->getHeader('Access-Control-Allow-Origin') === 'https://tenant.idev.love', 'CMS actual response ACAO is wrong.');
 
+// /saimulti/client/config belongs exclusively to WebCors. The global middleware
+// must not append a second set of CORS headers to the route response.
+$clientConfig = $middleware->process($request(<<<'HTTP'
+GET /saimulti/client/config?client_family=web HTTP/1.1
+Host: api.idev.love
+Origin: https://www.idev.love
+HTTP), $handler);
+$assert($clientConfig->getStatusCode() === 200 && $handlerCalls === 3, 'Client config did not bypass global CORS.');
+$assert($clientConfig->getHeader('Access-Control-Allow-Origin') === null, 'Global CORS added ACAO to the WebCors-owned endpoint.');
+$assert($clientConfig->getHeader('Access-Control-Allow-Credentials') === null, 'Global CORS added credentials to the WebCors-owned endpoint.');
+
 echo "TrustedCorsPolicyTest: {$assertions} assertions passed\n";

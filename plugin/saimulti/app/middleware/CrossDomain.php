@@ -55,6 +55,8 @@ final class CrossDomain implements MiddlewareInterface
 
         return str_starts_with($path, '/saimulti/')
             && $path !== '/saimulti/appInfo'
+            // WebCors owns this authenticated Web endpoint despite its shared path prefix.
+            && $path !== '/saimulti/client/config'
             && !str_starts_with($path, '/saimulti/web/')
             // Public guest APIs use PublicGuestCors (no App-Id; entry/token scoped).
             && !str_starts_with($path, '/saimulti/public/');
