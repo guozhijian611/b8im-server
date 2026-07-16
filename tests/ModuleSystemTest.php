@@ -804,6 +804,13 @@ $assert(array_keys($projected) === ['version', 'organization', 'deployment_id', 
 $assert($projected['organization'] === 1 && $projected['deployment_id'] === 'b8im-local', '投影丢失认证上下文');
 $assert($projected['version'] === 12, 'Web parser 要求 version 为正整数');
 $assert(($projected['features']['announcement'] ?? false) === true, 'features 未使用 module_key => bool 契约');
+$emptyProjection = (new ClientConfigProjectionService(
+    $access,
+    static fn (): array => [],
+    static fn (int $organization): int => 1,
+))->project(1, 'b8im-module-test', 'app');
+$emptyProjectionWire = json_decode(json_encode($emptyProjection, JSON_THROW_ON_ERROR), false, 512, JSON_THROW_ON_ERROR);
+$assert(is_object($emptyProjectionWire->features ?? null), '空 features 在线路 JSON 中必须保持 object，不能退化为 []');
 $assert(count($projected['modules']) === 1, '投影输出了未授权模块');
 $assert(
     array_keys($projected['modules'][0]) === ['module_key', 'version', 'available', 'capabilities', 'permissions', 'config'],

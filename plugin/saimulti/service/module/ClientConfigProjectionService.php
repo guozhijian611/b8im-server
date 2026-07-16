@@ -40,7 +40,7 @@ final class ClientConfigProjectionService
     /**
      * 只接受认证层已解析的 organization。本服务不读请求头、query 或 body。
      *
-     * @return array{version: int, organization: int, deployment_id: string, features: array<string, bool>, modules: list<array{module_key: string, version: string, available: true, capabilities: list<string>, permissions: list<string>, config: array<string, mixed>}>, tabbar: list<array{module_key: string, title: string}>}
+     * @return array{version: int, organization: int, deployment_id: string, features: array<string, bool>|\stdClass, modules: list<array{module_key: string, version: string, available: true, capabilities: list<string>, permissions: list<string>, config: array<string, mixed>}>, tabbar: list<array{module_key: string, title: string}>}
      */
     public function project(int $organization, string $deploymentId, string $clientFamily): array
     {
@@ -137,7 +137,8 @@ final class ClientConfigProjectionService
             'version' => $version,
             'organization' => $organization,
             'deployment_id' => $deploymentId,
-            'features' => $features,
+            // JSON 必须始终输出 object；PHP 空关联数组默认会错误编码成 []。
+            'features' => $features === [] ? new \stdClass() : $features,
             'modules' => $modules,
             'tabbar' => $tabbar,
         ];
