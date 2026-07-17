@@ -38,6 +38,11 @@ final class ModuleServiceFactory
         );
     }
 
+    public static function tenantAssignments(): TenantModuleAssignmentService
+    {
+        return new TenantModuleAssignmentService(self::manager());
+    }
+
     public static function expiryScanner(): ModuleLicenseExpiryScanner
     {
         return new ModuleLicenseExpiryScanner(

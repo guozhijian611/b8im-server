@@ -10,6 +10,7 @@ use plugin\saimulti\app\logic\system\SystemOrganizationLogic;
 use plugin\saimulti\app\validate\admin\SystemOrganizationValidate;
 use plugin\saimulti\basic\AdminController;
 use plugin\saimulti\service\Permission;
+use plugin\saimulti\service\module\ModuleServiceFactory;
 use support\Request;
 use support\Response;
 
@@ -81,7 +82,11 @@ class SystemOrganizationController extends AdminController
             $data['city'] = $region[1] ?? '';
             $data['area'] = $region[2] ?? '';
         }
-        $result = $this->logic->add($data);
+        $result = $this->logic->add($data, [
+            'type' => 'admin',
+            'id' => $this->adminId,
+            'ip' => $request->getRealIp(),
+        ]);
         if ($result) {
             return $this->success('添加成功');
         } else {
@@ -105,7 +110,11 @@ class SystemOrganizationController extends AdminController
             $data['city'] = $region[1] ?? '';
             $data['area'] = $region[2] ?? '';
         }
-        $result = $this->logic->edit($data['id'], $data);
+        $result = $this->logic->edit($data['id'], $data, [
+            'type' => 'admin',
+            'id' => $this->adminId,
+            'ip' => $request->getRealIp(),
+        ]);
         if ($result) {
             return $this->success('修改成功');
         } else {
@@ -144,5 +153,32 @@ class SystemOrganizationController extends AdminController
         $id = $request->input('id', '');
         $this->logic->initTenant($id);
         return $this->success('操作成功');
+    }
+
+    #[Permission('机构模块能力读取', 'saimulti:admin:organization:update')]
+    public function moduleCapabilities(Request $request): Response
+    {
+        return $this->success(
+            ModuleServiceFactory::tenantAssignments()->organizationCatalog(
+                (int) $request->input('id', 0),
+            ),
+        );
+    }
+
+    #[Permission('机构模块能力更新', 'saimulti:admin:organization:update')]
+    public function updateModuleCapabilities(Request $request): Response
+    {
+        $assignments = $request->post('assignments', []);
+        if (!is_array($assignments)) {
+            return $this->fail('assignments 必须为数组。');
+        }
+
+        return $this->success(
+            ModuleServiceFactory::tenantAssignments()->updateOrganization(
+                (int) $request->input('id', 0),
+                $assignments,
+                ['type' => 'admin', 'id' => $this->adminId, 'ip' => $request->getRealIp()],
+            ),
+        );
     }
 }

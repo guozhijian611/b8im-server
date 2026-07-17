@@ -442,12 +442,29 @@ final class ModuleManager
         ?string $expireAt,
         ?string $remark,
         array $actor = [],
+        string $assignmentSource = 'MANUAL',
+        ?int $sourceGroupId = null,
     ): array {
         $moduleKey = $this->assertModuleKey($moduleKey);
+        $assignmentSource = strtoupper(trim($assignmentSource));
+        if (!in_array($assignmentSource, ['PACKAGE', 'MANUAL'], true)) {
+            throw new ApiException('assignment_source 仅支持 PACKAGE 或 MANUAL。', 422);
+        }
+        if ($assignmentSource === 'MANUAL') {
+            $sourceGroupId = null;
+        }
         if (!$this->lifecycleLocks->isHeld($moduleKey)) {
             return $this->lifecycleLocks->run(
                 $moduleKey,
-                fn (): array => $this->grantLicense($organization, $moduleKey, $expireAt, $remark, $actor),
+                fn (): array => $this->grantLicense(
+                    $organization,
+                    $moduleKey,
+                    $expireAt,
+                    $remark,
+                    $actor,
+                    $assignmentSource,
+                    $sourceGroupId,
+                ),
             );
         }
         $this->assertOrganization($organization);
@@ -462,7 +479,16 @@ final class ModuleManager
         $expireAt = ModuleLicenseInputNormalizer::futureExpiry($expireAt);
         $remark = ModuleLicenseInputNormalizer::remark($remark);
 
-        $this->transactions->run(function () use ($organization, $moduleKey, $expireAt, $remark, $actor, $module): void {
+        $this->transactions->run(function () use (
+            $organization,
+            $moduleKey,
+            $expireAt,
+            $remark,
+            $actor,
+            $module,
+            $assignmentSource,
+            $sourceGroupId,
+        ): void {
             $license = $this->licenseRow($organization, $moduleKey, false);
             $now = date('Y-m-d H:i:s');
             if ($license === null) {
@@ -475,6 +501,8 @@ final class ModuleManager
                     'granted_by' => $actor['id'] ?? null,
                     'authorized_at' => $now,
                     'remark' => $remark,
+                    'assignment_source' => $assignmentSource,
+                    'source_group_id' => $sourceGroupId,
                     'create_time' => $now,
                     'update_time' => $now,
                 ]);
@@ -502,6 +530,8 @@ final class ModuleManager
                         'authorized_at' => $now,
                         'revoked_at' => null,
                         'remark' => $remark,
+                        'assignment_source' => $assignmentSource,
+                        'source_group_id' => $sourceGroupId,
                         'update_time' => $now,
                         'delete_time' => null,
                     ]);
@@ -522,7 +552,13 @@ final class ModuleManager
                 true,
                 $actor,
                 $organization,
-                context: ['expire_at' => $expireAt, 'license_version_from' => $fromVersion, 'license_version_to' => $current['version']],
+                context: [
+                    'expire_at' => $expireAt,
+                    'assignment_source' => $assignmentSource,
+                    'source_group_id' => $sourceGroupId,
+                    'license_version_from' => $fromVersion,
+                    'license_version_to' => $current['version'],
+                ],
             );
         }, [
             fn () => $this->access->invalidate($organization, $moduleKey),
@@ -1141,6 +1177,8 @@ final class ModuleManager
             'disabled_at' => $license['disabled_at'],
             'revoked_at' => $license['revoked_at'],
             'remark' => $license['remark'],
+            'assignment_source' => $license['assignment_source'] ?? 'MANUAL',
+            'source_group_id' => isset($license['source_group_id']) ? (int) $license['source_group_id'] : null,
         ];
     }
 

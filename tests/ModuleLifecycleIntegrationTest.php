@@ -45,6 +45,7 @@ use plugin\saimulti\service\module\ModuleManager;
 use plugin\saimulti\service\module\ModuleMenuRegistrar;
 use plugin\saimulti\service\module\ModuleMigrationRunner;
 use plugin\saimulti\service\module\ThinkOrmModuleAccessStore;
+use plugin\saimulti\service\module\TenantModuleAssignmentService;
 use support\think\Db;
 use Symfony\Component\Console\Input\ArrayInput;
 use Symfony\Component\Console\Output\BufferedOutput;
@@ -305,6 +306,77 @@ $authInvalidations = [];
 $license = $manager->enableTenant(1, 'announcement', $tenantActor);
 $assert($license['status'] === 'ENABLED', '租户模块未进入 ENABLED');
 $assert($authInvalidations === ['tenant:1'], '租户模块启用提交后未清理 Tenant 权限缓存');
+
+$assignments = new TenantModuleAssignmentService($manager);
+$package = $assignments->updateGroup(1, ['announcement'], $actor);
+$assert($package['items'][0]['enabled'] === true, '套餐模块能力未保存');
+$organizationModules = $assignments->updateOrganization(1, [[
+    'module_key' => 'announcement',
+    'mode' => TenantModuleAssignmentService::MODE_INHERIT,
+]], $actor);
+$assert(
+    $organizationModules['items'][0]['effective'] === true
+    && $organizationModules['items'][0]['assignment_source'] === TenantModuleAssignmentService::SOURCE_PACKAGE,
+    '机构继承套餐后未物化为套餐来源的最终授权',
+);
+$assignments->updateGroup(1, [], $actor);
+$organizationModules = $assignments->organizationCatalog(1);
+$assert(
+    $organizationModules['items'][0]['effective'] === false
+    && $organizationModules['items'][0]['assignment_mode'] === TenantModuleAssignmentService::MODE_INHERIT,
+    '套餐移除模块后未同步关闭继承机构',
+);
+$organizationModules = $assignments->updateOrganization(1, [[
+    'module_key' => 'announcement',
+    'mode' => TenantModuleAssignmentService::MODE_ENABLED,
+    'remark' => '机构单独启用',
+]], $actor);
+$assert(
+    $organizationModules['items'][0]['effective'] === true
+    && $organizationModules['items'][0]['assignment_source'] === TenantModuleAssignmentService::SOURCE_MANUAL,
+    '机构单独启用未覆盖套餐默认值',
+);
+$assignments->updateGroup(1, ['announcement'], $actor);
+$assignments->updateGroup(1, [], $actor);
+$assert($access->isAvailable(1, 'announcement', 'web', 'announcement.web.page'), '套餐变更覆盖了机构单独启用');
+$organizationModules = $assignments->updateOrganization(1, [[
+    'module_key' => 'announcement',
+    'mode' => TenantModuleAssignmentService::MODE_DISABLED,
+    'remark' => '机构单独停用',
+]], $actor);
+$assert(
+    $organizationModules['items'][0]['effective'] === false
+    && $organizationModules['items'][0]['assignment_mode'] === TenantModuleAssignmentService::MODE_DISABLED,
+    '机构单独停用未成为最终授权边界',
+);
+$assignments->updateGroup(1, ['announcement'], $actor);
+$assert(!$access->isAvailable(1, 'announcement', 'web', 'announcement.web.page'), '套餐启用覆盖了机构单独停用');
+$organizationModules = $assignments->updateOrganization(1, [[
+    'module_key' => 'announcement',
+    'mode' => TenantModuleAssignmentService::MODE_INHERIT,
+]], $actor);
+$assert(
+    $organizationModules['items'][0]['effective'] === true
+    && $organizationModules['items'][0]['assignment_source'] === TenantModuleAssignmentService::SOURCE_PACKAGE,
+    '恢复继承套餐后未重新启用套餐模块',
+);
+Db::table('sm_system_organization')->where('id', 1)->update(['group_id' => null]);
+$assignments->updateOrganization(1, [[
+    'module_key' => 'announcement',
+    'mode' => TenantModuleAssignmentService::MODE_ENABLED,
+]], $actor);
+$organizationModules = $assignments->updateOrganization(1, [[
+    'module_key' => 'announcement',
+    'mode' => TenantModuleAssignmentService::MODE_INHERIT,
+]], $actor);
+$assert(
+    $organizationModules['items'][0]['effective'] === false
+    && $organizationModules['items'][0]['assignment_source'] === TenantModuleAssignmentService::SOURCE_PACKAGE,
+    '未绑定套餐的机构无法从单独配置恢复继承状态',
+);
+Db::table('sm_system_organization')->where('id', 1)->update(['group_id' => 1]);
+$assignments->syncOrganizationFromGroup(1, $actor);
+$assert($access->isAvailable(1, 'announcement', 'web', 'announcement.web.page'), '重新绑定套餐后未恢复继承能力');
 
 $config = $manager->updateTenantConfig(1, 'announcement', [
     'display_mode' => 'popup',

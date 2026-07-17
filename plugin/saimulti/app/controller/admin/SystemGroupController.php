@@ -9,6 +9,7 @@ namespace plugin\saimulti\app\controller\admin;
 use plugin\saimulti\app\logic\tenant\GroupLogic;
 use plugin\saimulti\app\validate\admin\SystemGroupValidate;
 use plugin\saimulti\basic\AdminController;
+use plugin\saimulti\service\module\ModuleServiceFactory;
 use plugin\saimulti\service\Permission;
 use support\Request;
 use support\Response;
@@ -143,6 +144,33 @@ class SystemGroupController extends AdminController
         $menu_ids = $request->post('menu_ids');
         $this->logic->updateMenuGroup($id, $menu_ids);
         return $this->success('操作成功');
+    }
+
+    #[Permission('套餐模块能力读取', 'saimulti:admin:group:update')]
+    public function moduleCapabilities(Request $request): Response
+    {
+        return $this->success(
+            ModuleServiceFactory::tenantAssignments()->groupCatalog(
+                (int) $request->input('id', 0),
+            ),
+        );
+    }
+
+    #[Permission('套餐模块能力更新', 'saimulti:admin:group:update')]
+    public function updateModuleCapabilities(Request $request): Response
+    {
+        $moduleKeys = $request->post('module_keys', []);
+        if (!is_array($moduleKeys)) {
+            return $this->fail('module_keys 必须为数组。');
+        }
+
+        return $this->success(
+            ModuleServiceFactory::tenantAssignments()->updateGroup(
+                (int) $request->input('id', 0),
+                array_values($moduleKeys),
+                ['type' => 'admin', 'id' => $this->adminId, 'ip' => $request->getRealIp()],
+            ),
+        );
     }
 
 }

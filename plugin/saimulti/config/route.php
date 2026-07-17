@@ -363,6 +363,8 @@ Route::group("/saimulti", function () {
 	// 机构管理
 	saiMultiRoute('/admin/organization', \plugin\saimulti\app\controller\admin\SystemOrganizationController::class);
 	Route::post("/admin/organization/initTenant", [\plugin\saimulti\app\controller\admin\SystemOrganizationController::class, 'initTenant']);
+	Route::get('/admin/organization/moduleCapabilities', [\plugin\saimulti\app\controller\admin\SystemOrganizationController::class, 'moduleCapabilities']);
+	Route::post('/admin/organization/updateModuleCapabilities', [\plugin\saimulti\app\controller\admin\SystemOrganizationController::class, 'updateModuleCapabilities']);
 	Route::get('/admin/routing/read', [\plugin\saimulti\app\controller\admin\AdminRoutingController::class, 'read']);
 	Route::post('/admin/routing/publish', [\plugin\saimulti\app\controller\admin\AdminRoutingController::class, 'publish']);
 
@@ -370,6 +372,8 @@ Route::group("/saimulti", function () {
 	saiMultiRoute('/admin/group', \plugin\saimulti\app\controller\admin\SystemGroupController::class);
 	Route::get("/admin/group/getMenuByGroup", [\plugin\saimulti\app\controller\admin\SystemGroupController::class, 'getMenuByGroup']);
 	Route::post("/admin/group/updateMenuGroup", [\plugin\saimulti\app\controller\admin\SystemGroupController::class, 'updateMenuGroup']);
+	Route::get('/admin/group/moduleCapabilities', [\plugin\saimulti\app\controller\admin\SystemGroupController::class, 'moduleCapabilities']);
+	Route::post('/admin/group/updateModuleCapabilities', [\plugin\saimulti\app\controller\admin\SystemGroupController::class, 'updateModuleCapabilities']);
 
 	// 机构账号
 	saiMultiRoute('/admin/user', \plugin\saimulti\app\controller\admin\SystemUserController::class);

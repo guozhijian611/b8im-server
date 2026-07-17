@@ -9,6 +9,7 @@ use plugin\saimulti\basic\BaseLogic;
 use plugin\saimulti\exception\ApiException;
 use plugin\saimulti\service\OrganizationDiscovery;
 use plugin\saimulti\service\adminIm\OrganizationImAccessService;
+use plugin\saimulti\service\module\ModuleServiceFactory;
 use plugin\saimulti\service\tenantPolicy\TenantImPolicyService;
 use plugin\saimulti\service\tenantPolicy\ThinkOrmTenantImPolicyStore;
 use plugin\saimulti\service\web\TenantAccountPolicyService;
@@ -136,12 +137,12 @@ class SystemOrganizationLogic extends BaseLogic
         );
     }
 
-    public function add($data): bool
+    public function add($data, array $actor = []): bool
     {
         $data = $this->normalizeWriteData((array) $data);
         $data['config_version'] = 1;
 
-        return Db::transaction(function () use ($data): bool {
+        $saved = Db::transaction(function () use ($data): bool {
             $saved = $this->model->save($data);
             if (!$saved) {
                 return false;
@@ -168,12 +169,22 @@ class SystemOrganizationLogic extends BaseLogic
 
             return true;
         });
+
+        if ($saved && (int) ($data['group_id'] ?? 0) > 0 && (int) ($data['status'] ?? 1) === 1) {
+            ModuleServiceFactory::tenantAssignments()->syncOrganizationFromGroup(
+                (int) $this->model->id,
+                $actor,
+            );
+        }
+
+        return $saved;
     }
 
-    public function edit($id, $data): mixed
+    public function edit($id, $data, array $actor = []): mixed
     {
         $input = (array) $data;
         $statusWasRequested = array_key_exists('status', $input);
+        $groupWasRequested = array_key_exists('group_id', $input);
         $access = new OrganizationImAccessService();
         $now = date('Y-m-d H:i:s');
 
@@ -181,6 +192,7 @@ class SystemOrganizationLogic extends BaseLogic
             $id,
             $input,
             $statusWasRequested,
+            $groupWasRequested,
             $access,
             $now,
         ): array {
@@ -197,6 +209,7 @@ class SystemOrganizationLogic extends BaseLogic
             $previousStatus = (int) ($locked['status'] ?? 0);
             $nextStatus = (int) ($data['status'] ?? $previousStatus);
             $statusChanged = $previousStatus !== $nextStatus;
+            $groupChanged = (int) ($locked['group_id'] ?? 0) !== (int) ($data['group_id'] ?? $locked['group_id'] ?? 0);
             $data['update_time'] = $now;
 
             $updated = Db::table('sm_system_organization')
@@ -216,6 +229,7 @@ class SystemOrganizationLogic extends BaseLogic
             return compact(
                 'updated',
                 'statusChanged',
+                'groupChanged',
                 'nextStatus',
                 'credentialSessionIds',
             );
@@ -233,6 +247,10 @@ class SystemOrganizationLogic extends BaseLogic
                 $now,
                 $result['nextStatus'] === 1 ? 'organization_enabled' : 'organization_disabled',
             );
+        }
+
+        if (($result['groupChanged'] || $groupWasRequested) && $result['nextStatus'] === 1) {
+            ModuleServiceFactory::tenantAssignments()->syncOrganizationFromGroup((int) $id, $actor);
         }
 
         return $result['updated'];
