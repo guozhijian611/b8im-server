@@ -1205,10 +1205,13 @@ final class ModuleManager
     private function touchModuleProjectionVersions(string $moduleKey): void
     {
         $organizations = Db::table('sm_tenant_module_license')
-            ->where('module_key', $moduleKey)
-            ->whereNull('delete_time')
+            ->alias('license')
+            ->join('sm_system_organization organization', 'organization.id = license.organization')
+            ->where('license.module_key', $moduleKey)
+            ->whereNull('license.delete_time')
+            ->whereNull('organization.delete_time')
             ->distinct(true)
-            ->column('organization');
+            ->column('license.organization');
         foreach ($organizations as $organization) {
             $this->touchProjectionVersion((int) $organization);
         }
