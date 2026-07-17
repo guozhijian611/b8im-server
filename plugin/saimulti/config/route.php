@@ -2,6 +2,7 @@
 
 use plugin\saimulti\app\middleware\AdminLog;
 use plugin\saimulti\app\middleware\AppClientRequest;
+use plugin\saimulti\app\middleware\ClientConfigRequest;
 use plugin\saimulti\app\middleware\CheckAdminAuth;
 use plugin\saimulti\app\middleware\CheckAdminLogin;
 use plugin\saimulti\app\middleware\CheckTenantAuth;
@@ -151,6 +152,15 @@ Route::group('/saimulti', function () {
 	CheckWebLogin::class,
 ]);
 
+// Web/Desktop 与原生 App 共用配置投影端点，但按 client_family 使用各自请求边界。
+Route::group('/saimulti', function () {
+	Route::get('/client/config', [\plugin\saimulti\app\controller\web\ClientConfigController::class, 'index']);
+	Route::options('/client/config', static fn () => response('', 204));
+})->middleware([
+	ClientConfigRequest::class,
+	CheckWebLogin::class,
+]);
+
 // Web 普通用户认证接口。organization 只从 Web access token 取得。
 Route::group('/saimulti', function () {
 	Route::post('/web/im/imToken', [\plugin\saimulti\app\controller\web\ImController::class, 'imToken']);
@@ -183,7 +193,6 @@ Route::group('/saimulti', function () {
 	Route::post('/web/im/confirmUpload', [\plugin\saimulti\app\controller\web\ImController::class, 'confirmUpload']);
 	Route::post('/web/im/deriveForwardAsset', [\plugin\saimulti\app\controller\web\ImController::class, 'deriveForwardAsset']);
 	Route::post('/web/im/resolveAssetUrl', [\plugin\saimulti\app\controller\web\ImController::class, 'resolveAssetUrl']);
-	Route::get('/client/config', [\plugin\saimulti\app\controller\web\ClientConfigController::class, 'index']);
 	Route::get('/web/announcement/index', [\plugin\saimulti\app\controller\web\AnnouncementController::class, 'index']);
 	Route::get('/web/announcement/read', [\plugin\saimulti\app\controller\web\AnnouncementController::class, 'read']);
 	Route::post('/web/announcement/acknowledge', [\plugin\saimulti\app\controller\web\AnnouncementController::class, 'acknowledge']);
@@ -253,7 +262,6 @@ Route::group('/saimulti', function () {
 		'/web/im/confirmUpload',
 		'/web/im/deriveForwardAsset',
 		'/web/im/resolveAssetUrl',
-		'/client/config',
 		'/web/announcement/index',
 		'/web/announcement/read',
 		'/web/announcement/acknowledge',

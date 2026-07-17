@@ -10,6 +10,7 @@ require_once dirname(__DIR__) . '/plugin/saimulti/app/functions.php';
 
 use B8im\ModuleSdk\Manifest\ManifestLoader;
 use plugin\saimulti\app\middleware\AppClientRequest;
+use plugin\saimulti\app\middleware\ClientConfigRequest;
 use plugin\saimulti\app\middleware\CheckWebLogin;
 use plugin\saimulti\service\ModuleRequired;
 use Webman\Route;
@@ -77,5 +78,13 @@ foreach ($contracts as $moduleKey => [$relative, $pageCapability, $serverCapabil
         }
     }
 }
+
+$configRoutes = $registered['GET /saimulti/client/config'] ?? [];
+$assert(count($configRoutes) === 1, 'Shared client config route must be registered exactly once.');
+$configMiddleware = $configRoutes[0]->getMiddleware();
+sort($configMiddleware);
+$expectedConfigMiddleware = [ClientConfigRequest::class, CheckWebLogin::class];
+sort($expectedConfigMiddleware);
+$assert($configMiddleware === $expectedConfigMiddleware, 'Shared client config route middleware mismatch.');
 
 fwrite(STDOUT, sprintf("Module App contract: %d assertions passed.\n", $assertions));
