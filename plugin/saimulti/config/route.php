@@ -78,8 +78,36 @@ Route::group('/saimulti', function () {
 	Route::post('/app/im/prepareUpload', [\plugin\saimulti\app\controller\web\ImController::class, 'prepareUpload']);
 	Route::post('/app/im/upload', [\plugin\saimulti\app\controller\web\ImController::class, 'upload']);
 	Route::post('/app/im/resolveAssetUrl', [\plugin\saimulti\app\controller\web\ImController::class, 'resolveAssetUrl']);
-	Route::get('/app/file-media/usage', [\plugin\saimulti\app\controller\web\FileMediaController::class, 'appUsage']);
-	Route::post('/app/file-media/checkUpload', [\plugin\saimulti\app\controller\web\FileMediaController::class, 'appCheckUpload']);
+	Route::get('/app/announcement/index', [\plugin\saimulti\app\controller\app\AnnouncementController::class, 'index']);
+	Route::get('/app/announcement/read', [\plugin\saimulti\app\controller\app\AnnouncementController::class, 'read']);
+	Route::post('/app/announcement/acknowledge', [\plugin\saimulti\app\controller\app\AnnouncementController::class, 'acknowledge']);
+	Route::get('/app/customer-service/conversation/index', [\plugin\saimulti\app\controller\app\CustomerServiceController::class, 'conversationIndex']);
+	Route::get('/app/customer-service/conversation/read', [\plugin\saimulti\app\controller\app\CustomerServiceController::class, 'conversationRead']);
+	Route::post('/app/customer-service/conversation/save', [\plugin\saimulti\app\controller\app\CustomerServiceController::class, 'conversationSave']);
+	Route::get('/app/favorite/index', [\plugin\saimulti\app\controller\app\FavoriteController::class, 'index']);
+	Route::get('/app/favorite/read', [\plugin\saimulti\app\controller\app\FavoriteController::class, 'read']);
+	Route::post('/app/favorite/save', [\plugin\saimulti\app\controller\app\FavoriteController::class, 'save']);
+	Route::post('/app/favorite/destroy', [\plugin\saimulti\app\controller\app\FavoriteController::class, 'destroy']);
+	Route::get('/app/file-media/usage', [\plugin\saimulti\app\controller\app\FileMediaController::class, 'usage']);
+	Route::post('/app/file-media/checkUpload', [\plugin\saimulti\app\controller\app\FileMediaController::class, 'checkUpload']);
+	Route::get('/app/i18n/locales', [\plugin\saimulti\app\controller\app\I18nController::class, 'locales']);
+	Route::get('/app/i18n/messages', [\plugin\saimulti\app\controller\app\I18nController::class, 'messages']);
+	Route::get('/app/moments/feed', [\plugin\saimulti\app\controller\app\MomentsController::class, 'feed']);
+	Route::get('/app/moments/read', [\plugin\saimulti\app\controller\app\MomentsController::class, 'read']);
+	Route::post('/app/moments/save', [\plugin\saimulti\app\controller\app\MomentsController::class, 'save']);
+	Route::post('/app/moments/destroy', [\plugin\saimulti\app\controller\app\MomentsController::class, 'destroy']);
+	Route::get('/app/moments/commentIndex', [\plugin\saimulti\app\controller\app\MomentsController::class, 'commentIndex']);
+	Route::post('/app/moments/commentSave', [\plugin\saimulti\app\controller\app\MomentsController::class, 'commentSave']);
+	Route::post('/app/moments/likeToggle', [\plugin\saimulti\app\controller\app\MomentsController::class, 'likeToggle']);
+	Route::get('/app/moments/profileRead', [\plugin\saimulti\app\controller\app\MomentsController::class, 'profileRead']);
+	Route::post('/app/moments/profileUpdate', [\plugin\saimulti\app\controller\app\MomentsController::class, 'profileUpdate']);
+	Route::get('/app/robot-single/index', [\plugin\saimulti\app\controller\app\RobotSingleController::class, 'index']);
+	Route::get('/app/robot-single/read', [\plugin\saimulti\app\controller\app\RobotSingleController::class, 'read']);
+	Route::post('/app/robot-single/match', [\plugin\saimulti\app\controller\app\RobotSingleController::class, 'match']);
+	Route::get('/app/search/messages', [\plugin\saimulti\app\controller\app\SearchController::class, 'messages']);
+	Route::get('/app/search/indexStatus', [\plugin\saimulti\app\controller\app\SearchController::class, 'indexStatus']);
+	Route::get('/app/sticker/packs', [\plugin\saimulti\app\controller\app\StickerController::class, 'packs']);
+	Route::get('/app/sticker/items', [\plugin\saimulti\app\controller\app\StickerController::class, 'items']);
 	Route::options('/app/im/imToken', static fn () => response('', 204));
 	Route::options('/app/im/me', static fn () => response('', 204));
 	Route::options('/app/im/conversations', static fn () => response('', 204));
@@ -95,6 +123,18 @@ Route::group('/saimulti', function () {
 	Route::options('/app/im/resolveAssetUrl', static fn () => response('', 204));
 	Route::options('/app/file-media/usage', static fn () => response('', 204));
 	Route::options('/app/file-media/checkUpload', static fn () => response('', 204));
+	foreach ([
+		'/app/announcement/index', '/app/announcement/read', '/app/announcement/acknowledge',
+		'/app/customer-service/conversation/index', '/app/customer-service/conversation/read', '/app/customer-service/conversation/save',
+		'/app/favorite/index', '/app/favorite/read', '/app/favorite/save', '/app/favorite/destroy',
+		'/app/i18n/locales', '/app/i18n/messages',
+		'/app/moments/feed', '/app/moments/read', '/app/moments/save', '/app/moments/destroy',
+		'/app/moments/commentIndex', '/app/moments/commentSave', '/app/moments/likeToggle', '/app/moments/profileRead', '/app/moments/profileUpdate',
+		'/app/robot-single/index', '/app/robot-single/read', '/app/robot-single/match',
+		'/app/search/messages', '/app/search/indexStatus', '/app/sticker/packs', '/app/sticker/items',
+	] as $path) {
+		Route::options($path, static fn () => response('', 204));
+	}
 })->middleware([
 	AppClientRequest::class,
 	CheckWebLogin::class,

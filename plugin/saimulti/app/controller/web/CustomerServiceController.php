@@ -12,7 +12,7 @@ use support\Request;
 use support\Response;
 
 #[ModuleRequired('customer_service', 'server', 'customer_service.web.use')]
-final class CustomerServiceController extends WebController
+class CustomerServiceController extends WebController
 {
     public function conversationIndex(Request $request): Response
     {

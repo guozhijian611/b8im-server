@@ -12,7 +12,7 @@ use support\Request;
 use support\Response;
 
 #[ModuleRequired('i18n', 'server', 'i18n.web.read')]
-final class I18nController extends WebController
+class I18nController extends WebController
 {
     public function locales(): Response
     {

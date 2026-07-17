@@ -11,7 +11,7 @@ use support\Request;
 use support\Response;
 
 #[ModuleRequired('search', 'server', 'search.web.use')]
-final class SearchController extends WebController
+class SearchController extends WebController
 {
     public function messages(Request $request): Response
     {

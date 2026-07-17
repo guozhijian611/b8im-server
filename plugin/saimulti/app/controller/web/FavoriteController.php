@@ -12,7 +12,7 @@ use support\Request;
 use support\Response;
 
 #[ModuleRequired('favorite', 'server', 'favorite.web.manage')]
-final class FavoriteController extends WebController
+class FavoriteController extends WebController
 {
     public function index(Request $request): Response
     {

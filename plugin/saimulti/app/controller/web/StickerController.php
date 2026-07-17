@@ -12,7 +12,7 @@ use support\Request;
 use support\Response;
 
 #[ModuleRequired('sticker', 'server', 'sticker.web.read')]
-final class StickerController extends WebController
+class StickerController extends WebController
 {
     public function packs(): Response
     {

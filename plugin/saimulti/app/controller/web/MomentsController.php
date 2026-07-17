@@ -12,7 +12,7 @@ use support\Request;
 use support\Response;
 
 #[ModuleRequired('moments', 'server', 'moments.web.use')]
-final class MomentsController extends WebController
+class MomentsController extends WebController
 {
     public function feed(Request $request): Response
     {

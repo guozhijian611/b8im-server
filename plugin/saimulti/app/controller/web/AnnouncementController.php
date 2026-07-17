@@ -12,7 +12,7 @@ use support\Request;
 use support\Response;
 
 #[ModuleRequired('announcement', 'server', 'announcement.web.read')]
-final class AnnouncementController extends WebController
+class AnnouncementController extends WebController
 {
     public function index(Request $request): Response
     {

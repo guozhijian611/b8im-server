@@ -57,12 +57,14 @@ final class ModuleTestStore implements ModuleAccessStoreInterface
         $this->snapshot = [
             'module_key' => 'announcement',
             'module_status' => SystemModuleStatus::ENABLED->value,
-            'module_version' => '0.1.0',
+            'module_version' => '0.2.0',
             'module_lock_version' => 4,
-            'platforms' => ['server', 'admin', 'tenant', 'web'],
+            'platforms' => ['server', 'admin', 'tenant', 'web', 'android', 'ios'],
             'capabilities' => [
-                'server' => ['announcement.web.read'],
+                'server' => ['announcement.web.read', 'announcement.app.read'],
                 'web' => ['announcement.web.page', 'announcement.web.popup'],
+                'android' => ['announcement.app.page'],
+                'ios' => ['announcement.app.page'],
             ],
             'organization' => 1,
             'license_status' => TenantModuleStatus::ENABLED->value,
@@ -866,6 +868,11 @@ $assert(
     $projected['tabbar'] === [['module_key' => 'announcement', 'title' => '公告']],
     'tabbar 未按 Web parser 的 module_key/title 结构输出',
 );
+$appProjected = $projection->project(1, 'b8im-local', 'app');
+$assert(($appProjected['features']['announcement'] ?? false) === true, 'App 未按组织授权投影 announcement');
+$assert(in_array('announcement.app.page', $appProjected['modules'][0]['capabilities'], true), 'App capability 未投影');
+$assert(in_array('saimulti:app:announcement:index', $appProjected['modules'][0]['permissions'], true), 'App permission 未投影');
+$assert($appProjected['tabbar'] === [['module_key' => 'announcement', 'title' => '公告']], 'App menu 未投影为 tabbar');
 $assert($projected === $projection->project(1, 'b8im-local', 'web'), '同一有效投影的 version 不稳定');
 
 try {

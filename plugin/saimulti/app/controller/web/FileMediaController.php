@@ -12,7 +12,7 @@ use support\Request;
 use support\Response;
 
 #[ModuleRequired('file_media', 'server', 'file_media.web.use')]
-final class FileMediaController extends WebController
+class FileMediaController extends WebController
 {
     public function usage(Request $request): Response
     {
@@ -28,18 +28,6 @@ final class FileMediaController extends WebController
             $this->organization,
             $this->intVal($size, '文件大小'),
         ));
-    }
-
-    #[ModuleRequired('file_media', 'server', 'file_media.app.use')]
-    public function appUsage(Request $request): Response
-    {
-        return $this->usage($request);
-    }
-
-    #[ModuleRequired('file_media', 'server', 'file_media.app.use')]
-    public function appCheckUpload(Request $request): Response
-    {
-        return $this->checkUpload($request);
     }
 
     public function folderIndex(Request $request): Response

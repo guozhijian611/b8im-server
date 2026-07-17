@@ -105,15 +105,14 @@ final class ClientConfigProjectionService
             ];
 
             foreach ($manifest->menus() as $menu) {
-                if ($menu['platform'] !== 'web'
-                    || !in_array('web', $implemented, true)
+                if (!in_array($menu['platform'], $implemented, true)
                     || $menu['type'] !== 'menu') {
                     continue;
                 }
                 if (!empty($menu['permission']) && !in_array($menu['permission'], $permissions, true)) {
                     continue;
                 }
-                $tabbar[] = [
+                $tabbar[$manifest->moduleKey()] = [
                     'module_key' => $manifest->moduleKey(),
                     'title' => $menu['name'],
                     '_sort' => (int) $menu['sort'],
@@ -123,6 +122,7 @@ final class ClientConfigProjectionService
 
         ksort($features);
         usort($modules, static fn (array $left, array $right): int => $left['module_key'] <=> $right['module_key']);
+        $tabbar = array_values($tabbar);
         usort($tabbar, static fn (array $left, array $right): int => $left['_sort'] <=> $right['_sort']);
         $tabbar = array_map(static function (array $item): array {
             unset($item['_sort']);

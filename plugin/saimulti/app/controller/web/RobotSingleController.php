@@ -12,7 +12,7 @@ use support\Request;
 use support\Response;
 
 #[ModuleRequired('robot_single', 'server', 'robot_single.web.use')]
-final class RobotSingleController extends WebController
+class RobotSingleController extends WebController
 {
     public function index(Request $request): Response
     {
