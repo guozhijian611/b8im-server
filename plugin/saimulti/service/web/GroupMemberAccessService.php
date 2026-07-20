@@ -72,12 +72,19 @@ final class GroupMemberAccessService
                     'update_time' => $now,
                 ]);
             }
-            $this->lockMembers($organization, $conversationId, $memberIds);
+            $lockedMembers = $this->lockMembers($organization, $conversationId, $memberIds);
             foreach ($memberIds as $memberId) {
                 $this->insertPeriod($organization, $conversationId, $memberId, 1, 1, $now);
             }
-            $this->lockPeriods($organization, $conversationId, $memberIds);
-            $this->lockAccessStates($organization, $memberIds, $now, true);
+            $lockedPeriods = $this->lockPeriods($organization, $conversationId, $memberIds);
+            foreach ($memberIds as $memberId) {
+                $this->validateLockedMemberFacts(
+                    $lockedMembers[$memberId] ?? null,
+                    $lockedPeriods[$memberId] ?? [],
+                    (string) $conversation['last_message_seq'],
+                );
+            }
+            $this->lockOrCreateAccessStates($organization, $memberIds, $now);
             foreach ($memberIds as $memberId) {
                 $snapshot = $this->incrementSnapshot($organization, $memberId, $now);
                 $this->recordTransition(
@@ -91,7 +98,7 @@ final class GroupMemberAccessService
 
     /**
      * @param list<string> $memberIds
-     * @param array<string,string> $expectedVersions Existing members require an expected version.
+     * @param array<string,string> $expectedVersions Every target requires its current version; "0" means absent.
      */
     public function join(
         int $organization,
@@ -104,34 +111,43 @@ final class GroupMemberAccessService
         $memberIds = $this->canonicalUserIds($memberIds);
         Db::transaction(function () use ($organization, $operatorUserId, $conversationId, $memberIds, $expectedVersions, $now): void {
             $conversation = $this->lockConversation($organization, $conversationId);
+            $lockedUserIds = $this->canonicalUserIds(array_merge([$operatorUserId], $memberIds));
             $members = $this->lockMembers(
                 $organization,
                 $conversationId,
-                $this->canonicalUserIds(array_merge([$operatorUserId], $memberIds)),
+                $lockedUserIds,
             );
             $this->assertRole($members[$operatorUserId] ?? null, ['owner', 'admin']);
-            $this->lockActiveUsers($organization, $memberIds);
-            foreach ($memberIds as $memberId) {
-                $this->assertFriends($organization, $operatorUserId, $memberId);
+            $periods = $this->lockPeriods($organization, $conversationId, $lockedUserIds);
+            foreach ($lockedUserIds as $lockedUserId) {
+                $this->validateLockedMemberFacts(
+                    $members[$lockedUserId] ?? null,
+                    $periods[$lockedUserId] ?? [],
+                    (string) $conversation['last_message_seq'],
+                );
             }
-            $periods = $this->lockPeriods($organization, $conversationId, $memberIds);
-            $transitions = [];
+
+            $plans = [];
+            $committedRetries = [];
             foreach ($memberIds as $memberId) {
                 $current = $members[$memberId] ?? null;
                 $expected = $expectedVersions[$memberId] ?? null;
-                if ($current !== null && $this->isActive($current)) {
-                    $this->assertExpected(
-                        $current,
-                        $expected,
-                        'join',
-                        $organization,
-                        $operatorUserId,
-                    );
-                    continue;
+                if ($expected === null) {
+                    throw new ApiException('expected_access_versions 缺少目标成员。', 422);
                 }
-                if ($current === null) {
-                    $nextVersion = '1';
-                } else {
+                if ($current !== null && $this->isActive($current)) {
+                    if ($expected === '0' && (string) $current['access_version'] === '1') {
+                        $latest = $this->latestAudit($current);
+                        if (($latest['reason'] ?? null) === 'join'
+                            && (int) ($latest['actor_organization'] ?? 0) === $organization
+                            && (string) ($latest['actor_user_id'] ?? '') === $operatorUserId) {
+                            $committedRetries[] = $memberId;
+                            continue;
+                        }
+                    }
+                    if ($expected === '0') {
+                        $this->conflict();
+                    }
                     if ($this->assertExpected(
                         $current,
                         $expected,
@@ -139,20 +155,74 @@ final class GroupMemberAccessService
                         $organization,
                         $operatorUserId,
                     )) {
-                        continue;
+                        $committedRetries[] = $memberId;
+                    }
+                    continue;
+                }
+                if ($current === null) {
+                    if ($expected !== '0') {
+                        $this->conflict();
+                    }
+                    $nextVersion = '1';
+                } else {
+                    if ($expected === '0') {
+                        $this->conflict();
+                    }
+                    if ($this->assertExpected(
+                        $current,
+                        $expected,
+                        'join',
+                        $organization,
+                        $operatorUserId,
+                    )) {
+                        throw new \RuntimeException(
+                            'A committed join audit cannot describe a non-active member.',
+                        );
+                    }
+                    $latest = $this->latestAudit($current);
+                    if ($latest === null) {
+                        throw new \RuntimeException(
+                            'Existing group member access audit is missing.',
+                        );
+                    }
+                    if ((string) $current['access_state'] === 'revoked'
+                        && ($latest['reason'] ?? null) === 'suspend') {
+                        throw new ApiException('已封禁成员只能通过恢复操作重新加入。', 409);
                     }
                     $nextVersion = $this->nextVersion((string) $current['access_version']);
                 }
+                $plans['user:' . $memberId] = [
+                    'user_id' => $memberId,
+                    'current' => $current,
+                    'access_version' => $nextVersion,
+                ];
+            }
+
+            if ($committedRetries !== [] && $plans !== []) {
+                $this->conflict();
+            }
+
+            $transitionUserIds = $this->canonicalUserIds(array_column($plans, 'user_id'));
+            if ($transitionUserIds !== []) {
+                $this->lockActiveUsers($organization, $transitionUserIds);
+                foreach ($transitionUserIds as $memberId) {
+                    $this->assertFriends($organization, $operatorUserId, $memberId);
+                }
+            }
+
+            $newMemberIds = [];
+            foreach ($transitionUserIds as $memberId) {
+                $plan = $plans['user:' . $memberId];
+                $current = $plan['current'];
+                $nextVersion = (string) $plan['access_version'];
                 $memberPeriods = $periods[$memberId] ?? [];
                 $visibleFrom = $this->visibleFrom(
                     (string) $conversation['history_visibility'],
-                    (int) $conversation['last_message_seq'],
+                    (string) $conversation['last_message_seq'],
                     $memberPeriods,
                 );
                 if ($current === null) {
-                    if ($expected !== null) {
-                        $this->conflict();
-                    }
+                    $newMemberIds[] = $memberId;
                     Db::table('im_conversation_member')->insert([
                         'organization' => $organization,
                         'conversation_id' => $conversationId,
@@ -188,27 +258,38 @@ final class GroupMemberAccessService
                     $organization, $conversationId, $memberId,
                     $this->nextPeriodNo($memberPeriods), $visibleFrom, $now,
                 );
-                $transitions[$memberId] = $nextVersion;
             }
-            if ($transitions === []) {
+
+            $this->lockJoinAccessStates(
+                $organization,
+                $memberIds,
+                $newMemberIds,
+                $now,
+            );
+            if ($transitionUserIds === []) {
                 return;
             }
-            $transitionUserIds = $this->canonicalUserIds(array_keys($transitions));
-            $this->lockAccessStates($organization, $transitionUserIds, $now, true);
+            $this->validateCurrentMemberFacts(
+                $organization,
+                $conversationId,
+                $transitionUserIds,
+                (string) $conversation['last_message_seq'],
+            );
             foreach ($transitionUserIds as $memberId) {
                 $snapshot = $this->incrementSnapshot($organization, $memberId, $now);
                 $this->recordTransition(
                     $conversation, $organization, $conversationId, $memberId,
-                    $snapshot, $transitions[$memberId], 'active', 'join',
+                    $snapshot, (string) $plans['user:' . $memberId]['access_version'], 'active', 'join',
                     $organization, $operatorUserId, $now,
                 );
             }
         });
     }
 
-    public function leave(int $organization, string $userId, string $conversationId, string $expectedVersion, string $now): void
+    /** @return array{access_version:string,access_snapshot_id:string,access_state:string} */
+    public function leave(int $organization, string $userId, string $conversationId, string $expectedVersion, string $now): array
     {
-        $this->close($organization, $userId, $conversationId, $userId, $expectedVersion, 'leave', $now);
+        return $this->close($organization, $userId, $conversationId, $userId, $expectedVersion, 'leave', $now);
     }
 
     public function remove(int $organization, string $operatorUserId, string $conversationId, string $userId, string $expectedVersion, string $now): void
@@ -220,13 +301,23 @@ final class GroupMemberAccessService
     {
         Db::transaction(function () use ($organization, $operatorUserId, $conversationId, $userId, $expectedVersion, $now): void {
             $conversation = $this->lockConversation($organization, $conversationId);
+            $lockedUserIds = $this->canonicalUserIds([$operatorUserId, $userId]);
             $members = $this->lockMembers(
                 $organization,
                 $conversationId,
-                $this->canonicalUserIds([$operatorUserId, $userId]),
+                $lockedUserIds,
             );
             $this->assertCanManage($members[$operatorUserId] ?? null, $members[$userId] ?? null, false);
             $target = $members[$userId];
+            $periods = $this->lockPeriods($organization, $conversationId, $lockedUserIds);
+            foreach ($lockedUserIds as $lockedUserId) {
+                $this->validateLockedMemberFacts(
+                    $members[$lockedUserId] ?? null,
+                    $periods[$lockedUserId] ?? [],
+                    (string) $conversation['last_message_seq'],
+                );
+            }
+            $this->lockAccessStates($organization, [$userId]);
             if ($this->assertExpected(
                 $target,
                 $expectedVersion,
@@ -239,8 +330,6 @@ final class GroupMemberAccessService
             if (!$this->isActive($target)) {
                 throw new ApiException('群成员访问状态已变化，请刷新后重试。', 409);
             }
-            $this->lockPeriods($organization, $conversationId, [$userId]);
-            $this->lockAccessStates($organization, [$userId], $now, false);
             Db::execute(
                 'UPDATE im_conversation_membership_period
                     SET visible_until_message_seq = CASE
@@ -263,6 +352,12 @@ final class GroupMemberAccessService
                   WHERE id = ?',
                 [$nextVersion, $now, $target['id']],
             );
+            $this->validateCurrentMemberFacts(
+                $organization,
+                $conversationId,
+                [$userId],
+                (string) $conversation['last_message_seq'],
+            );
             $snapshot = $this->incrementSnapshot($organization, $userId, $now);
             $this->recordTransition(
                 $conversation, $organization, $conversationId, $userId,
@@ -276,16 +371,26 @@ final class GroupMemberAccessService
     {
         Db::transaction(function () use ($organization, $operatorUserId, $conversationId, $userId, $expectedVersion, $now): void {
             $conversation = $this->lockConversation($organization, $conversationId);
+            $lockedUserIds = $this->canonicalUserIds([$operatorUserId, $userId]);
             $members = $this->lockMembers(
                 $organization,
                 $conversationId,
-                $this->canonicalUserIds([$operatorUserId, $userId]),
+                $lockedUserIds,
             );
             $this->assertRole($members[$operatorUserId] ?? null, ['owner', 'admin']);
             $target = $members[$userId] ?? null;
             if ($target === null || (string) $target['member_role'] === 'owner') {
                 throw new ApiException('群成员不存在。', 404);
             }
+            $periods = $this->lockPeriods($organization, $conversationId, $lockedUserIds);
+            foreach ($lockedUserIds as $lockedUserId) {
+                $this->validateLockedMemberFacts(
+                    $members[$lockedUserId] ?? null,
+                    $periods[$lockedUserId] ?? [],
+                    (string) $conversation['last_message_seq'],
+                );
+            }
+            $this->lockAccessStates($organization, [$userId]);
             if ($this->assertExpected(
                 $target,
                 $expectedVersion,
@@ -300,8 +405,6 @@ final class GroupMemberAccessService
                 throw new ApiException('只有已封禁成员可以恢复。', 409);
             }
             $this->lockActiveUsers($organization, [$userId]);
-            $periods = $this->lockPeriods($organization, $conversationId, [$userId]);
-            $this->lockAccessStates($organization, [$userId], $now, false);
             $nextVersion = $this->nextVersion((string) $target['access_version']);
             Db::execute(
                 'UPDATE im_conversation_member
@@ -316,10 +419,16 @@ final class GroupMemberAccessService
                 $organization, $conversationId, $userId, $this->nextPeriodNo($memberPeriods),
                 $this->visibleFrom(
                     (string) $conversation['history_visibility'],
-                    (int) $conversation['last_message_seq'],
+                    (string) $conversation['last_message_seq'],
                     $memberPeriods,
                 ),
                 $now,
+            );
+            $this->validateCurrentMemberFacts(
+                $organization,
+                $conversationId,
+                [$userId],
+                (string) $conversation['last_message_seq'],
             );
             $snapshot = $this->incrementSnapshot($organization, $userId, $now);
             $this->recordTransition(
@@ -342,13 +451,23 @@ final class GroupMemberAccessService
     ): void {
         Db::transaction(function () use ($organization, $operatorUserId, $conversationId, $userId, $expectedVersion, $periodNumbers, $now): void {
             $conversation = $this->lockConversation($organization, $conversationId);
+            $lockedUserIds = $this->canonicalUserIds([$operatorUserId, $userId]);
             $members = $this->lockMembers(
                 $organization,
                 $conversationId,
-                $this->canonicalUserIds([$operatorUserId, $userId]),
+                $lockedUserIds,
             );
             $this->assertCanManage($members[$operatorUserId] ?? null, $members[$userId] ?? null, false);
             $target = $members[$userId];
+            $periods = $this->lockPeriods($organization, $conversationId, $lockedUserIds);
+            foreach ($lockedUserIds as $lockedUserId) {
+                $this->validateLockedMemberFacts(
+                    $members[$lockedUserId] ?? null,
+                    $periods[$lockedUserId] ?? [],
+                    (string) $conversation['last_message_seq'],
+                );
+            }
+            $this->lockAccessStates($organization, [$userId]);
             $retry = $this->assertExpected(
                 $target,
                 $expectedVersion,
@@ -365,8 +484,6 @@ final class GroupMemberAccessService
             if ((string) $target['access_state'] !== 'history_only') {
                 throw new ApiException('只有历史只读成员可以撤销历史。', 409);
             }
-            $periods = $this->lockPeriods($organization, $conversationId, [$userId]);
-            $this->lockAccessStates($organization, [$userId], $now, false);
             $selected = array_fill_keys($periodNumbers, true);
             if ($selected !== []) {
                 $effective = [];
@@ -407,6 +524,12 @@ final class GroupMemberAccessService
                 'UPDATE im_conversation_member SET access_version = ?, access_state = ?, update_time = ? WHERE id = ?',
                 [$nextVersion, $state, $now, $target['id']],
             );
+            $this->validateCurrentMemberFacts(
+                $organization,
+                $conversationId,
+                [$userId],
+                (string) $conversation['last_message_seq'],
+            );
             $snapshot = $this->incrementSnapshot($organization, $userId, $now);
             $this->recordTransition(
                 $conversation, $organization, $conversationId, $userId,
@@ -416,6 +539,7 @@ final class GroupMemberAccessService
         });
     }
 
+    /** @return array{access_version:string,access_snapshot_id:string,access_state:string} */
     private function close(
         int $organization,
         string $actorUserId,
@@ -424,13 +548,14 @@ final class GroupMemberAccessService
         string $expectedVersion,
         string $reason,
         string $now,
-    ): void {
-        Db::transaction(function () use ($organization, $actorUserId, $conversationId, $userId, $expectedVersion, $reason, $now): void {
+    ): array {
+        return Db::transaction(function () use ($organization, $actorUserId, $conversationId, $userId, $expectedVersion, $reason, $now): array {
             $conversation = $this->lockConversation($organization, $conversationId);
+            $lockedUserIds = $this->canonicalUserIds([$actorUserId, $userId]);
             $members = $this->lockMembers(
                 $organization,
                 $conversationId,
-                $this->canonicalUserIds([$actorUserId, $userId]),
+                $lockedUserIds,
             );
             $target = $members[$userId] ?? null;
             if ($reason === 'remove') {
@@ -443,6 +568,15 @@ final class GroupMemberAccessService
             if ($target === null) {
                 throw new ApiException('群成员不存在。', 404);
             }
+            $periods = $this->lockPeriods($organization, $conversationId, $lockedUserIds);
+            foreach ($lockedUserIds as $lockedUserId) {
+                $this->validateLockedMemberFacts(
+                    $members[$lockedUserId] ?? null,
+                    $periods[$lockedUserId] ?? [],
+                    (string) $conversation['last_message_seq'],
+                );
+            }
+            $this->lockAccessStates($organization, [$userId]);
             if ($this->assertExpected(
                 $target,
                 $expectedVersion,
@@ -450,19 +584,24 @@ final class GroupMemberAccessService
                 $organization,
                 $actorUserId,
             )) {
-                return;
+                return [
+                    'access_version' => (string) $target['access_version'],
+                    'access_snapshot_id' => $this->currentSnapshot($organization, $userId),
+                    'access_state' => (string) $target['access_state'],
+                ];
             }
             if (!$this->isActive($target)) {
                 throw new ApiException('群成员访问状态已变化，请刷新后重试。', 409);
             }
-            $periods = $this->lockPeriods($organization, $conversationId, [$userId]);
-            $this->lockAccessStates($organization, [$userId], $now, false);
-            $lastMessageSeq = (int) $conversation['last_message_seq'];
+            $lastMessageSeq = (string) $conversation['last_message_seq'];
             foreach ($periods[$userId] ?? [] as $period) {
                 if ((int) $period['status'] !== 1 || $period['visible_until_message_seq'] !== null) {
                     continue;
                 }
-                if ((int) $period['visible_from_message_seq'] <= $lastMessageSeq) {
+                if ($this->compareDecimals(
+                    (string) $period['visible_from_message_seq'],
+                    $lastMessageSeq,
+                ) <= 0) {
                     Db::execute(
                         'UPDATE im_conversation_membership_period
                             SET visible_until_message_seq = ?, leave_at = ?, update_time = ? WHERE id = ?',
@@ -493,12 +632,23 @@ final class GroupMemberAccessService
                   WHERE id = ?',
                 [$reason === 'leave' ? 2 : 3, $nextVersion, $state, $now, $target['id']],
             );
+            $this->validateCurrentMemberFacts(
+                $organization,
+                $conversationId,
+                [$userId],
+                (string) $conversation['last_message_seq'],
+            );
             $snapshot = $this->incrementSnapshot($organization, $userId, $now);
             $this->recordTransition(
                 $conversation, $organization, $conversationId, $userId,
                 $snapshot, $nextVersion, $state, $reason,
                 $organization, $actorUserId, $now,
             );
+            return [
+                'access_version' => $nextVersion,
+                'access_snapshot_id' => $snapshot,
+                'access_state' => $state,
+            ];
         });
     }
 
@@ -517,6 +667,7 @@ final class GroupMemberAccessService
             throw new \RuntimeException('Created group conversation could not be locked.');
         }
         $row['history_visibility'] = 'since_join';
+        $this->validateLockedConversationFacts($row);
         return $row;
     }
 
@@ -538,6 +689,7 @@ final class GroupMemberAccessService
         if ($row === null) {
             throw new ApiException('群聊不存在。', 404);
         }
+        $this->validateLockedConversationFacts($row);
         $foreign = Db::query(
             'SELECT 1 AS present FROM im_conversation_member
               WHERE organization = ? AND BINARY conversation_id = BINARY ?
@@ -548,6 +700,20 @@ final class GroupMemberAccessService
             throw new \RuntimeException('Group conversation contains a foreign member.');
         }
         return $row;
+    }
+
+    /** @param array<string,mixed> $conversation */
+    private function validateLockedConversationFacts(array $conversation): void
+    {
+        if (!$this->isNonNegativeDecimal((string) ($conversation['last_message_seq'] ?? ''))
+            || !$this->isNonNegativeDecimal((string) ($conversation['last_change_seq'] ?? ''))
+            || !in_array(
+                (string) ($conversation['history_visibility'] ?? ''),
+                ['since_join', 'all'],
+                true,
+            )) {
+            throw new \RuntimeException('Group conversation access facts are invalid.');
+        }
     }
 
     /** @param list<string> $userIds @return array<string,array<string,mixed>> */
@@ -607,32 +773,173 @@ final class GroupMemberAccessService
         return $result;
     }
 
+    /** @param array<string,mixed>|null $member @param list<array<string,mixed>> $periods */
+    private function validateLockedMemberFacts(
+        ?array $member,
+        array $periods,
+        string $lastMessageSeq,
+    ): void
+    {
+        if (!$this->isNonNegativeDecimal($lastMessageSeq)) {
+            throw new \RuntimeException('Group conversation message watermark is invalid.');
+        }
+        if ($member === null) {
+            if ($periods !== []) {
+                throw new \RuntimeException('Orphan group membership periods are invalid.');
+            }
+            return;
+        }
+        if ($member['delete_time'] !== null
+            || !in_array((int) $member['status'], [1, 2, 3], true)
+            || !in_array((string) $member['member_role'], ['owner', 'admin', 'member'], true)
+            || !in_array((string) $member['access_state'], ['active', 'history_only', 'revoked'], true)
+            || !$this->isPositiveDecimal((string) $member['access_version'])) {
+            throw new \RuntimeException('Group member access facts are invalid.');
+        }
+
+        $effective = [];
+        $periodNumbers = [];
+        $openCount = 0;
+        $closedCount = 0;
+        foreach ($periods as $period) {
+            $periodNo = (string) ($period['period_no'] ?? '');
+            $from = (string) ($period['visible_from_message_seq'] ?? '');
+            $untilValue = $period['visible_until_message_seq'] ?? null;
+            $until = $untilValue === null ? null : (string) $untilValue;
+            $status = (int) ($period['status'] ?? 0);
+            if (!$this->isPositiveDecimal($periodNo)
+                || !$this->isPositiveDecimal($from)
+                || !in_array($status, [1, 2], true)
+                || ($until !== null && (!$this->isPositiveDecimal($until)
+                    || $this->compareDecimals($until, $from) < 0))
+                || isset($periodNumbers[$periodNo])) {
+                throw new \RuntimeException('Group membership period facts are invalid.');
+            }
+            $periodNumbers[$periodNo] = true;
+            if ($status !== 1) {
+                continue;
+            }
+            if ($until === null) {
+                ++$openCount;
+            } else {
+                ++$closedCount;
+            }
+            if (($until !== null && $this->compareDecimals($until, $lastMessageSeq) > 0)
+                || ($until === null
+                    && $this->compareDecimals(
+                        $from,
+                        $this->maximumOpenPeriodStart($lastMessageSeq),
+                    ) > 0)) {
+                throw new \RuntimeException('Group membership period exceeds the conversation watermark.');
+            }
+            $effective[] = ['period_no' => $periodNo, 'from' => $from, 'to' => $until];
+        }
+        $previous = null;
+        foreach ($effective as $period) {
+            if ($previous !== null
+                && ($previous['to'] === null
+                    || $this->compareDecimals($period['from'], $previous['to']) <= 0)) {
+                throw new \RuntimeException(
+                    'Group membership periods overlap or are reverse ordered.',
+                );
+            }
+            $previous = $period;
+        }
+
+        $state = (string) $member['access_state'];
+        $status = (int) $member['status'];
+        if (($state === 'active' && ($status !== 1 || $openCount !== 1))
+            || ($state === 'history_only'
+                && (!in_array($status, [2, 3], true) || $openCount !== 0 || $closedCount < 1))
+            || ($state === 'revoked'
+                && (!in_array($status, [2, 3], true) || $openCount !== 0 || $closedCount !== 0))) {
+            throw new \RuntimeException('Group member state and periods are inconsistent.');
+        }
+    }
+
     /** @param list<string> $userIds */
-    private function lockAccessStates(
+    private function validateCurrentMemberFacts(
+        int $organization,
+        string $conversationId,
+        array $userIds,
+        string $lastMessageSeq,
+    ): void {
+        $userIds = $this->canonicalUserIds($userIds);
+        $members = $this->lockMembers($organization, $conversationId, $userIds);
+        $periods = $this->lockPeriods($organization, $conversationId, $userIds);
+        foreach ($userIds as $userId) {
+            $this->validateLockedMemberFacts(
+                $members[$userId] ?? null,
+                $periods[$userId] ?? [],
+                $lastMessageSeq,
+            );
+        }
+    }
+
+    /** @param list<string> $userIds */
+    private function lockOrCreateAccessStates(
         int $organization,
         array $userIds,
         string $now,
-        bool $allowCreate,
-    ): void
-    {
+    ): void {
         foreach ($this->canonicalUserIds($userIds) as $userId) {
-            if ($allowCreate) {
+            Db::execute(
+                'INSERT INTO im_user_group_access_state
+                    (organization, user_id, access_snapshot_id, create_time, update_time)
+                 VALUES (?, ?, 1, ?, ?)
+                 ON DUPLICATE KEY UPDATE
+                    access_snapshot_id = im_user_group_access_state.access_snapshot_id',
+                [$organization, $userId, $now, $now],
+            );
+            $this->lockAccessState($organization, $userId);
+        }
+    }
+
+    /** @param list<string> $userIds @param list<string> $newMemberIds */
+    private function lockJoinAccessStates(
+        int $organization,
+        array $userIds,
+        array $newMemberIds,
+        string $now,
+    ): void {
+        $newMemberIds = $this->canonicalUserIds($newMemberIds);
+        foreach ($this->canonicalUserIds($userIds) as $userId) {
+            if (in_array($userId, $newMemberIds, true)) {
                 Db::execute(
                     'INSERT INTO im_user_group_access_state
                         (organization, user_id, access_snapshot_id, create_time, update_time)
                      VALUES (?, ?, 1, ?, ?)
-                     ON DUPLICATE KEY UPDATE user_id = user_id',
+                     ON DUPLICATE KEY UPDATE
+                        access_snapshot_id = im_user_group_access_state.access_snapshot_id',
                     [$organization, $userId, $now, $now],
                 );
             }
-            $row = Db::query(
-                'SELECT access_snapshot_id FROM im_user_group_access_state
-                  WHERE organization = ? AND BINARY user_id = BINARY ? LIMIT 1 FOR UPDATE',
-                [$organization, $userId],
-            )[0] ?? null;
-            if ($row === null || !$this->isPositiveDecimal((string) $row['access_snapshot_id'])) {
-                throw new \RuntimeException('Group access snapshot state is invalid.');
-            }
+            $this->lockAccessState($organization, $userId);
+        }
+    }
+
+    /** @param list<string> $userIds */
+    private function lockAccessStates(
+        int $organization,
+        array $userIds,
+    ): void
+    {
+        foreach ($this->canonicalUserIds($userIds) as $userId) {
+            $this->lockAccessState($organization, $userId);
+        }
+    }
+
+    private function lockAccessState(int $organization, string $userId): void
+    {
+        $row = Db::query(
+            'SELECT user_id, access_snapshot_id FROM im_user_group_access_state
+              WHERE organization = ? AND BINARY user_id = BINARY ? LIMIT 1 FOR UPDATE',
+            [$organization, $userId],
+        )[0] ?? null;
+        if ($row === null
+            || !hash_equals($userId, (string) ($row['user_id'] ?? ''))
+            || !$this->isPositiveDecimal((string) $row['access_snapshot_id'])) {
+            throw new \RuntimeException('Group access snapshot state is invalid.');
         }
     }
 
@@ -645,7 +952,8 @@ final class GroupMemberAccessService
             'SELECT user_id FROM im_user
               WHERE organization = ? AND BINARY user_id IN (' . $placeholders . ')
                 AND status = 1 AND delete_time IS NULL
-           ORDER BY user_id COLLATE utf8mb4_bin ASC',
+           ORDER BY user_id COLLATE utf8mb4_bin ASC
+              FOR UPDATE',
             array_merge([$organization], $userIds),
         );
         $activeUserIds = array_map(
@@ -662,19 +970,30 @@ final class GroupMemberAccessService
         if ($operatorUserId === $userId) {
             return;
         }
-        $count = Db::query(
-            'SELECT COUNT(*) AS aggregate FROM im_friend_relation
+        $rows = Db::query(
+            'SELECT user_id, friend_user_id FROM im_friend_relation
               WHERE organization = ? AND friend_organization = ?
                 AND ((BINARY user_id = BINARY ? AND BINARY friend_user_id = BINARY ?)
                   OR (BINARY user_id = BINARY ? AND BINARY friend_user_id = BINARY ?))
-                AND status = 1 AND delete_time IS NULL',
+                AND status = 1 AND delete_time IS NULL
+           ORDER BY user_id COLLATE utf8mb4_bin ASC,
+                    friend_user_id COLLATE utf8mb4_bin ASC
+              FOR UPDATE',
             [
                 $organization, $organization,
                 $operatorUserId, $userId,
                 $userId, $operatorUserId,
             ],
-        )[0]['aggregate'] ?? 0;
-        if ((int) $count !== 2) {
+        );
+        $directions = [];
+        foreach ($rows as $row) {
+            $sourceUserId = (string) ($row['user_id'] ?? '');
+            $friendUserId = (string) ($row['friend_user_id'] ?? '');
+            $directions[$sourceUserId . "\0" . $friendUserId] = true;
+        }
+        if (count($directions) !== 2
+            || !isset($directions[$operatorUserId . "\0" . $userId])
+            || !isset($directions[$userId . "\0" . $operatorUserId])) {
             throw new ApiException('只能邀请自己的好友加入群聊。', 403);
         }
     }
@@ -745,8 +1064,8 @@ final class GroupMemberAccessService
     /** @param array<string,mixed> $member */
     private function latestAudit(array $member): ?array
     {
-        return Db::query(
-            'SELECT reason, actor_organization, actor_user_id, periods_json
+        $audit = Db::query(
+            'SELECT access_state, reason, actor_organization, actor_user_id, periods_json
                FROM im_group_member_access_audit
               WHERE organization = ? AND BINARY conversation_id = BINARY ? AND member_organization = ?
                 AND BINARY user_id = BINARY ? AND access_version = ? LIMIT 1',
@@ -755,6 +1074,29 @@ final class GroupMemberAccessService
                 $member['user_id'], $member['access_version'],
             ],
         )[0] ?? null;
+        if ($audit === null) {
+            return null;
+        }
+        $auditPeriods = json_decode(
+            (string) ($audit['periods_json'] ?? ''),
+            true,
+            512,
+            JSON_THROW_ON_ERROR,
+        );
+        $currentPeriods = $this->effectivePeriods(
+            (int) $member['organization'],
+            (string) $member['conversation_id'],
+            (string) $member['user_id'],
+        );
+        if (!is_array($auditPeriods)
+            || !array_is_list($auditPeriods)
+            || (string) ($audit['access_state'] ?? '') !== (string) $member['access_state']
+            || $auditPeriods !== $currentPeriods) {
+            throw new \RuntimeException(
+                'Group member audit does not match the locked access facts.',
+            );
+        }
+        return $audit;
     }
 
     /**
@@ -824,8 +1166,8 @@ final class GroupMemberAccessService
         int $organization,
         string $conversationId,
         string $userId,
-        int $periodNo,
-        int $visibleFrom,
+        int|string $periodNo,
+        int|string $visibleFrom,
         string $now,
     ): void {
         Db::table('im_conversation_membership_period')->insert([
@@ -845,35 +1187,44 @@ final class GroupMemberAccessService
     }
 
     /** @param list<array<string,mixed>> $periods */
-    private function visibleFrom(string $historyVisibility, int $lastMessageSeq, array $periods): int
+    private function visibleFrom(string $historyVisibility, string $lastMessageSeq, array $periods): string
     {
         // "all" applies to a first membership only. Re-entry starts after the
         // locked watermark so it cannot overlap an earlier valid period.
         return $historyVisibility === 'all' && $periods === []
-            ? 1
-            : max($lastMessageSeq + 1, 1);
+            ? '1'
+            : $this->incrementNonNegativeDecimal($lastMessageSeq, '群聊消息序号已达到上限。');
+    }
+
+    private function maximumOpenPeriodStart(string $lastMessageSeq): string
+    {
+        return $lastMessageSeq === self::UNSIGNED_BIGINT_MAX
+            ? self::UNSIGNED_BIGINT_MAX
+            : $this->incrementNonNegativeDecimal(
+                $lastMessageSeq,
+                '群聊消息序号已达到上限。',
+            );
     }
 
     /** @param list<array<string,mixed>> $periods */
-    private function nextPeriodNo(array $periods): int
+    private function nextPeriodNo(array $periods): string
     {
-        $maximum = 0;
+        $maximum = '0';
         foreach ($periods as $period) {
-            $maximum = max($maximum, (int) $period['period_no']);
+            $periodNo = (string) ($period['period_no'] ?? '');
+            if (!$this->isPositiveDecimal($periodNo)) {
+                throw new \RuntimeException('Group membership period number is invalid.');
+            }
+            if ($this->compareDecimals($periodNo, $maximum) > 0) {
+                $maximum = $periodNo;
+            }
         }
-        return $maximum + 1;
+        return $this->incrementNonNegativeDecimal($maximum, '群成员周期编号已达到上限。');
     }
 
     private function incrementSnapshot(int $organization, string $userId, string $now): string
     {
-        $current = (string) (Db::query(
-            'SELECT access_snapshot_id FROM im_user_group_access_state
-              WHERE organization = ? AND BINARY user_id = BINARY ? LIMIT 1 FOR UPDATE',
-            [$organization, $userId],
-        )[0]['access_snapshot_id'] ?? '0');
-        if (!$this->isPositiveDecimal($current)) {
-            throw new \RuntimeException('Group access snapshot state is invalid.');
-        }
+        $current = $this->currentSnapshot($organization, $userId);
         if ($current === self::UNSIGNED_BIGINT_MAX) {
             throw new ApiException('群成员访问快照已达到上限。', 409);
         }
@@ -886,15 +1237,21 @@ final class GroupMemberAccessService
         if ($affected !== 1) {
             throw new \RuntimeException('Group access snapshot increment affected an unexpected row count.');
         }
-        $value = (string) (Db::query(
+        $value = $this->currentSnapshot($organization, $userId, false);
+        return $value;
+    }
+
+    private function currentSnapshot(int $organization, string $userId, bool $lock = true): string
+    {
+        $current = (string) (Db::query(
             'SELECT access_snapshot_id FROM im_user_group_access_state
-              WHERE organization = ? AND BINARY user_id = BINARY ? LIMIT 1',
+              WHERE organization = ? AND BINARY user_id = BINARY ? LIMIT 1' . ($lock ? ' FOR UPDATE' : ''),
             [$organization, $userId],
         )[0]['access_snapshot_id'] ?? '0');
-        if (!$this->isPositiveDecimal($value)) {
-            throw new \RuntimeException('Group access snapshot increment failed.');
+        if (!$this->isPositiveDecimal($current)) {
+            throw new \RuntimeException('Group access snapshot state is invalid.');
         }
-        return $value;
+        return $current;
     }
 
     /** @return list<array{period_no:string,from_seq:string,to_seq:?string}> */
@@ -1022,9 +1379,9 @@ final class GroupMemberAccessService
                 || str_contains($userId, '|')) {
                 throw new ApiException('群成员身份无效。', 422);
             }
-            $result[$userId] = true;
+            $result['user:' . $userId] = $userId;
         }
-        $values = array_keys($result);
+        $values = array_values($result);
         sort($values, SORT_STRING);
         return $values;
     }
@@ -1056,9 +1413,44 @@ final class GroupMemberAccessService
         return $next;
     }
 
+    private function incrementNonNegativeDecimal(string $value, string $overflowMessage): string
+    {
+        if (preg_match('/^(0|[1-9][0-9]{0,19})$/D', $value) !== 1
+            || (strlen($value) === 20 && strcmp($value, self::UNSIGNED_BIGINT_MAX) > 0)) {
+            throw new \RuntimeException('Unsigned decimal fact is invalid.');
+        }
+        if ($value === self::UNSIGNED_BIGINT_MAX) {
+            throw new ApiException($overflowMessage, 409);
+        }
+        if ($value === '0') {
+            return '1';
+        }
+        $digits = str_split($value);
+        for ($index = count($digits) - 1; $index >= 0; --$index) {
+            if ($digits[$index] !== '9') {
+                $digits[$index] = (string) ((int) $digits[$index] + 1);
+                return implode('', $digits);
+            }
+            $digits[$index] = '0';
+        }
+        return '1' . implode('', $digits);
+    }
+
     private function isPositiveDecimal(string $value): bool
     {
         return preg_match('/^[1-9][0-9]{0,19}$/D', $value) === 1
             && (strlen($value) < 20 || strcmp($value, self::UNSIGNED_BIGINT_MAX) <= 0);
+    }
+
+    private function isNonNegativeDecimal(string $value): bool
+    {
+        return preg_match('/^(0|[1-9][0-9]{0,19})$/D', $value) === 1
+            && (strlen($value) < 20 || strcmp($value, self::UNSIGNED_BIGINT_MAX) <= 0);
+    }
+
+    private function compareDecimals(string $left, string $right): int
+    {
+        $length = strlen($left) <=> strlen($right);
+        return $length !== 0 ? $length : strcmp($left, $right);
     }
 }

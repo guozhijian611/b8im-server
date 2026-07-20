@@ -227,6 +227,12 @@ final class IntegrationAvatarSigner implements WebImAssetUrlSignerInterface
 
 $assert($pdoDatabase === $database, 'PDO did not select the isolated Web IM test database.');
 $assert($thinkOrmDatabase === $database, 'ThinkORM did not select the isolated Web IM test database.');
+$sqlMode = (string) (Db::query('SELECT @@SESSION.sql_mode AS sql_mode')[0]['sql_mode'] ?? '');
+$sqlModes = array_values(array_filter(explode(',', $sqlMode)));
+if (!in_array('ONLY_FULL_GROUP_BY', $sqlModes, true)) {
+    $sqlModes[] = 'ONLY_FULL_GROUP_BY';
+    Db::execute('SET SESSION sql_mode = ?', [implode(',', $sqlModes)]);
+}
 
 $insertUser = $pdo->prepare(
     'INSERT INTO im_user
@@ -240,6 +246,11 @@ $users = [
     [901, 'user_b', '901002', 'bob', 'Bob', '13800000002', 'bob@example.com'],
     [901, 'user_c', '901003', 'carol', 'Carol', '13800000003', 'carol@example.com'],
     [901, 'user_d', '901004', 'dan', 'Dan', '13800000004', 'dan@example.com'],
+    [901, '123', '901005', 'numeric_user', 'Numeric User', '13800000005', 'numeric@example.com'],
+    [901, 'user_e', '901006', 'erin', 'Erin', '13800000006', 'erin@example.com'],
+    [901, 'user_f', '901007', 'frank', 'Frank', '13800000007', 'frank@example.com'],
+    [901, 'user_g', '901008', 'grace', 'Grace', '13800000008', 'grace@example.com'],
+    [901, 'user_h', '901009', 'heidi', 'Heidi', '13800000009', 'heidi@example.com'],
     [902, 'outsider', '902001', 'outsider', 'Outsider', '13900000001', 'out@example.com'],
 ];
 foreach ($users as [$organization, $userId, $shortNo, $account, $nickname, $mobile, $email]) {
@@ -265,6 +276,11 @@ foreach ($users as [$organization, $userId, $shortNo, $account, $nickname, $mobi
             (organization, user_id, allow_add_by_mobile, allow_add_by_short_no,
              allow_add_by_username, create_time, update_time)
          VALUES (?, ?, 1, 1, 1, ?, ?)',
+    )->execute([$organization, $userId, $now, $now]);
+    $pdo->prepare(
+        'INSERT INTO im_user_group_access_state
+            (organization, user_id, access_snapshot_id, create_time, update_time)
+         VALUES (?, ?, 1, ?, ?)',
     )->execute([$organization, $userId, $now, $now]);
 }
 
@@ -495,6 +511,39 @@ $periodCount = (int) Db::table('im_conversation_membership_period')
     ->where('status', 1)
     ->count();
 $assert($periodCount === 3, 'Initial membership periods are incomplete.');
+$groupAccessFacts = static function (string $userId) use ($conversationId): array {
+    return [
+        'member' => Db::query(
+            'SELECT status, access_version, access_state FROM im_conversation_member
+              WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+                AND member_organization = 901 AND BINARY user_id = BINARY ? LIMIT 1',
+            [$conversationId, $userId],
+        )[0] ?? null,
+        'periods' => Db::query(
+            'SELECT period_no, visible_from_message_seq, visible_until_message_seq, status
+               FROM im_conversation_membership_period
+              WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+                AND member_organization = 901 AND BINARY user_id = BINARY ?
+           ORDER BY period_no ASC',
+            [$conversationId, $userId],
+        ),
+        'snapshot' => (string) Db::table('im_user_group_access_state')
+            ->where('organization', 901)->where('user_id', $userId)->value('access_snapshot_id'),
+        'audit' => (int) Db::query(
+            'SELECT COUNT(*) AS aggregate FROM im_group_member_access_audit
+              WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+                AND member_organization = 901 AND BINARY user_id = BINARY ?',
+            [$conversationId, $userId],
+        )[0]['aggregate'],
+        'outbox' => (int) Db::query(
+            'SELECT COUNT(*) AS aggregate FROM im_message_outbox
+              WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+                AND event_type = "group.member_access_changed"
+                AND payload_json LIKE ?',
+            [$conversationId, '%"target_user_id":"' . $userId . '"%'],
+        )[0]['aggregate'],
+    ];
+};
 
 $pdo->prepare(
     'UPDATE im_conversation_member SET status = 99
@@ -504,6 +553,15 @@ $pdo->prepare(
 $expectRuntime(
     static fn () => $service->conversations($carol),
     'Invalid group membership status was not rejected.',
+);
+$invalidStatusFacts = $groupAccessFacts('user_c');
+$expectRuntime(
+    static fn () => $service->removeGroupMember($alice, $conversationId, 'user_c', '1'),
+    'Writer accepted an invalid group membership status.',
+);
+$assert(
+    $groupAccessFacts('user_c') === $invalidStatusFacts,
+    'Invalid membership status changed writer facts before rejection.',
 );
 $pdo->prepare(
     'UPDATE im_conversation_member SET status = 1
@@ -519,6 +577,15 @@ $expectRuntime(
     static fn () => $service->conversations($carol),
     'Zero group membership period start was not rejected.',
 );
+$zeroPeriodFacts = $groupAccessFacts('user_c');
+$expectRuntime(
+    static fn () => $service->removeGroupMember($alice, $conversationId, 'user_c', '1'),
+    'Writer accepted a zero membership period start.',
+);
+$assert(
+    $groupAccessFacts('user_c') === $zeroPeriodFacts,
+    'Zero membership period changed writer facts before rejection.',
+);
 $pdo->prepare(
     'UPDATE im_conversation_membership_period SET visible_from_message_seq = 1,
         visible_until_message_seq = 0
@@ -528,6 +595,15 @@ $pdo->prepare(
 $expectRuntime(
     static fn () => $service->conversations($carol),
     'Reverse group membership period interval was not rejected.',
+);
+$reversePeriodFacts = $groupAccessFacts('user_c');
+$expectRuntime(
+    static fn () => $service->removeGroupMember($alice, $conversationId, 'user_c', '1'),
+    'Writer accepted a reverse membership period interval.',
+);
+$assert(
+    $groupAccessFacts('user_c') === $reversePeriodFacts,
+    'Reverse membership period changed writer facts before rejection.',
 );
 $pdo->prepare(
     'UPDATE im_conversation_membership_period SET visible_until_message_seq = NULL
@@ -545,10 +621,67 @@ $expectRuntime(
     static fn () => $service->conversations($carol),
     'Overlapping group membership periods were not rejected.',
 );
+$overlapPeriodFacts = $groupAccessFacts('user_c');
+$expectRuntime(
+    static fn () => $service->removeGroupMember($alice, $conversationId, 'user_c', '1'),
+    'Writer accepted overlapping membership periods.',
+);
+$assert(
+    $groupAccessFacts('user_c') === $overlapPeriodFacts,
+    'Overlapping membership periods changed writer facts before rejection.',
+);
 $pdo->prepare(
     'DELETE FROM im_conversation_membership_period
       WHERE organization = 901 AND BINARY conversation_id = BINARY ?
         AND member_organization = 901 AND BINARY user_id = BINARY "user_c" AND period_no = 2',
+)->execute([$conversationId]);
+$pdo->prepare(
+    'INSERT INTO im_conversation_membership_period
+        (organization, conversation_id, user_id, member_organization, period_no,
+         visible_from_message_seq, visible_until_message_seq, join_at, leave_at,
+         status, create_time, update_time)
+     VALUES (901, ?, "user_c", 901, 2, 2, 2, ?, ?, 99, ?, ?)',
+)->execute([$conversationId, $now, $now, $now, $now]);
+$expectRuntime(
+    static fn () => $service->conversations($carol),
+    'An extra invalid-status membership period was ignored.',
+);
+$invalidPeriodStatusFacts = $groupAccessFacts('user_c');
+$expectRuntime(
+    static fn () => $service->removeGroupMember($alice, $conversationId, 'user_c', '1'),
+    'Writer ignored an extra invalid-status membership period.',
+);
+$assert(
+    $groupAccessFacts('user_c') === $invalidPeriodStatusFacts,
+    'Invalid-status period changed writer facts before rejection.',
+);
+$pdo->prepare(
+    'DELETE FROM im_conversation_membership_period
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "user_c" AND period_no = 2',
+)->execute([$conversationId]);
+$pdo->prepare(
+    'UPDATE im_conversation_member SET access_version = 0
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "user_c"',
+)->execute([$conversationId]);
+$expectRuntime(
+    static fn () => $service->conversations($carol),
+    'An invalid group access version was accepted.',
+);
+$invalidAccessVersionFacts = $groupAccessFacts('user_c');
+$expectRuntime(
+    static fn () => $service->removeGroupMember($alice, $conversationId, 'user_c', '1'),
+    'Writer accepted an invalid group access version.',
+);
+$assert(
+    $groupAccessFacts('user_c') === $invalidAccessVersionFacts,
+    'Invalid access version changed writer facts before rejection.',
+);
+$pdo->prepare(
+    'UPDATE im_conversation_member SET access_version = 1
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "user_c"',
 )->execute([$conversationId]);
 
 $messageGroup = $service->createMessageGroup($alice, 'Work');
@@ -585,8 +718,18 @@ foreach ($members as $member) {
 $assert($roleMap === ['user_a' => 2, 'user_b' => 3, 'user_c' => 1], 'Final member_role mapping mismatch.');
 $expectApiCode(422, static fn () => $service->messages($alice, ' ', 0, '', 0, 0, 50));
 $expectApiCode(422, static fn () => $service->groupMembers($alice, $conversationId . '|'));
-$expectApiCode(403, static fn () => $service->addGroupMembers($bob, $conversationId, ['user_d'], []));
-$expectApiCode(422, static fn () => $service->addGroupMembers($alice, $conversationId, ['User_D'], []));
+$expectApiCode(403, static fn () => $service->addGroupMembers(
+    $bob,
+    $conversationId,
+    ['user_d'],
+    ['user_d' => '0'],
+));
+$expectApiCode(422, static fn () => $service->addGroupMembers(
+    $alice,
+    $conversationId,
+    ['User_D'],
+    ['User_D' => '0'],
+));
 $caseCollisionCount = (int) Db::query(
     'SELECT COUNT(*) AS aggregate FROM im_conversation_member
       WHERE organization = 901 AND BINARY conversation_id = BINARY ?
@@ -594,9 +737,86 @@ $caseCollisionCount = (int) Db::query(
     [$conversationId],
 )[0]['aggregate'];
 $assert($caseCollisionCount === 0, 'Case-colliding user identity created a membership row.');
-$service->addGroupMembers($alice, $conversationId, ['user_d'], []);
-$expectApiCode(422, static fn () => $service->addGroupMembers($alice, $conversationId, ['user_d'], []));
+$pdo->exec(
+    'DELETE FROM im_user_group_access_state
+      WHERE organization = 901 AND BINARY user_id = BINARY "user_d"',
+);
+$service->addGroupMembers($alice, $conversationId, ['user_d'], ['user_d' => '0']);
+$danJoinFacts = [
+    'snapshot' => (string) Db::table('im_user_group_access_state')
+        ->where('organization', 901)->where('user_id', 'user_d')->value('access_snapshot_id'),
+    'audit' => (int) Db::query(
+        'SELECT COUNT(*) AS aggregate FROM im_group_member_access_audit
+          WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+            AND member_organization = 901 AND BINARY user_id = BINARY "user_d"',
+        [$conversationId],
+    )[0]['aggregate'],
+    'outbox' => (int) Db::query(
+        'SELECT COUNT(*) AS aggregate FROM im_message_outbox
+          WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+            AND event_type = "group.member_access_changed"
+            AND payload_json LIKE ?',
+        [$conversationId, '%"target_user_id":"user_d"%'],
+    )[0]['aggregate'],
+];
+$service->addGroupMembers($alice, $conversationId, ['user_d'], ['user_d' => '0']);
 $service->addGroupMembers($alice, $conversationId, ['user_d'], ['user_d' => '1']);
+$pdo->exec(
+    'UPDATE im_user SET status = 2
+      WHERE organization = 901 AND BINARY user_id = BINARY "user_d"',
+);
+$service->addGroupMembers($alice, $conversationId, ['user_d'], ['user_d' => '0']);
+$pdo->exec(
+    'UPDATE im_user SET status = 1
+      WHERE organization = 901 AND BINARY user_id = BINARY "user_d"',
+);
+$pdo->exec(
+    'UPDATE im_friend_relation SET status = 2
+      WHERE organization = 901 AND friend_organization = 901
+        AND ((BINARY user_id = BINARY "user_a" AND BINARY friend_user_id = BINARY "user_d")
+          OR (BINARY user_id = BINARY "user_d" AND BINARY friend_user_id = BINARY "user_a"))',
+);
+$service->addGroupMembers($alice, $conversationId, ['user_d'], ['user_d' => '0']);
+$pdo->exec(
+    'UPDATE im_friend_relation SET status = 1
+      WHERE organization = 901 AND friend_organization = 901
+        AND ((BINARY user_id = BINARY "user_a" AND BINARY friend_user_id = BINARY "user_d")
+          OR (BINARY user_id = BINARY "user_d" AND BINARY friend_user_id = BINARY "user_a"))',
+);
+$expectApiCode(409, static fn () => $service->addGroupMembers(
+    $alice,
+    $conversationId,
+    ['user_d', '123'],
+    ['user_d' => '0', '123' => '0'],
+));
+$mixedBatchNumericCount = (int) Db::query(
+    'SELECT COUNT(*) AS aggregate FROM im_conversation_member
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "123"',
+    [$conversationId],
+)[0]['aggregate'];
+$assert(
+    $mixedBatchNumericCount === 0,
+    'A mixed committed-retry/new-member batch partially changed membership facts.',
+);
+$assert(
+    $danJoinFacts['snapshot'] === (string) Db::table('im_user_group_access_state')
+        ->where('organization', 901)->where('user_id', 'user_d')->value('access_snapshot_id')
+    && $danJoinFacts['audit'] === (int) Db::query(
+        'SELECT COUNT(*) AS aggregate FROM im_group_member_access_audit
+          WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+            AND member_organization = 901 AND BINARY user_id = BINARY "user_d"',
+        [$conversationId],
+    )[0]['aggregate']
+    && $danJoinFacts['outbox'] === (int) Db::query(
+        'SELECT COUNT(*) AS aggregate FROM im_message_outbox
+          WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+            AND event_type = "group.member_access_changed"
+            AND payload_json LIKE ?',
+        [$conversationId, '%"target_user_id":"user_d"%'],
+    )[0]['aggregate'],
+    'Join retries changed snapshot, audit or outbox state.',
+);
 $danSnapshot = Db::query(
     'SELECT access_snapshot_id, create_time, update_time FROM im_user_group_access_state
       WHERE organization = 901 AND BINARY user_id = BINARY "user_d"',
@@ -605,6 +825,12 @@ $pdo->exec(
     'DELETE FROM im_user_group_access_state
       WHERE organization = 901 AND BINARY user_id = BINARY "user_d"',
 );
+$missingSnapshotJoinFailedClosed = false;
+try {
+    $service->addGroupMembers($alice, $conversationId, ['user_d'], ['user_d' => '1']);
+} catch (RuntimeException) {
+    $missingSnapshotJoinFailedClosed = true;
+}
 $missingSnapshotFailedClosed = false;
 try {
     $service->leaveGroup($dan, $conversationId, '1');
@@ -618,7 +844,8 @@ $danBeforeSnapshotRestore = Db::query(
     [$conversationId],
 )[0];
 $assert(
-    $missingSnapshotFailedClosed
+    $missingSnapshotJoinFailedClosed
+    && $missingSnapshotFailedClosed
     && (int) $danBeforeSnapshotRestore['status'] === 1
     && (string) $danBeforeSnapshotRestore['access_version'] === '1'
     && $danBeforeSnapshotRestore['access_state'] === 'active',
@@ -633,8 +860,17 @@ $pdo->prepare(
     $danSnapshot['create_time'],
     $danSnapshot['update_time'],
 ]);
-$service->leaveGroup($dan, $conversationId, '1');
-$service->leaveGroup($dan, $conversationId, '1');
+$danLeave = $service->leaveGroup($dan, $conversationId, '1');
+$danLeaveRetry = $service->leaveGroup($dan, $conversationId, '1');
+$assert(
+    $danLeave === $danLeaveRetry
+    && $danLeave['conversation_id'] === $conversationId
+    && $danLeave['left'] === true
+    && $danLeave['access_version'] === '2'
+    && $danLeave['access_snapshot_id'] === (string) ((int) $danSnapshot['access_snapshot_id'] + 1)
+    && $danLeave['access_state'] === 'revoked',
+    'Leave retry did not return the committed access version and snapshot.',
+);
 $emptyPeriod = Db::query(
     'SELECT visible_from_message_seq, visible_until_message_seq, status
        FROM im_conversation_membership_period
@@ -765,6 +1001,38 @@ $assert(
     (string) $suspendedDan['access_version'] === '4' && $suspendedDan['access_state'] === 'revoked',
     'Suspend did not revoke all group access or was not idempotent.',
 );
+$suspendedDanFacts = $groupAccessFacts('user_d');
+$pdo->prepare(
+    'UPDATE im_group_member_access_audit SET access_state = "history_only"
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "user_d"
+        AND access_version = 4',
+)->execute([$conversationId]);
+$expectRuntime(
+    static fn () => $service->addGroupMembers(
+        $alice,
+        $conversationId,
+        ['user_d'],
+        ['user_d' => '4'],
+    ),
+    'Ordinary join trusted a suspended member audit that disagreed with locked facts.',
+);
+$pdo->prepare(
+    'UPDATE im_group_member_access_audit SET access_state = "revoked"
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "user_d"
+        AND access_version = 4',
+)->execute([$conversationId]);
+$expectApiCode(409, static fn () => $service->addGroupMembers(
+    $alice,
+    $conversationId,
+    ['user_d'],
+    ['user_d' => '4'],
+));
+$assert(
+    $groupAccessFacts('user_d') === $suspendedDanFacts,
+    'Ordinary join bypassed the dedicated suspended-member restore transition.',
+);
 $service->restoreGroupMember($alice, $conversationId, 'user_d', '4');
 $service->restoreGroupMember($alice, $conversationId, 'user_d', '4');
 $restoredDanPeriod = Db::query(
@@ -878,6 +1146,65 @@ $assert(
     && $bobOpenPeriods === 1
     && $bobSnapshotAfterRollback === $bobSnapshotBeforeRollback,
     'Audit failure did not roll back member, period, version and user snapshot atomically.',
+);
+
+$bobSnapshotBeforeOutboxRollback = (string) Db::table('im_user_group_access_state')
+    ->where('organization', 901)
+    ->where('user_id', 'user_b')
+    ->value('access_snapshot_id');
+$pdo->exec(
+    'CREATE TRIGGER web_test_fail_group_access_outbox BEFORE INSERT ON im_message_outbox
+     FOR EACH ROW SIGNAL SQLSTATE "45000" SET MESSAGE_TEXT = "injected outbox failure"',
+);
+$outboxRolledBack = false;
+try {
+    $service->leaveGroup($bob, $conversationId, '1');
+} catch (Throwable) {
+    $outboxRolledBack = true;
+} finally {
+    $pdo->exec('DROP TRIGGER IF EXISTS web_test_fail_group_access_outbox');
+}
+$bobAfterOutboxRollback = Db::query(
+    'SELECT status, access_version, access_state FROM im_conversation_member
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "user_b"',
+    [$conversationId],
+)[0];
+$bobOpenPeriodsAfterOutboxRollback = (int) Db::query(
+    'SELECT COUNT(*) AS aggregate FROM im_conversation_membership_period
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "user_b"
+        AND status = 1 AND visible_until_message_seq IS NULL',
+    [$conversationId],
+)[0]['aggregate'];
+$bobSnapshotAfterOutboxRollback = (string) Db::table('im_user_group_access_state')
+    ->where('organization', 901)
+    ->where('user_id', 'user_b')
+    ->value('access_snapshot_id');
+$bobAuditAfterOutboxRollback = (int) Db::query(
+    'SELECT COUNT(*) AS aggregate FROM im_group_member_access_audit
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "user_b"
+        AND access_version = 2',
+    [$conversationId],
+)[0]['aggregate'];
+$bobOutboxAfterOutboxRollback = (int) Db::query(
+    'SELECT COUNT(*) AS aggregate FROM im_message_outbox
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND event_type = "group.member_access_changed"
+        AND payload_json LIKE ?',
+    [$conversationId, '%"target_user_id":"user_b"%"access_version":"2"%'],
+)[0]['aggregate'];
+$assert(
+    $outboxRolledBack
+    && (int) $bobAfterOutboxRollback['status'] === 1
+    && (string) $bobAfterOutboxRollback['access_version'] === '1'
+    && $bobAfterOutboxRollback['access_state'] === 'active'
+    && $bobOpenPeriodsAfterOutboxRollback === 1
+    && $bobSnapshotAfterOutboxRollback === $bobSnapshotBeforeOutboxRollback
+    && $bobAuditAfterOutboxRollback === 0
+    && $bobOutboxAfterOutboxRollback === 0,
+    'Outbox failure did not roll back member, period, version, snapshot and audit atomically.',
 );
 
 $service->removeGroupMember($bob, $conversationId, 'user_c', '1');
@@ -1047,6 +1374,268 @@ $pdo->prepare(
         AND BINARY message_id = BINARY "web-test-message-1"',
 )->execute([$conversationId]);
 $pdo->prepare(
+    'UPDATE im_message_index SET client_msg_id = "forged-index-client"
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY "web-test-message-1"',
+)->execute([$conversationId]);
+$expectRuntime(
+    static fn () => $service->messages($carol, $conversationId, 0, '', 0, 0, 50),
+    'Message page trusted a forged client_msg_id binding.',
+);
+$expectRuntime(
+    static fn () => $service->conversations($carol),
+    'Conversation preview trusted a forged client_msg_id binding.',
+);
+$assert(
+    $service->searchMessages($carol, $conversationId, 'visible before leave', 0, 50) === [],
+    'Message search trusted a forged client_msg_id binding.',
+);
+$pdo->prepare(
+    'UPDATE im_message_index SET client_msg_id = "web-test-client-1"
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY "web-test-message-1"',
+)->execute([$conversationId]);
+
+$pdo->prepare(
+    'UPDATE im_message_index SET storage_node = "foreign-node"
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY "web-test-message-1"',
+)->execute([$conversationId]);
+$expectRuntime(
+    static fn () => $service->messages($carol, $conversationId, 0, '', 0, 0, 50),
+    'Message page accepted an unsupported storage node.',
+);
+$expectRuntime(
+    static fn () => $service->conversations($carol),
+    'Conversation preview accepted an unsupported storage node.',
+);
+$expectRuntime(
+    static fn () => $service->searchMessages($carol, $conversationId, 'visible before leave', 0, 50),
+    'Message search accepted an unsupported storage node.',
+);
+$pdo->prepare(
+    'UPDATE im_message_index SET storage_node = "mysql-primary"
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY "web-test-message-1"',
+)->execute([$conversationId]);
+
+$pdo->prepare(
+    'UPDATE ' . $messageTable . ' SET conversation_type = 1
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY "web-test-message-1"',
+)->execute([$conversationId]);
+$expectRuntime(
+    static fn () => $service->messages($carol, $conversationId, 0, '', 0, 0, 50),
+    'Message page trusted a forged conversation_type.',
+);
+$expectRuntime(
+    static fn () => $service->conversations($carol),
+    'Conversation preview trusted a forged conversation_type.',
+);
+$assert(
+    $service->searchMessages($carol, $conversationId, 'visible before leave', 0, 50) === [],
+    'Message search trusted a forged conversation_type.',
+);
+$pdo->prepare(
+    'UPDATE ' . $messageTable . ' SET conversation_type = 2
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY "web-test-message-1"',
+)->execute([$conversationId]);
+
+$pdo->prepare(
+    'UPDATE ' . $messageTable . ' SET message_type = 255
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY "web-test-message-1"',
+)->execute([$conversationId]);
+$expectRuntime(
+    static fn () => $service->messages($carol, $conversationId, 0, '', 0, 0, 50),
+    'Message page accepted a message type that is not enabled by the shared protocol.',
+);
+$expectRuntime(
+    static fn () => $service->conversations($carol),
+    'Conversation preview accepted a message type that is not enabled by the shared protocol.',
+);
+$assert(
+    $service->searchMessages($carol, $conversationId, 'visible before leave', 0, 50) === [],
+    'Message search accepted a message type that is not enabled by the shared protocol.',
+);
+$pdo->prepare(
+    'UPDATE ' . $messageTable . ' SET message_type = 1
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY "web-test-message-1"',
+)->execute([$conversationId]);
+
+$alternateShard = 'im_message_0001_' . date('Ym');
+$pdo->exec('CREATE TABLE ' . $alternateShard . ' LIKE ' . $messageTable);
+$pdo->exec(
+    'INSERT INTO ' . $alternateShard . '
+     SELECT * FROM ' . $messageTable . '
+      WHERE organization = 901 AND BINARY conversation_id = BINARY "' . $conversationId . '"
+        AND BINARY message_id = BINARY "web-test-message-1"',
+);
+$pdo->prepare(
+    'UPDATE im_message_index SET shard_table = ?
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY "web-test-message-1"',
+)->execute([$alternateShard, $conversationId]);
+$expectRuntime(
+    static fn () => $service->messages($carol, $conversationId, 0, '', 0, 0, 50),
+    'Message page trusted a forged shard route.',
+);
+$expectRuntime(
+    static fn () => $service->conversations($carol),
+    'Conversation preview trusted a forged shard route.',
+);
+$expectRuntime(
+    static fn () => $service->searchMessages(
+        $carol,
+        $conversationId,
+        'visible before leave',
+        0,
+        50,
+    ),
+    'Message search trusted a forged shard route.',
+);
+$pdo->prepare(
+    'UPDATE im_message_index SET shard_table = ?
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY "web-test-message-1"',
+)->execute([$messageTable, $conversationId]);
+
+$wrongMonthShard = 'im_message_0000_202606';
+$pdo->exec('CREATE TABLE ' . $wrongMonthShard . ' LIKE ' . $messageTable);
+$pdo->exec(
+    'INSERT INTO ' . $wrongMonthShard . '
+     SELECT * FROM ' . $messageTable . '
+      WHERE organization = 901 AND BINARY conversation_id = BINARY "' . $conversationId . '"
+        AND BINARY message_id = BINARY "web-test-message-1"',
+);
+$pdo->prepare(
+    'UPDATE im_message_index SET shard_table = ?
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY "web-test-message-1"',
+)->execute([$wrongMonthShard, $conversationId]);
+$expectRuntime(
+    static fn () => $service->messages($carol, $conversationId, 0, '', 0, 0, 50),
+    'Message page trusted a wrong-month shard containing a cloned body.',
+);
+$expectRuntime(
+    static fn () => $service->conversations($carol),
+    'Conversation preview trusted a wrong-month shard containing a cloned body.',
+);
+$expectRuntime(
+    static fn () => $service->searchMessages(
+        $carol,
+        $conversationId,
+        'visible before leave',
+        0,
+        50,
+    ),
+    'Message search trusted a wrong-month shard containing a cloned body.',
+);
+$pdo->prepare(
+    'UPDATE im_message_index SET shard_table = ?
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY "web-test-message-1"',
+)->execute([$messageTable, $conversationId]);
+
+$pdo->prepare(
+    'UPDATE im_message_index SET create_time = "2026-06-30 23:59:59"
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY "web-test-message-1"',
+)->execute([$conversationId]);
+$expectRuntime(
+    static fn () => $service->messages($carol, $conversationId, 0, '', 0, 0, 50),
+    'Message page trusted an index time inconsistent with its physical shard.',
+);
+$expectRuntime(
+    static fn () => $service->conversations($carol),
+    'Conversation preview trusted an index time inconsistent with its physical shard.',
+);
+$expectRuntime(
+    static fn () => $service->searchMessages(
+        $carol,
+        $conversationId,
+        'visible before leave',
+        0,
+        50,
+    ),
+    'Message search trusted an index time inconsistent with its physical shard.',
+);
+$pdo->prepare(
+    'UPDATE im_message_index SET create_time = ?
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY "web-test-message-1"',
+)->execute([$now, $conversationId]);
+
+$pdo->prepare(
+    'UPDATE ' . $messageTable . ' SET create_time = "2026-07-10 12:00:01"
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY "web-test-message-1"',
+)->execute([$conversationId]);
+$expectRuntime(
+    static fn () => $service->messages($carol, $conversationId, 0, '', 0, 0, 50),
+    'Message page trusted a shard body time that disagreed with the index.',
+);
+$expectRuntime(
+    static fn () => $service->conversations($carol),
+    'Conversation preview trusted a shard body time that disagreed with the index.',
+);
+$assert(
+    $service->searchMessages($carol, $conversationId, 'visible before leave', 0, 50) === [],
+    'Message search trusted a shard body time that disagreed with the index.',
+);
+$pdo->prepare(
+    'UPDATE ' . $messageTable . ' SET create_time = ?
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY "web-test-message-1"',
+)->execute([$now, $conversationId]);
+
+$pdo->prepare(
+    'UPDATE im_message_index SET sender_id = "forged-sender"
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY "web-test-message-1"',
+)->execute([$conversationId]);
+$expectRuntime(
+    static fn () => $service->messages($carol, $conversationId, 0, '', 0, 0, 50),
+    'Message page trusted a forged sender identity.',
+);
+$expectRuntime(
+    static fn () => $service->conversations($carol),
+    'Conversation preview trusted a forged sender identity.',
+);
+$assert(
+    $service->searchMessages($carol, $conversationId, 'visible before leave', 0, 50) === [],
+    'Message search trusted a forged sender identity.',
+);
+$pdo->prepare(
+    'UPDATE im_message_index SET sender_id = "user_a"
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY "web-test-message-1"',
+)->execute([$conversationId]);
+$pdo->prepare(
+    'UPDATE im_message_index SET sender_organization = 902
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY "web-test-message-1"',
+)->execute([$conversationId]);
+$expectRuntime(
+    static fn () => $service->messages($carol, $conversationId, 0, '', 0, 0, 50),
+    'Message page trusted a forged sender organization.',
+);
+$expectRuntime(
+    static fn () => $service->conversations($carol),
+    'Conversation preview trusted a forged sender organization.',
+);
+$assert(
+    $service->searchMessages($carol, $conversationId, 'visible before leave', 0, 50) === [],
+    'Message search trusted a forged sender organization.',
+);
+$pdo->prepare(
+    'UPDATE im_message_index SET sender_organization = 901
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY "web-test-message-1"',
+)->execute([$conversationId]);
+$pdo->prepare(
     'UPDATE im_group_profile SET history_visibility = "all", update_time = ?
       WHERE organization = 901 AND conversation_id = ?',
 )->execute([$now, $conversationId]);
@@ -1112,12 +1701,14 @@ $pdo->prepare(
         (901, ?, "web-test-message-3", "user_b", 901, 2, ?, NULL, ?, ?),
         (901, ?, "web-test-message-3", "user_c", 901, 1, NULL, NULL, ?, ?),
         (901, ?, "web-test-message-3", "user_c", 901, 2, ?, NULL, ?, ?),
-        (901, ?, "web-test-message-3", "user_c", 901, 3, ?, ?, ?, ?)',
+        (901, ?, "web-test-message-3", "user_c", 901, 3, ?, ?, ?, ?),
+        (901, ?, "web-test-message-3", "User_B", 901, 3, ?, ?, ?, ?)',
 )->execute([
     $conversationId, $now, $now,
     $conversationId, $now, $now, $now,
     $conversationId, $now, $now,
     $conversationId, $now, $now, $now,
+    $conversationId, $now, $now, $now, $now,
     $conversationId, $now, $now, $now, $now,
 ]);
 $aliceMessagePage = $service->messages($alice, $conversationId, 0, '', 0, 0, 50);
@@ -1127,7 +1718,7 @@ $aliceMessage3 = array_values(array_filter(
 ))[0];
 $assert(
     $aliceMessage3['delivery_status'] === 'delivered',
-    'Outgoing group delivery state did not use the minimum recipient high-water mark.',
+    'Outgoing delivery state ignored byte-exact receipt identities or the minimum high-water mark.',
 );
 $assert(
     $service->searchMessages($carol, $conversationId, 'hidden', 0, 50) === [],
@@ -2037,6 +2628,50 @@ $assert(
     && str_contains($visibleUrl['url'], 'X-Amz-Signature='),
     'Owner or visible recipient did not receive a short-lived private URL.',
 );
+$pdo->exec(
+    'INSERT INTO ' . $alternateShard . '
+     SELECT * FROM ' . $messageTable . '
+      WHERE organization = 901 AND BINARY conversation_id = BINARY "' . $conversationId . '"
+        AND BINARY message_id = BINARY "' . $assetMessageId . '"',
+);
+$pdo->prepare(
+    'UPDATE im_message_index SET shard_table = ?
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY ?',
+)->execute([$alternateShard, $conversationId, $assetMessageId]);
+$expectRuntime(
+    static fn () => $assetUrlService->resolve(
+        $bob,
+        $sourceFileId,
+        $conversationId,
+        $assetMessageId,
+    ),
+    'Attachment authorization trusted a wrong-bucket shard containing a cloned body.',
+);
+$pdo->prepare(
+    'UPDATE im_message_index SET shard_table = ?
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY ?',
+)->execute([$messageTable, $conversationId, $assetMessageId]);
+$pdo->prepare(
+    'UPDATE ' . $messageTable . ' SET create_time = "2026-07-10 12:00:01"
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY ?',
+)->execute([$conversationId, $assetMessageId]);
+$expectRuntime(
+    static fn () => $assetUrlService->resolve(
+        $bob,
+        $sourceFileId,
+        $conversationId,
+        $assetMessageId,
+    ),
+    'Attachment authorization trusted a shard body time that disagreed with the index.',
+);
+$pdo->prepare(
+    'UPDATE ' . $messageTable . ' SET create_time = ?
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY ?',
+)->execute([$now, $conversationId, $assetMessageId]);
 $pdo->prepare(
     'UPDATE im_conversation
         SET next_message_seq = 101, last_message_seq = 100, last_message_id = ?, update_time = ?
@@ -2142,6 +2777,477 @@ $assert(
     'History revoke did not revoke the selected closed period idempotently.',
 );
 $expectApiCode(403, static fn () => $service->messages($bob, $conversationId, 0, '', 0, 0, 50));
+
+$insertFriend->execute(['user_a', '123', $now, $now, $now]);
+$insertFriend->execute(['123', 'user_a', $now, $now, $now]);
+$numericGroup = $service->createGroup($alice, 'Numeric Identity Group', ['user_b', 'user_c']);
+$numericConversationId = (string) $numericGroup['conversation_id'];
+$numericMembers = $service->addGroupMembers(
+    $alice,
+    $numericConversationId,
+    ['123'],
+    ['123' => '0'],
+);
+$numericMember = array_values(array_filter(
+    $numericMembers,
+    static fn (array $member): bool => ($member['user']['user_id'] ?? null) === '123',
+))[0] ?? null;
+$assert(
+    is_array($numericMember)
+    && ($numericMember['access_version'] ?? null) === '1'
+    && ($numericMember['access_state'] ?? null) === 'active',
+    'A canonical numeric user ID could not complete a group join transition.',
+);
+$numericUser = ['organization' => 901, 'user_id' => '123'];
+$pdo->prepare(
+    'UPDATE im_conversation_membership_period SET visible_from_message_seq = 2
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "123" AND period_no = 1',
+)->execute([$numericConversationId]);
+$expectRuntime(
+    static fn () => $service->conversations($numericUser),
+    'Read guard accepted an open period beyond last_message_seq + 1.',
+);
+$expectRuntime(
+    static fn () => $service->removeGroupMember(
+        $alice,
+        $numericConversationId,
+        '123',
+        '1',
+    ),
+    'Writer accepted an open period beyond last_message_seq + 1.',
+);
+$pdo->prepare(
+    'UPDATE im_conversation_membership_period SET visible_from_message_seq = 1
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "123" AND period_no = 1',
+)->execute([$numericConversationId]);
+
+$pdo->prepare(
+    'UPDATE im_conversation SET next_message_seq = 51, last_message_seq = 50
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?',
+)->execute([$numericConversationId]);
+$pdo->prepare(
+    'UPDATE im_conversation_member SET status = 3, access_state = "history_only"
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "123"',
+)->execute([$numericConversationId]);
+$pdo->prepare(
+    'UPDATE im_conversation_membership_period
+        SET visible_from_message_seq = 1, visible_until_message_seq = 100
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "123" AND period_no = 1',
+)->execute([$numericConversationId]);
+$expectRuntime(
+    static fn () => $service->messages(
+        $numericUser,
+        $numericConversationId,
+        0,
+        '',
+        0,
+        0,
+        50,
+    ),
+    'A closed period above last_message_seq authorized future messages.',
+);
+$expectRuntime(
+    static fn () => $service->addGroupMembers(
+        $alice,
+        $numericConversationId,
+        ['123'],
+        ['123' => '1'],
+    ),
+    'Writer accepted a closed period above the locked message watermark.',
+);
+
+$pdo->prepare(
+    'UPDATE im_conversation SET next_message_seq = 201, last_message_seq = 200
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?',
+)->execute([$numericConversationId]);
+$pdo->prepare(
+    'UPDATE im_conversation_membership_period
+        SET visible_from_message_seq = 100, visible_until_message_seq = 150
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "123" AND period_no = 1',
+)->execute([$numericConversationId]);
+$pdo->prepare(
+    'INSERT INTO im_conversation_membership_period
+        (organization, conversation_id, user_id, member_organization, period_no,
+         visible_from_message_seq, visible_until_message_seq, join_at, leave_at,
+         status, create_time, update_time)
+     VALUES (901, ?, "123", 901, 2, 1, 50, ?, ?, 1, ?, ?)',
+)->execute([$numericConversationId, $now, $now, $now, $now]);
+$expectRuntime(
+    static fn () => $service->conversations($numericUser),
+    'Read guard accepted non-overlapping periods in reverse period_no time order.',
+);
+$expectRuntime(
+    static fn () => $service->addGroupMembers(
+        $alice,
+        $numericConversationId,
+        ['123'],
+        ['123' => '1'],
+    ),
+    'Writer accepted non-overlapping periods in reverse period_no time order.',
+);
+$pdo->prepare(
+    'DELETE FROM im_conversation_membership_period
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "123" AND period_no = 2',
+)->execute([$numericConversationId]);
+$pdo->prepare(
+    'UPDATE im_conversation_membership_period
+        SET visible_from_message_seq = 1, visible_until_message_seq = NULL
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "123" AND period_no = 1',
+)->execute([$numericConversationId]);
+$pdo->prepare(
+    'UPDATE im_conversation_member SET status = 1, access_state = "active"
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "123"',
+)->execute([$numericConversationId]);
+$pdo->prepare(
+    'UPDATE im_conversation SET next_message_seq = 1, last_message_seq = 0
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?',
+)->execute([$numericConversationId]);
+
+if (function_exists('proc_open')) {
+    $insertFriend->execute(['user_a', 'user_e', $now, $now, $now]);
+    $insertFriend->execute(['user_e', 'user_a', $now, $now, $now]);
+    $concurrentGroup = $service->createGroup(
+        $alice,
+        'Concurrent Join Group',
+        ['user_b', 'user_c'],
+    );
+    $concurrentConversationId = (string) $concurrentGroup['conversation_id'];
+    $pdo->exec(
+        'DELETE FROM im_user_group_access_state
+          WHERE organization = 901 AND BINARY user_id = BINARY "user_e"',
+    );
+    $concurrentPrefix = sys_get_temp_dir() . '/b8im-group-join-' . bin2hex(random_bytes(8));
+    $concurrentBarrier = $concurrentPrefix . '-start';
+    $concurrentWorkerCode = <<<'PHP'
+$root = $argv[1];
+$database = $argv[2];
+$conversationId = $argv[3];
+$barrier = $argv[4];
+$resultPath = $argv[5];
+$now = $argv[6];
+$memberIds = json_decode($argv[7], true, 512, JSON_THROW_ON_ERROR);
+if (!is_array($memberIds) || !array_is_list($memberIds) || $memberIds === []) {
+    throw new RuntimeException('Concurrent join worker member list is invalid.');
+}
+$expectedVersions = array_fill_keys($memberIds, '0');
+foreach (['DB_NAME' => $database, 'IM_MESSAGE_SHARD_BUCKETS' => '1'] as $key => $value) {
+    putenv($key . '=' . $value);
+    $_ENV[$key] = $value;
+    $_SERVER[$key] = $value;
+}
+require $root . '/vendor/autoload.php';
+require $root . '/support/bootstrap.php';
+$config = config('think-orm');
+$connectionName = (string) ($config['default'] ?? 'mysql');
+$config['connections'][$connectionName]['database'] = $database;
+support\think\Db::setConfig($config);
+$deadline = microtime(true) + 10;
+while (!is_file($barrier)) {
+    if (microtime(true) >= $deadline) {
+        file_put_contents($resultPath, json_encode(['error' => 'barrier timeout'], JSON_THROW_ON_ERROR));
+        exit(1);
+    }
+    usleep(1000);
+}
+try {
+    (new plugin\saimulti\service\web\GroupMemberAccessService())->join(
+        901,
+        'user_a',
+        $conversationId,
+        $memberIds,
+        $expectedVersions,
+        $now,
+    );
+    file_put_contents($resultPath, json_encode(['status' => 'ok'], JSON_THROW_ON_ERROR));
+} catch (Throwable $exception) {
+    file_put_contents($resultPath, json_encode([
+        'error' => get_class($exception) . ': ' . $exception->getMessage(),
+        'driver_code' => $exception instanceof PDOException
+            ? (int) ($exception->errorInfo[1] ?? 0)
+            : 0,
+    ], JSON_THROW_ON_ERROR));
+    exit(1);
+}
+PHP;
+    $concurrentWorkers = [];
+    for ($workerIndex = 0; $workerIndex < 2; ++$workerIndex) {
+        $resultPath = $concurrentPrefix . '-result-' . $workerIndex . '.json';
+        $pipes = [];
+        $process = proc_open(
+            [
+                PHP_BINARY,
+                '-r',
+                $concurrentWorkerCode,
+                dirname(__DIR__),
+                $database,
+                $concurrentConversationId,
+                $concurrentBarrier,
+                $resultPath,
+                $now,
+                json_encode(['user_e'], JSON_THROW_ON_ERROR),
+            ],
+            [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            $pipes,
+        );
+        if (!is_resource($process)) {
+            throw new RuntimeException('Unable to start a concurrent group join worker.');
+        }
+        $concurrentWorkers[] = [
+            'process' => $process,
+            'pipes' => $pipes,
+            'result_path' => $resultPath,
+        ];
+    }
+    file_put_contents($concurrentBarrier, 'start');
+    $concurrentResults = [];
+    foreach ($concurrentWorkers as $worker) {
+        $stdout = stream_get_contents($worker['pipes'][1]);
+        $stderr = stream_get_contents($worker['pipes'][2]);
+        fclose($worker['pipes'][1]);
+        fclose($worker['pipes'][2]);
+        $exitCode = proc_close($worker['process']);
+        $result = is_file($worker['result_path'])
+            ? json_decode((string) file_get_contents($worker['result_path']), true)
+            : null;
+        $concurrentResults[] = [
+            'exit_code' => $exitCode,
+            'stdout' => $stdout,
+            'stderr' => $stderr,
+            'result' => $result,
+        ];
+        @unlink($worker['result_path']);
+    }
+    @unlink($concurrentBarrier);
+
+    $memberFacts = Db::query(
+        'SELECT COUNT(*) AS member_count, MIN(access_version) AS access_version
+           FROM im_conversation_member
+          WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+            AND member_organization = 901 AND BINARY user_id = BINARY "user_e"',
+        [$concurrentConversationId],
+    )[0];
+    $openPeriods = (int) Db::query(
+        'SELECT COUNT(*) AS aggregate FROM im_conversation_membership_period
+          WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+            AND member_organization = 901 AND BINARY user_id = BINARY "user_e"
+            AND status = 1 AND visible_until_message_seq IS NULL',
+        [$concurrentConversationId],
+    )[0]['aggregate'];
+    $snapshot = (string) Db::query(
+        'SELECT access_snapshot_id FROM im_user_group_access_state
+          WHERE organization = 901 AND BINARY user_id = BINARY "user_e"',
+    )[0]['access_snapshot_id'];
+    $auditCount = (int) Db::query(
+        'SELECT COUNT(*) AS aggregate FROM im_group_member_access_audit
+          WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+            AND member_organization = 901 AND BINARY user_id = BINARY "user_e"',
+        [$concurrentConversationId],
+    )[0]['aggregate'];
+    $outboxCount = (int) Db::query(
+        'SELECT COUNT(*) AS aggregate FROM im_message_outbox
+          WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+            AND event_type = "group.member_access_changed" AND payload_json LIKE ?',
+        [$concurrentConversationId, '%"target_user_id":"user_e"%'],
+    )[0]['aggregate'];
+    $assert(
+        array_reduce(
+            $concurrentResults,
+            static fn (bool $ok, array $result): bool => $ok
+                && $result['exit_code'] === 0
+                && ($result['result']['status'] ?? null) === 'ok',
+            true,
+        )
+        && (int) $memberFacts['member_count'] === 1
+        && (string) $memberFacts['access_version'] === '1'
+        && $openPeriods === 1
+        && $snapshot === '2'
+        && $auditCount === 1
+        && $outboxCount === 1,
+        'Concurrent first joins deadlocked, duplicated an open period, or replayed version/audit/outbox facts: '
+            . json_encode($concurrentResults, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
+    );
+
+    $runConcurrentJoinJobs = static function (array $jobs, string $prefix) use (
+        $concurrentWorkerCode,
+        $database,
+        $now,
+    ): array {
+        $barrier = $prefix . '-start';
+        $workers = [];
+        foreach ($jobs as $workerIndex => $job) {
+            $resultPath = $prefix . '-result-' . $workerIndex . '.json';
+            $pipes = [];
+            $process = proc_open(
+                [
+                    PHP_BINARY,
+                    '-r',
+                    $concurrentWorkerCode,
+                    dirname(__DIR__),
+                    $database,
+                    $job['conversation_id'],
+                    $barrier,
+                    $resultPath,
+                    $now,
+                    json_encode($job['member_ids'], JSON_THROW_ON_ERROR),
+                ],
+                [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+                $pipes,
+            );
+            if (!is_resource($process)) {
+                throw new RuntimeException('Unable to start a cross-group join worker.');
+            }
+            $workers[] = [
+                'process' => $process,
+                'pipes' => $pipes,
+                'result_path' => $resultPath,
+            ];
+        }
+        file_put_contents($barrier, 'start');
+        $results = [];
+        foreach ($workers as $worker) {
+            $stdout = stream_get_contents($worker['pipes'][1]);
+            $stderr = stream_get_contents($worker['pipes'][2]);
+            fclose($worker['pipes'][1]);
+            fclose($worker['pipes'][2]);
+            $exitCode = proc_close($worker['process']);
+            $result = is_file($worker['result_path'])
+                ? json_decode((string) file_get_contents($worker['result_path']), true)
+                : null;
+            $results[] = [
+                'exit_code' => $exitCode,
+                'stdout' => $stdout,
+                'stderr' => $stderr,
+                'result' => $result,
+            ];
+            @unlink($worker['result_path']);
+        }
+        @unlink($barrier);
+        return $results;
+    };
+    $allWorkersSucceeded = static fn (array $results): bool => array_reduce(
+        $results,
+        static fn (bool $ok, array $result): bool => $ok
+            && $result['exit_code'] === 0
+            && ($result['result']['status'] ?? null) === 'ok',
+        true,
+    );
+
+    $insertFriend->execute(['user_a', 'user_f', $now, $now, $now]);
+    $insertFriend->execute(['user_f', 'user_a', $now, $now, $now]);
+    $epochGroupLeft = (string) $service->createGroup(
+        $alice,
+        'Epoch Left Group',
+        ['user_b', 'user_c'],
+    )['conversation_id'];
+    $epochGroupRight = (string) $service->createGroup(
+        $alice,
+        'Epoch Right Group',
+        ['user_b', 'user_c'],
+    )['conversation_id'];
+    $pdo->exec(
+        'DELETE FROM im_user_group_access_state
+          WHERE organization = 901 AND BINARY user_id = BINARY "user_f"',
+    );
+    $epochResults = $runConcurrentJoinJobs([
+        ['conversation_id' => $epochGroupLeft, 'member_ids' => ['user_f']],
+        ['conversation_id' => $epochGroupRight, 'member_ids' => ['user_f']],
+    ], sys_get_temp_dir() . '/b8im-group-epoch-' . bin2hex(random_bytes(8)));
+    $epochSnapshot = (string) Db::query(
+        'SELECT access_snapshot_id FROM im_user_group_access_state
+          WHERE organization = 901 AND BINARY user_id = BINARY "user_f"',
+    )[0]['access_snapshot_id'];
+    $epochMemberCount = (int) Db::query(
+        'SELECT COUNT(*) AS aggregate FROM im_conversation_member
+          WHERE organization = 901 AND conversation_id IN (?, ?)
+            AND member_organization = 901 AND BINARY user_id = BINARY "user_f"',
+        [$epochGroupLeft, $epochGroupRight],
+    )[0]['aggregate'];
+    $epochPeriodCount = (int) Db::query(
+        'SELECT COUNT(*) AS aggregate FROM im_conversation_membership_period
+          WHERE organization = 901 AND conversation_id IN (?, ?)
+            AND member_organization = 901 AND BINARY user_id = BINARY "user_f"
+            AND status = 1 AND visible_until_message_seq IS NULL',
+        [$epochGroupLeft, $epochGroupRight],
+    )[0]['aggregate'];
+    $epochAuditCount = (int) Db::query(
+        'SELECT COUNT(*) AS aggregate FROM im_group_member_access_audit
+          WHERE organization = 901 AND conversation_id IN (?, ?)
+            AND member_organization = 901 AND BINARY user_id = BINARY "user_f"',
+        [$epochGroupLeft, $epochGroupRight],
+    )[0]['aggregate'];
+    $assert(
+        $allWorkersSucceeded($epochResults)
+        && $epochSnapshot === '3'
+        && $epochMemberCount === 2
+        && $epochPeriodCount === 2
+        && $epochAuditCount === 2,
+        'Concurrent joins in different groups lost the shared user epoch or membership facts: '
+            . json_encode($epochResults, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
+    );
+
+    foreach (['user_g', 'user_h'] as $targetUserId) {
+        $insertFriend->execute(['user_a', $targetUserId, $now, $now, $now]);
+        $insertFriend->execute([$targetUserId, 'user_a', $now, $now, $now]);
+    }
+    $reverseGroupLeft = (string) $service->createGroup(
+        $alice,
+        'Reverse Lock Left Group',
+        ['user_b', 'user_c'],
+    )['conversation_id'];
+    $reverseGroupRight = (string) $service->createGroup(
+        $alice,
+        'Reverse Lock Right Group',
+        ['user_b', 'user_c'],
+    )['conversation_id'];
+    $pdo->exec(
+        'DELETE FROM im_user_group_access_state
+          WHERE organization = 901 AND BINARY user_id IN (BINARY "user_g", BINARY "user_h")',
+    );
+    $reverseResults = $runConcurrentJoinJobs([
+        ['conversation_id' => $reverseGroupLeft, 'member_ids' => ['user_g', 'user_h']],
+        ['conversation_id' => $reverseGroupRight, 'member_ids' => ['user_h', 'user_g']],
+    ], sys_get_temp_dir() . '/b8im-group-reverse-' . bin2hex(random_bytes(8)));
+    $reverseSnapshots = Db::query(
+        'SELECT user_id, access_snapshot_id FROM im_user_group_access_state
+          WHERE organization = 901 AND BINARY user_id IN (BINARY "user_g", BINARY "user_h")
+       ORDER BY user_id COLLATE utf8mb4_bin ASC',
+    );
+    $reverseMemberCount = (int) Db::query(
+        'SELECT COUNT(*) AS aggregate FROM im_conversation_member
+          WHERE organization = 901 AND conversation_id IN (?, ?)
+            AND member_organization = 901
+            AND BINARY user_id IN (BINARY "user_g", BINARY "user_h")',
+        [$reverseGroupLeft, $reverseGroupRight],
+    )[0]['aggregate'];
+    $reverseOpenCount = (int) Db::query(
+        'SELECT COUNT(*) AS aggregate FROM im_conversation_membership_period
+          WHERE organization = 901 AND conversation_id IN (?, ?)
+            AND member_organization = 901
+            AND BINARY user_id IN (BINARY "user_g", BINARY "user_h")
+            AND status = 1 AND visible_until_message_seq IS NULL',
+        [$reverseGroupLeft, $reverseGroupRight],
+    )[0]['aggregate'];
+    $assert(
+        $allWorkersSucceeded($reverseResults)
+        && array_column($reverseSnapshots, 'user_id') === ['user_g', 'user_h']
+        && array_map(
+            static fn (array $row): string => (string) $row['access_snapshot_id'],
+            $reverseSnapshots,
+        ) === ['3', '3']
+        && $reverseMemberCount === 4
+        && $reverseOpenCount === 4,
+        'Reverse caller target order deadlocked or lost canonical user snapshot increments: '
+            . json_encode($reverseResults, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
+    );
+}
 
 $columns = $pdo->query(
     'SELECT COLUMN_NAME FROM information_schema.COLUMNS

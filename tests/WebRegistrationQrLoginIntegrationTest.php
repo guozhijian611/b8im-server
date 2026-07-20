@@ -20,6 +20,7 @@ use Phinx\Migration\Manager;
 use plugin\saimulti\exception\ApiException;
 use plugin\saimulti\service\WebTokenService;
 use plugin\saimulti\service\web\TenantAccountPolicyService;
+use plugin\saimulti\service\web\ImChallengeTokenService;
 use plugin\saimulti\service\web\ThinkOrmTenantAccountPolicyStore;
 use plugin\saimulti\service\web\ThinkOrmWebImAuthStore;
 use plugin\saimulti\service\web\ThinkOrmWebImPolicyStore;
@@ -90,7 +91,7 @@ $tokens = new WebTokenService(str_repeat('integration-secret-', 4));
 $auth = new WebImAuthService(
     new ThinkOrmWebImAuthStore(),
     $tokens,
-    null,
+    new ImChallengeTokenService(base64_encode(random_bytes(48)), 300),
     static function () use (&$now): int { return $now; },
     null,
     null,

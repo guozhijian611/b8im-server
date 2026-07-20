@@ -433,7 +433,7 @@ final class WebImControlService
         );
     }
 
-    /** @param array<string,mixed> $identity @return array{conversation_id:string,left:bool} */
+    /** @param array<string,mixed> $identity @return array{conversation_id:string,left:bool,access_version:string,access_snapshot_id:string,access_state:string} */
     public function leaveGroup(array $identity, string $conversationId, mixed $expectedVersion): array
     {
         [$organization, $userId] = $this->identity($identity);
@@ -597,15 +597,22 @@ final class WebImControlService
         }
         $allowed = array_fill_keys($memberIds, true);
         $result = [];
+        $seen = [];
         foreach ($value as $userId => $version) {
-            if (!is_string($userId)) {
+            if (!is_string($userId) && !is_int($userId)) {
                 throw new ApiException('expected_access_versions 格式无效。', 422);
             }
-            $userId = $this->identifier($userId, 'member_user_id', 64);
+            $userId = $this->identifier((string) $userId, 'member_user_id', 64);
             if (!isset($allowed[$userId])) {
                 throw new ApiException('expected_access_versions 含非目标成员。', 422);
             }
-            $result[$userId] = $this->positiveDecimal($version, 'expected_access_version');
+            $result[$userId] = $this->nonNegativeDecimal($version, 'expected_access_version');
+            $seen['user:' . $userId] = true;
+        }
+        foreach ($memberIds as $memberId) {
+            if (!isset($seen['user:' . $memberId])) {
+                throw new ApiException('expected_access_versions 缺少目标成员。', 422);
+            }
         }
         ksort($result, SORT_STRING);
         return $result;
@@ -617,6 +624,16 @@ final class WebImControlService
             || preg_match('/^[1-9][0-9]{0,19}$/D', $value) !== 1
             || (strlen($value) === 20 && strcmp($value, '18446744073709551615') > 0)) {
             throw new ApiException($name . ' 必须是正规范正十进制字符串。', 422);
+        }
+        return $value;
+    }
+
+    private function nonNegativeDecimal(mixed $value, string $name): string
+    {
+        if (!is_string($value)
+            || preg_match('/^(0|[1-9][0-9]{0,19})$/D', $value) !== 1
+            || (strlen($value) === 20 && strcmp($value, '18446744073709551615') > 0)) {
+            throw new ApiException($name . ' 必须是正规范非负十进制字符串。', 422);
         }
         return $value;
     }

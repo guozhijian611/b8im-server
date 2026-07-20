@@ -13,6 +13,7 @@ use plugin\saimulti\app\middleware\AppClientRequest;
 use plugin\saimulti\app\middleware\CheckWebLogin;
 use plugin\saimulti\exception\ApiException;
 use plugin\saimulti\service\WebTokenService;
+use plugin\saimulti\service\web\GroupMemberAccessService;
 use plugin\saimulti\service\web\WebImControlService;
 use Webman\Route;
 
@@ -125,6 +126,31 @@ $expectApiCode(422, static fn () => $optionalIdentifierMethod->invoke(
     'conversation_id',
     64,
 ));
+$expectedVersionMapMethod = $controlReflection->getMethod('expectedVersionMap');
+$numericExpectedVersions = $expectedVersionMapMethod->invoke(
+    $controlWithoutDependencies,
+    [123 => '0'],
+    ['123'],
+);
+$assert(
+    ($numericExpectedVersions['123'] ?? null) === '0',
+    'Numeric user IDs were lost from expected_access_versions.',
+);
+$groupAccessReflection = new ReflectionClass(GroupMemberAccessService::class);
+$canonicalUserIdsMethod = $groupAccessReflection->getMethod('canonicalUserIds');
+$numericUserIds = $canonicalUserIdsMethod->invoke(
+    $groupAccessReflection->newInstanceWithoutConstructor(),
+    ['20', '3', '20'],
+);
+$assert(
+    $numericUserIds === ['20', '3']
+    && array_reduce(
+        $numericUserIds,
+        static fn (bool $carry, mixed $id): bool => $carry && is_string($id),
+        true,
+    ),
+    'Numeric user IDs changed type during canonical byte ordering.',
+);
 
 $tokens = new WebTokenService(str_repeat('app-contact-route-secret-', 2), 'HS256');
 $user = ['id' => 9, 'user_id' => 'app_user_9', 'account' => 'alice'];

@@ -96,6 +96,14 @@ CREATE TABLE sm_system_config (
   update_time datetime NULL,
   delete_time datetime NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE im_runtime_config (
+  config_key varchar(64) NOT NULL PRIMARY KEY,
+  config_value varchar(255) NOT NULL,
+  create_time datetime NOT NULL,
+  update_time datetime NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+INSERT INTO im_runtime_config (config_key, config_value, create_time, update_time)
+VALUES ('message_shard_buckets', '1', '2026-07-20 00:00:00', '2026-07-20 00:00:00');
 CREATE TABLE im_user (
   id bigint unsigned NOT NULL AUTO_INCREMENT PRIMARY KEY,
   organization int unsigned NOT NULL,
@@ -223,11 +231,14 @@ CREATE TABLE im_conversation_member (
   conversation_remark varchar(100) NULL,
   message_group_id bigint unsigned NOT NULL DEFAULT 0,
   access_version bigint unsigned NOT NULL DEFAULT 1,
+  access_state varchar(16) NOT NULL DEFAULT 'active',
   join_at datetime NULL,
   create_time datetime NULL,
   update_time datetime NULL,
   delete_time datetime NULL,
-  UNIQUE KEY uni_org_member (organization, conversation_id, member_organization, user_id)
+  UNIQUE KEY uni_org_member (organization, conversation_id, member_organization, user_id),
+  CONSTRAINT chk_member_access_state
+    CHECK (access_state IN ('active', 'history_only', 'revoked'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE TABLE im_conversation_membership_period (
   id bigint unsigned NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -276,7 +287,7 @@ CREATE TABLE im_message_index (
   create_time datetime NULL,
   UNIQUE KEY uni_org_msg (organization, message_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-CREATE TABLE im_message_2026_000001 (
+CREATE TABLE im_message_0000_202607 (
   id bigint unsigned NOT NULL AUTO_INCREMENT PRIMARY KEY,
   organization int unsigned NOT NULL,
   conversation_id varchar(64) NOT NULL,
@@ -358,7 +369,7 @@ CREATE TABLE im_message_outbox (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 SQL);
 
-$now = date('Y-m-d H:i:s');
+$now = '2026-07-20 12:00:00';
 $pdo->exec("INSERT INTO sm_system_organization
     (id, organization_name, title, enterprise_code, deployment_id, status, update_time)
  VALUES
@@ -1138,7 +1149,7 @@ foreach ([1, 2] as $homeOrg) {
 // Both homes carry the same logical message and home-specific global_seq.
 foreach ([1 => 11, 2 => 21] as $homeOrg => $globalSeq) {
     $pdo->prepare(
-        'INSERT INTO im_message_2026_000001
+        'INSERT INTO im_message_0000_202607
             (organization, conversation_id, conversation_type, message_id, message_seq, client_msg_id,
              sender_id, sender_organization, message_type, content, status, create_time, update_time)
          VALUES (?, ?, 1, ?, 1, ?, "u1", 1, 1, ?, 1, ?, ?)',
@@ -1155,7 +1166,7 @@ foreach ([1 => 11, 2 => 21] as $homeOrg => $globalSeq) {
         'INSERT INTO im_message_index
             (organization, global_seq, message_id, conversation_id, message_seq, sender_id,
              sender_organization, client_msg_id, storage_node, shard_table, create_time)
-         VALUES (?, ?, ?, ?, 1, "u1", 1, ?, "mysql-primary", "im_message_2026_000001", ?)',
+         VALUES (?, ?, ?, ?, 1, "u1", 1, ?, "mysql-primary", "im_message_0000_202607", ?)',
     )->execute([$homeOrg, $globalSeq, $messageId, $crossConversationId, $clientMsgId, $now]);
 }
 

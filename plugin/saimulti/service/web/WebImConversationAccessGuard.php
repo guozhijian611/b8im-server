@@ -18,6 +18,7 @@ final class WebImConversationAccessGuard
 {
     private const CONVERSATION_SINGLE = 1;
     private const CONVERSATION_GROUP = 2;
+    private const UNSIGNED_BIGINT_MAX = '18446744073709551615';
 
     /**
      * @return array{
@@ -111,6 +112,9 @@ final class WebImConversationAccessGuard
                 $userId,
                 $members,
             );
+            if (!$this->isPositiveDecimal((string) ($member['access_version'] ?? ''))) {
+                throw new \RuntimeException('Group member access version is invalid.');
+            }
             if ((string) ($member['access_state'] ?? '') !== 'active') {
                 throw new ApiException('没有该会话的访问权限。', 403);
             }
@@ -123,14 +127,18 @@ final class WebImConversationAccessGuard
                 throw new \RuntimeException('Group conversation contains a foreign member.');
             }
             $periods = Db::query(
-                'SELECT period_no, visible_from_message_seq, visible_until_message_seq
+                'SELECT period_no, visible_from_message_seq, visible_until_message_seq, status
                    FROM im_conversation_membership_period
                   WHERE organization = ? AND BINARY conversation_id = BINARY ? AND member_organization = ?
-                    AND BINARY user_id = BINARY ? AND status = 1
+                    AND BINARY user_id = BINARY ?
                ORDER BY period_no ASC' . ($lock ? ' FOR UPDATE' : ''),
                 [$organization, $conversationId, $organization, $userId],
             );
-            $normalizedPeriods = $this->validateEffectivePeriods($periods, true);
+            $normalizedPeriods = $this->validateEffectivePeriods(
+                $periods,
+                true,
+                (string) ($conversation['last_message_seq'] ?? ''),
+            );
 
             return [
                 'conversation_type' => self::CONVERSATION_GROUP,
@@ -221,20 +229,25 @@ final class WebImConversationAccessGuard
             throw new ApiException('没有该会话的访问权限。', 403);
         }
         $periods = Db::query(
-            'SELECT period_no, visible_from_message_seq, visible_until_message_seq
+            'SELECT period_no, visible_from_message_seq, visible_until_message_seq, status
                FROM im_conversation_membership_period
               WHERE organization = ? AND BINARY conversation_id = BINARY ? AND member_organization = ?
-                AND BINARY user_id = BINARY ? AND status = 1
+                AND BINARY user_id = BINARY ?
            ORDER BY period_no ASC' . ($lock ? ' FOR UPDATE' : ''),
             [$organization, $conversationId, $organization, $userId],
         );
         $active = (string) $viewer['access_state'] === 'active';
         $membershipStatus = (int) $viewer['status'];
-        if (($active && $membershipStatus !== 1)
+        if (!$this->isPositiveDecimal((string) ($viewer['access_version'] ?? ''))
+            || ($active && $membershipStatus !== 1)
             || (!$active && !in_array($membershipStatus, [2, 3], true))) {
             throw new \RuntimeException('Group member access state and periods are inconsistent.');
         }
-        $normalizedPeriods = $this->validateEffectivePeriods($periods, $active);
+        $normalizedPeriods = $this->validateEffectivePeriods(
+            $periods,
+            $active,
+            (string) ($conversation['last_message_seq'] ?? ''),
+        );
         return [
             'conversation_type' => self::CONVERSATION_GROUP,
             'is_cross_organization' => false,
@@ -251,8 +264,15 @@ final class WebImConversationAccessGuard
      * @param list<array<string,mixed>> $periods
      * @return list<array{period_no:string,from_seq:string,to_seq:?string}>
      */
-    private function validateEffectivePeriods(array $periods, bool $active): array
+    private function validateEffectivePeriods(
+        array $periods,
+        bool $active,
+        string $lastMessageSeq,
+    ): array
     {
+        if (!$this->isNonNegativeDecimal($lastMessageSeq)) {
+            throw new \RuntimeException('Group conversation message watermark is invalid.');
+        }
         $normalized = [];
         $periodNumbers = [];
         $openCount = 0;
@@ -262,7 +282,9 @@ final class WebImConversationAccessGuard
             $from = (string) ($period['visible_from_message_seq'] ?? '');
             $untilValue = $period['visible_until_message_seq'] ?? null;
             $until = $untilValue === null ? null : (string) $untilValue;
+            $status = (int) ($period['status'] ?? 0);
             if (!$this->isPositiveDecimal($periodNo) || !$this->isPositiveDecimal($from)
+                || !in_array($status, [1, 2], true)
                 || ($until !== null && (!$this->isPositiveDecimal($until)
                     || $this->compareDecimals($until, $from) < 0))) {
                 throw new \RuntimeException('Group membership period scalar is invalid.');
@@ -271,10 +293,21 @@ final class WebImConversationAccessGuard
                 throw new \RuntimeException('Group membership period number is duplicated.');
             }
             $periodNumbers[$periodNo] = true;
+            if ($status !== 1) {
+                continue;
+            }
             if ($until === null) {
                 ++$openCount;
             } else {
                 ++$closedCount;
+            }
+            if (($until !== null && $this->compareDecimals($until, $lastMessageSeq) > 0)
+                || ($until === null
+                    && $this->compareDecimals(
+                        $from,
+                        $this->maximumOpenPeriodStart($lastMessageSeq),
+                    ) > 0)) {
+                throw new \RuntimeException('Group membership period exceeds the conversation watermark.');
             }
             $normalized[] = [
                 'period_no' => $periodNo,
@@ -282,18 +315,16 @@ final class WebImConversationAccessGuard
                 'to_seq' => $until,
             ];
         }
-        for ($leftIndex = 0, $count = count($normalized); $leftIndex < $count; ++$leftIndex) {
-            for ($rightIndex = $leftIndex + 1; $rightIndex < $count; ++$rightIndex) {
-                $left = $normalized[$leftIndex];
-                $right = $normalized[$rightIndex];
-                $leftStartsBeforeRightEnds = $right['to_seq'] === null
-                    || $this->compareDecimals($left['from_seq'], $right['to_seq']) <= 0;
-                $rightStartsBeforeLeftEnds = $left['to_seq'] === null
-                    || $this->compareDecimals($right['from_seq'], $left['to_seq']) <= 0;
-                if ($leftStartsBeforeRightEnds && $rightStartsBeforeLeftEnds) {
-                    throw new \RuntimeException('Group membership periods overlap.');
-                }
+        $previous = null;
+        foreach ($normalized as $period) {
+            if ($previous !== null
+                && ($previous['to_seq'] === null
+                    || $this->compareDecimals($period['from_seq'], $previous['to_seq']) <= 0)) {
+                throw new \RuntimeException(
+                    'Group membership periods overlap or are reverse ordered.',
+                );
             }
+            $previous = $period;
         }
         if (($active && $openCount !== 1)
             || (!$active && ($openCount !== 0 || $closedCount < 1))) {
@@ -304,7 +335,32 @@ final class WebImConversationAccessGuard
 
     private function isPositiveDecimal(string $value): bool
     {
-        return preg_match('/^[1-9][0-9]*$/D', $value) === 1;
+        return preg_match('/^[1-9][0-9]{0,19}$/D', $value) === 1
+            && (strlen($value) < 20 || strcmp($value, self::UNSIGNED_BIGINT_MAX) <= 0);
+    }
+
+    private function isNonNegativeDecimal(string $value): bool
+    {
+        return preg_match('/^(?:0|[1-9][0-9]{0,19})$/D', $value) === 1
+            && (strlen($value) < 20 || strcmp($value, self::UNSIGNED_BIGINT_MAX) <= 0);
+    }
+
+    private function maximumOpenPeriodStart(string $lastMessageSeq): string
+    {
+        if ($lastMessageSeq === self::UNSIGNED_BIGINT_MAX) {
+            return self::UNSIGNED_BIGINT_MAX;
+        }
+        $digits = str_split($lastMessageSeq);
+        $carry = 1;
+        for ($index = count($digits) - 1; $index >= 0 && $carry === 1; --$index) {
+            $next = ((int) $digits[$index]) + $carry;
+            $digits[$index] = (string) ($next % 10);
+            $carry = intdiv($next, 10);
+        }
+        if ($carry === 1) {
+            array_unshift($digits, '1');
+        }
+        return implode('', $digits);
     }
 
     private function compareDecimals(string $left, string $right): int

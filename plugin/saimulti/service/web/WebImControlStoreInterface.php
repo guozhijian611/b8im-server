@@ -88,7 +88,7 @@ interface WebImControlStoreInterface
     /** @return list<array<string, mixed>> */
     public function groupMembers(int $organization, string $userId, string $conversationId): array;
 
-    /** @param list<string> $memberIds @param array<string,string> $expectedVersions @return list<array<string, mixed>> */
+    /** @param list<string> $memberIds @param array<string,string> $expectedVersions Every target is required; "0" means absent. @return list<array<string, mixed>> */
     public function addGroupMembers(
         int $organization,
         string $operatorUserId,
@@ -140,7 +140,7 @@ interface WebImControlStoreInterface
         string $now,
     ): array;
 
-    /** @return array{conversation_id:string,left:bool} */
+    /** @return array{conversation_id:string,left:bool,access_version:string,access_snapshot_id:string,access_state:string} */
     public function leaveGroup(
         int $organization,
         string $userId,

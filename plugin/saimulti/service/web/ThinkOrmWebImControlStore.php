@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace plugin\saimulti\service\web;
 
+use B8im\ImShared\Protocol\MessageType;
 use plugin\saimulti\exception\ApiException;
 use OpenTelemetry\API\Trace\Span;
 use plugin\saimulti\service\trace\Telemetry;
@@ -13,6 +14,8 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
 {
     private const CONVERSATION_SINGLE = 1;
     private const CONVERSATION_GROUP = 2;
+
+    private ?MessageShardRouteValidator $messageShardRoutes = null;
 
     public function conversations(int $organization, string $userId): array
     {
@@ -66,12 +69,14 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 continue;
             }
             try {
-                $items[] = $this->formatConversation($organization, $userId, $row);
+                $items[] = Db::transaction(
+                    fn (): array => $this->formatConversation($organization, $userId, $row, true),
+                );
             } catch (ApiException $exception) {
-                // A peer organization becoming inactive revokes only that
-                // cross-organization projection; unrelated conversations stay
-                // listable. Structural corruption still throws below.
-                if (!$crossOrganization || $exception->getCode() !== 403) {
+                // Concurrent access revocation removes only this projection;
+                // unrelated conversations remain listable. Structural
+                // corruption still throws below.
+                if ($exception->getCode() !== 403) {
                     throw $exception;
                 }
             }
@@ -274,6 +279,28 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         int $beforeSeq,
         int $limit,
     ): array {
+        return Db::transaction(fn (): array => $this->messagesLocked(
+            $organization,
+            $userId,
+            $conversationId,
+            $peerOrganization,
+            $peerUserId,
+            $afterSeq,
+            $beforeSeq,
+            $limit,
+        ));
+    }
+
+    private function messagesLocked(
+        int $organization,
+        string $userId,
+        string $conversationId,
+        int $peerOrganization,
+        string $peerUserId,
+        int $afterSeq,
+        int $beforeSeq,
+        int $limit,
+    ): array {
         if ($conversationId === '' && $peerUserId !== '') {
             if ($peerOrganization !== $organization && !CrossOrganizationSocialPolicy::isEnabled()) {
                 throw new ApiException('跨租户单聊未开放。', 403);
@@ -294,7 +321,12 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         if ($conversationId === '') {
             return $this->emptyMessagePage($afterSeq, $beforeSeq);
         }
-        $access = (new WebImConversationAccessGuard())->assertReadable($organization, $userId, $conversationId);
+        $access = (new WebImConversationAccessGuard())->assertReadable(
+            $organization,
+            $userId,
+            $conversationId,
+            true,
+        );
         $includeSenderUser = (bool) ($access['is_active'] ?? true);
         $this->assertMembershipPeriod($organization, $conversationId, $userId);
 
@@ -303,8 +335,9 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         $cursor = $newer ? $afterSeq : ($beforeSeq > 0 ? $beforeSeq : 0);
         $direction = $newer ? 'ASC' : 'DESC';
         $candidates = Db::query(
-            'SELECT i.global_seq, i.message_id, i.message_seq, i.shard_table,
-                    i.sender_id, i.sender_organization
+            'SELECT i.organization, i.conversation_id, i.global_seq, i.message_id,
+                    i.message_seq, i.shard_table, i.client_msg_id, i.storage_node,
+                    i.sender_id, i.sender_organization, i.create_time AS index_create_time
                FROM im_message_index i
               WHERE i.organization = ?
                 AND BINARY i.conversation_id = BINARY ?
@@ -340,6 +373,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             $page,
             $userId,
             $includeSenderUser,
+            (int) $access['conversation_type'],
         );
         usort($messages, static fn (array $left, array $right): int =>
             (int) $left['message_seq'] <=> (int) $right['message_seq']);
@@ -1081,18 +1115,21 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
 
     public function groupMembers(int $organization, string $userId, string $conversationId): array
     {
-        $viewer = $this->assertGroupRole(
-            $organization,
-            $conversationId,
-            $userId,
-            ['owner', 'admin', 'member'],
-        );
+        return Db::transaction(function () use ($organization, $userId, $conversationId): array {
+            $viewer = $this->assertGroupRole(
+                $organization,
+                $conversationId,
+                $userId,
+                ['owner', 'admin', 'member'],
+                true,
+            );
 
-        return $this->groupMemberRows(
-            $organization,
-            $conversationId,
-            in_array((string) $viewer['member_role'], ['owner', 'admin'], true),
-        );
+            return $this->groupMemberRows(
+                $organization,
+                $conversationId,
+                in_array((string) $viewer['member_role'], ['owner', 'admin'], true),
+            );
+        });
     }
 
     public function addGroupMembers(
@@ -1360,8 +1397,14 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
 
     public function leaveGroup(int $organization, string $userId, string $conversationId, string $expectedVersion, string $now): array
     {
-        (new GroupMemberAccessService())->leave($organization, $userId, $conversationId, $expectedVersion, $now);
-        return ['conversation_id' => $conversationId, 'left' => true];
+        $access = (new GroupMemberAccessService())->leave(
+            $organization,
+            $userId,
+            $conversationId,
+            $expectedVersion,
+            $now,
+        );
+        return array_merge(['conversation_id' => $conversationId, 'left' => true], $access);
     }
 
     public function suspendGroupMember(int $organization, string $operatorUserId, string $conversationId, string $memberUserId, string $expectedVersion, string $now): array
@@ -1510,11 +1553,35 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         int $messageType,
         int $limit,
     ): array {
-        $access = (new WebImConversationAccessGuard())->assertReadable($organization, $userId, $conversationId);
+        return Db::transaction(fn (): array => $this->searchMessagesLocked(
+            $organization,
+            $userId,
+            $conversationId,
+            $keyword,
+            $messageType,
+            $limit,
+        ));
+    }
+
+    private function searchMessagesLocked(
+        int $organization,
+        string $userId,
+        string $conversationId,
+        string $keyword,
+        int $messageType,
+        int $limit,
+    ): array {
+        $access = (new WebImConversationAccessGuard())->assertReadable(
+            $organization,
+            $userId,
+            $conversationId,
+            true,
+        );
         $includeSenderUser = (bool) ($access['is_active'] ?? true);
         $this->assertMembershipPeriod($organization, $conversationId, $userId);
         $shards = Db::query(
-            'SELECT DISTINCT i.shard_table
+            'SELECT i.organization, i.conversation_id, i.shard_table, i.storage_node,
+                    CONCAT(DATE_FORMAT(i.create_time, "%Y-%m"), "-01 00:00:00") AS index_create_time
                FROM im_message_index i
               WHERE i.organization = ?
                 AND BINARY i.conversation_id = BINARY ?
@@ -1527,18 +1594,25 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                        AND mp.status = 1
                        AND i.message_seq >= mp.visible_from_message_seq
                        AND (mp.visible_until_message_seq IS NULL OR i.message_seq <= mp.visible_until_message_seq)
-                )',
+                )
+           GROUP BY i.organization, i.conversation_id, i.shard_table, i.storage_node,
+                    index_create_time',
             [$organization, $conversationId, $organization, $userId],
         );
 
         $messages = [];
         foreach ($shards as $shard) {
-            $shardTable = (string) $shard['shard_table'];
+            $shardTable = $this->messageShardRoutes()->assertIndexRoute(
+                $shard,
+                $organization,
+                $conversationId,
+            );
             $table = $this->quoteShard($shardTable);
             $params = [
                 $shardTable,
                 $organization,
                 $conversationId,
+                (int) $access['conversation_type'],
                 $organization,
                 $userId,
                 $organization,
@@ -1551,11 +1625,19 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                        AND BINARY i.message_id = BINARY m.message_id
                        AND BINARY i.conversation_id = BINARY m.conversation_id
                        AND i.message_seq = m.message_seq
+                       AND BINARY i.client_msg_id = BINARY m.client_msg_id
+                       AND i.create_time = m.create_time
                        AND i.sender_organization = m.sender_organization
                        AND BINARY i.sender_id = BINARY m.sender_id
                        AND BINARY i.shard_table = BINARY ?
+                       AND BINARY i.storage_node = BINARY "mysql-primary"
+                       AND BINARY i.client_msg_id <> BINARY ""
+                       AND BINARY i.sender_id <> BINARY ""
+                       AND i.sender_organization > 0
                      WHERE m.organization = ?
                        AND BINARY m.conversation_id = BINARY ?
+                       AND m.conversation_type = ?
+                       AND m.message_type IN (1, 2, 3, 4, 5, 11)
                        AND m.status = 1
                        AND m.delete_time IS NULL
                        AND EXISTS (
@@ -1628,16 +1710,11 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         }
         $messageSeq = max((int) $conversation['next_message_seq'], 1);
         $globalSeq = max((int) $sequence['next_global_seq'], 1);
-        $runtime = Db::query(
-            'SELECT config_value FROM im_runtime_config
-              WHERE config_key = "message_shard_buckets" LIMIT 1',
-        )[0] ?? null;
-        $buckets = (int) ($runtime['config_value'] ?? 0);
-        if ($buckets < 1 || $buckets > 1024) {
-            throw new \RuntimeException('IM message_shard_buckets runtime config is invalid.');
-        }
-        $bucket = abs(crc32($organization . ':' . $conversationId)) % $buckets;
-        $shardTable = sprintf('im_message_%04d_%s', $bucket, date('Ym', strtotime($now) ?: time()));
+        $shardTable = $this->messageShardRoutes()->expectedTable(
+            $organization,
+            $conversationId,
+            $now,
+        );
         $this->quoteShard($shardTable);
         $exists = Db::query(
             'SELECT TABLE_NAME FROM information_schema.TABLES
@@ -2322,13 +2399,19 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
     }
 
     /** @param array<string, mixed> $row @return array<string, mixed> */
-    private function formatConversation(int $organization, string $userId, array $row): array
+    private function formatConversation(
+        int $organization,
+        string $userId,
+        array $row,
+        bool $lockAccess = false,
+    ): array
     {
         $type = (int) $row['conversation_type'];
         $access = (new WebImConversationAccessGuard())->assertReadable(
             $organization,
             $userId,
             (string) $row['conversation_id'],
+            $lockAccess,
         );
         if ($access['conversation_type'] !== $type) {
             throw new \RuntimeException('Conversation projection type does not match persisted topology.');
@@ -2401,6 +2484,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             $userId,
             (string) $row['conversation_id'],
             (string) ($row['create_time'] ?? ''),
+            $type,
         );
 
         return [
@@ -2431,10 +2515,10 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             'message_group_id' => $activeAccess ? (int) ($row['message_group_id'] ?? 0) : 0,
             'message_group_name' => $activeAccess ? (string) ($row['message_group_name'] ?? '') : '',
             'access_version' => $type === self::CONVERSATION_GROUP
-                ? (string) ($row['access_version'] ?? $access['member']['access_version'] ?? '')
+                ? (string) ($access['member']['access_version'] ?? '')
                 : null,
             'access_state' => $type === self::CONVERSATION_GROUP
-                ? (string) ($row['access_state'] ?? $access['member']['access_state'] ?? '')
+                ? (string) ($access['member']['access_state'] ?? '')
                 : null,
             'periods' => $type === self::CONVERSATION_GROUP ? ($access['periods'] ?? []) : [],
         ];
@@ -2446,10 +2530,12 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         string $userId,
         string $conversationId,
         string $conversationCreatedAt,
+        int $conversationType,
     ): array {
         $candidates = Db::query(
-            'SELECT i.id, i.message_id, i.message_seq, i.shard_table,
-                    i.sender_id, i.sender_organization
+            'SELECT i.id, i.organization, i.conversation_id, i.message_id,
+                    i.message_seq, i.shard_table, i.client_msg_id, i.storage_node,
+                    i.sender_id, i.sender_organization, i.create_time AS index_create_time
                FROM im_message_index i
               WHERE i.organization = ?
                 AND BINARY i.conversation_id = BINARY ?
@@ -2476,8 +2562,13 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             [$organization, $conversationId, $organization, $userId, $organization, $userId],
         );
         foreach ($candidates as $candidate) {
+            $expectedShardTable = $this->messageShardRoutes()->assertIndexRoute(
+                $candidate,
+                $organization,
+                $conversationId,
+            );
             $message = Db::query(
-                'SELECT * FROM ' . $this->quoteShard((string) $candidate['shard_table']) . '
+                'SELECT * FROM ' . $this->quoteShard($expectedShardTable) . '
                   WHERE organization = ? AND BINARY conversation_id = BINARY ?
                     AND BINARY message_id = BINARY ? LIMIT 1',
                 [$organization, $conversationId, (string) $candidate['message_id']],
@@ -2485,7 +2576,13 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             if ($message === null) {
                 throw new \RuntimeException('IM message index points to a missing shard body.');
             }
-            $this->assertIndexedMessageBinding($candidate, $message, $conversationId);
+            $this->assertIndexedMessageBinding(
+                $candidate,
+                $message,
+                $conversationId,
+                $conversationType,
+                $expectedShardTable,
+            );
             if (($message['delete_time'] ?? null) !== null || (int) ($message['status'] ?? 0) === 3) {
                 continue;
             }
@@ -2683,18 +2780,24 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         array $candidates,
         string $viewerUserId,
         bool $includeSenderUser,
+        int $conversationType,
     ): array {
         if ($candidates === []) {
             return [];
         }
         $byTable = [];
         foreach ($candidates as $candidate) {
-            $table = (string) $candidate['shard_table'];
+            $table = $this->messageShardRoutes()->assertIndexRoute(
+                $candidate,
+                $organization,
+                $conversationId,
+            );
             $this->quoteShard($table);
             $byTable[$table][] = (string) $candidate['message_id'];
         }
 
         $bodies = [];
+        $bodyTables = [];
         foreach ($byTable as $table => $messageIds) {
             $placeholders = implode(',', array_fill(0, count($messageIds), '?'));
             $rows = Db::query(
@@ -2706,6 +2809,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             );
             foreach ($rows as $row) {
                 $bodies[(string) $row['message_id']] = $row;
+                $bodyTables[(string) $row['message_id']] = $table;
             }
         }
 
@@ -2716,7 +2820,13 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 throw new \RuntimeException('IM message index points to a missing shard body.');
             }
             $body = $bodies[$messageId];
-            $this->assertIndexedMessageBinding($candidate, $body, $conversationId);
+            $this->assertIndexedMessageBinding(
+                $candidate,
+                $body,
+                $conversationId,
+                $conversationType,
+                (string) ($bodyTables[$messageId] ?? ''),
+            );
             if (($body['delete_time'] ?? null) !== null || (int) ($body['status'] ?? 0) === 3) {
                 continue;
             }
@@ -2753,10 +2863,31 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         array $index,
         array $body,
         string $conversationId,
+        int $conversationType,
+        string $actualShardTable,
     ): void {
-        if (!hash_equals($conversationId, (string) ($body['conversation_id'] ?? ''))
+        $expectedShardTable = $this->messageShardRoutes()->assertIndexRoute(
+            $index,
+            (int) ($index['organization'] ?? 0),
+            $conversationId,
+        );
+        $clientMessageId = (string) ($index['client_msg_id'] ?? '');
+        if ($actualShardTable === ''
+            || !hash_equals($expectedShardTable, $actualShardTable)
+            || $clientMessageId === ''
+            || (int) ($body['organization'] ?? 0) !== (int) ($index['organization'] ?? 0)
+            || !hash_equals($conversationId, (string) ($body['conversation_id'] ?? ''))
             || !hash_equals((string) ($index['message_id'] ?? ''), (string) ($body['message_id'] ?? ''))
             || (string) ($index['message_seq'] ?? '') !== (string) ($body['message_seq'] ?? '')
+            || !hash_equals($clientMessageId, (string) ($body['client_msg_id'] ?? ''))
+            || !hash_equals(
+                (string) ($index['index_create_time'] ?? ''),
+                (string) ($body['create_time'] ?? ''),
+            )
+            || (int) ($body['conversation_type'] ?? 0) !== $conversationType
+            || !MessageType::isFirstStage((int) ($body['message_type'] ?? 0))
+            || (string) ($index['sender_id'] ?? '') === ''
+            || (int) ($index['sender_organization'] ?? 0) <= 0
             || (int) ($index['sender_organization'] ?? 0) !== (int) ($body['sender_organization'] ?? 0)
             || !hash_equals((string) ($index['sender_id'] ?? ''), (string) ($body['sender_id'] ?? ''))) {
             throw new \RuntimeException('IM message index and shard body binding is inconsistent.');
@@ -2774,9 +2905,13 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         }
         $placeholders = implode(',', array_fill(0, count($messageIds), '?'));
         $rows = Db::query(
-            'SELECT recipient.message_id, MIN(recipient.max_status) AS delivery_status
+            'SELECT recipient.message_id_bytes AS message_id,
+                    MIN(recipient.max_status) AS delivery_status
                FROM (
-                    SELECT r.message_id, r.user_id, MAX(r.status) AS max_status
+                    SELECT BINARY r.message_id AS message_id_bytes,
+                           r.user_organization,
+                           BINARY r.user_id AS user_id_bytes,
+                           MAX(r.status) AS max_status
                       FROM im_message_receipt r
                      WHERE r.organization = ?
                        AND BINARY r.message_id IN (' . $placeholders . ')
@@ -2784,9 +2919,9 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                            r.user_organization <> ?
                            OR BINARY r.user_id <> BINARY ?
                        )
-                  GROUP BY r.message_id, r.user_organization, r.user_id
+                  GROUP BY message_id_bytes, r.user_organization, user_id_bytes
                ) recipient
-           GROUP BY recipient.message_id',
+           GROUP BY recipient.message_id_bytes',
             array_merge([$organization], $messageIds, [$organization, $senderUserId]),
         );
 
@@ -3398,6 +3533,11 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         }
 
         return $organization;
+    }
+
+    private function messageShardRoutes(): MessageShardRouteValidator
+    {
+        return $this->messageShardRoutes ??= new MessageShardRouteValidator();
     }
 
     private function quoteShard(string $table): string

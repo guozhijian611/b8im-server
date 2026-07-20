@@ -16,6 +16,8 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
         'video' => 11,
     ];
 
+    private ?MessageShardRouteValidator $messageShardRoutes = null;
+
     public function accessibleAsset(
         int $organization,
         string $userId,
@@ -165,17 +167,19 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
         }
         $guard = new WebImConversationAccessGuard();
         if ($requireActive) {
-            $guard->assertAccessible($organization, $userId, $conversationId, true);
+            $access = $guard->assertAccessible($organization, $userId, $conversationId, true);
         } else {
-            $guard->assertReadable($organization, $userId, $conversationId, true);
+            $access = $guard->assertReadable($organization, $userId, $conversationId, true);
         }
         $membershipClause = $requireActive
             ? 'cm.status = 1 AND (c.conversation_type <> 2 OR cm.access_state = "active")'
             : '((c.conversation_type = 2 AND cm.access_state IN ("active", "history_only"))
                 OR (c.conversation_type <> 2 AND cm.status = 1))';
         $source = Db::query(
-            'SELECT i.conversation_id, i.message_id, i.message_seq, i.shard_table,
-                    i.sender_id, i.sender_organization
+            'SELECT i.organization, i.conversation_id, i.message_id, i.message_seq, i.shard_table,
+                    i.client_msg_id, i.storage_node, i.sender_id, i.sender_organization,
+                    i.create_time AS index_create_time,
+                    c.conversation_type AS authoritative_conversation_type
                FROM im_message_index i
          INNER JOIN im_conversation c
                  ON c.organization = i.organization
@@ -230,10 +234,17 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
             throw new ApiException('原附件消息不存在或不可见。', 404);
         }
 
+        $expectedShardTable = $this->messageShardRoutes()->assertIndexRoute(
+            $source,
+            $organization,
+            $conversationId,
+        );
+
         $message = Db::query(
-            'SELECT conversation_id, message_id, message_seq, sender_id, sender_organization,
-                    message_type, content, status, delete_time
-               FROM ' . $this->quoteShard((string) $source['shard_table']) . '
+            'SELECT organization, conversation_id, conversation_type, message_id, message_seq,
+                    client_msg_id, sender_id, sender_organization, message_type, content,
+                    status, create_time, delete_time
+               FROM ' . $this->quoteShard($expectedShardTable) . '
               WHERE organization = ? AND BINARY conversation_id = BINARY ?
                 AND BINARY message_id = BINARY ?
               LIMIT 1
@@ -249,11 +260,23 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
             throw new ApiException('原附件消息不存在或不可见。', 404);
         }
         $sourceOrganization = (int) ($source['sender_organization'] ?? 0);
+        $clientMessageId = (string) ($source['client_msg_id'] ?? '');
         if (
             $sourceOrganization <= 0
+            || $clientMessageId === ''
+            || (int) ($message['organization'] ?? 0) !== $organization
             || !hash_equals((string) $source['conversation_id'], (string) $message['conversation_id'])
             || !hash_equals((string) $source['message_id'], (string) $message['message_id'])
             || (string) $source['message_seq'] !== (string) $message['message_seq']
+            || !hash_equals($clientMessageId, (string) ($message['client_msg_id'] ?? ''))
+            || !hash_equals(
+                (string) ($source['index_create_time'] ?? ''),
+                (string) ($message['create_time'] ?? ''),
+            )
+            || (int) ($source['authoritative_conversation_type'] ?? 0)
+                !== (int) ($access['conversation_type'] ?? 0)
+            || (int) ($message['conversation_type'] ?? 0)
+                !== (int) ($access['conversation_type'] ?? 0)
             || (int) ($message['sender_organization'] ?? 0) !== $sourceOrganization
             || !hash_equals((string) $source['sender_id'], (string) $message['sender_id'])
         ) {
@@ -319,6 +342,11 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
             'mime_type' => (string) $asset['mime_type'],
             'extension' => (string) $asset['extension'],
         ];
+    }
+
+    private function messageShardRoutes(): MessageShardRouteValidator
+    {
+        return $this->messageShardRoutes ??= new MessageShardRouteValidator();
     }
 
     private function quoteShard(string $table): string
