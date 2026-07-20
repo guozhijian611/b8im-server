@@ -701,7 +701,7 @@ $assert(
     'markRead did not return the explicit reader identity.',
 );
 $sameOrgReadOutbox = Db::query(
-    'SELECT payload_json FROM im_message_outbox
+    'SELECT event_id, payload_json FROM im_message_outbox
       WHERE organization = 901 AND conversation_id = ?
         AND event_type = "conversation.read" LIMIT 1',
     [$conversationId],
@@ -712,9 +712,39 @@ $sameOrgReadPayload = json_decode(
     512,
     JSON_THROW_ON_ERROR,
 );
+$expectedSameOrgReadEventId = hash('sha256', implode('|', [
+    901,
+    'conversation.read',
+    $conversationId,
+    901,
+    'user_c',
+    3,
+]));
+$expectedSameOrgReadClientId = 'web-http-read-' . substr(hash(
+    'sha256',
+    '901|user_c|' . $conversationId . '|3',
+), 0, 32);
 $assert(
-    !array_key_exists('cross_org_access_snapshot_id', $sameOrgReadPayload),
-    'same-organization conversation.read must not carry a cross-org epoch',
+    ($sameOrgReadOutbox['event_id'] ?? '') === $expectedSameOrgReadEventId
+    && ($sameOrgReadPayload['event_id'] ?? '') === $expectedSameOrgReadEventId
+    && ($sameOrgReadPayload['origin_client_id'] ?? '') === $expectedSameOrgReadClientId
+    && !array_key_exists('cross_org_access_snapshot_id', $sameOrgReadPayload)
+    && !array_key_exists(
+        'cross_org_access_snapshot_id',
+        (array) ($sameOrgReadPayload['read_state'] ?? []),
+    ),
+    'same-organization conversation.read must preserve the pre-epoch event and client ID formula',
+);
+$service->markRead($carol, $conversationId, false);
+$sameOrgReadOutboxCountAfterRetry = (int) Db::query(
+    'SELECT COUNT(*) AS aggregate FROM im_message_outbox
+      WHERE organization = 901 AND conversation_id = ?
+        AND event_type = "conversation.read"',
+    [$conversationId],
+)[0]['aggregate'];
+$assert(
+    $sameOrgReadOutboxCountAfterRetry === 1,
+    'same-organization repeated markRead must remain outbox-idempotent',
 );
 $readState = Db::query(
     'SELECT unread_count, last_read_seq FROM im_conversation_member

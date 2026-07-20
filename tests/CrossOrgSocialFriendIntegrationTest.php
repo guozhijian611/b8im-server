@@ -1300,19 +1300,34 @@ $assert(count($readOutboxes) === 2, 'HTTP cross-org markRead writes one reliable
 $readSnapshotId = (string) $pdo->query(
     "SELECT value FROM sm_system_config WHERE `key` = 'cross_org_access_snapshot_id'",
 )->fetchColumn();
+$readEpochRows = [];
 foreach ($readOutboxes as $readOutbox) {
     $payload = json_decode((string) $readOutbox['payload_json'], true, 512, JSON_THROW_ON_ERROR);
     $home = (int) $readOutbox['organization'];
+    $expectedEventId = hash('sha256', implode('|', [
+        $home, 'conversation.read', $crossConversationId, 2, 'u2', 1, $readSnapshotId,
+    ]));
+    $expectedClientId = 'web-http-read-' . substr(hash(
+        'sha256',
+        '2|u2|' . $crossConversationId . '|1|' . $readSnapshotId,
+    ), 0, 32);
     $assert(
         ($payload['event_id'] ?? '') === $readOutbox['event_id']
+        && $readOutbox['event_id'] === $expectedEventId
         && ($payload['organization'] ?? 0) === $home
         && ($payload['origin_organization'] ?? 0) === 2
+        && ($payload['origin_client_id'] ?? '') === $expectedClientId
         && ($payload['cross_org_access_snapshot_id'] ?? '') === $readSnapshotId
+        && ($payload['read_state']['cross_org_access_snapshot_id'] ?? '') === $readSnapshotId
         && ($payload['user_organization'] ?? 0) === 2
         && ($payload['read_state']['last_read_seq'] ?? 0) === 1
         && ($payload['recipient_identities'] ?? []) === [['organization' => $home, 'user_id' => $home === 1 ? 'u1' : 'u2']],
         'conversation.read payload is home-specific and uses composite identities for home ' . $home,
     );
+    $readEpochRows[$home] = [
+        'event_id' => (string) $readOutbox['event_id'],
+        'origin_client_id' => (string) ($payload['origin_client_id'] ?? ''),
+    ];
 }
 $store->markRead(2, 'u2', $crossConversationId, false, $now);
 $readOutboxCountAfterRetry = (int) $pdo->query(
@@ -1321,6 +1336,68 @@ $readOutboxCountAfterRetry = (int) $pdo->query(
         AND event_type = 'conversation.read'",
 )->fetchColumn();
 $assert($readOutboxCountAfterRetry === 2, 'repeated HTTP markRead is outbox-idempotent');
+
+// The fixture established N=1 above; use its canonical decimal N+2 without
+// converting an epoch through a finite-width integer.
+$jumpedReadSnapshotId = '3';
+$pdo->prepare(
+    "UPDATE sm_system_config SET `value` = ? WHERE `key` = 'cross_org_access_snapshot_id'",
+)->execute([$jumpedReadSnapshotId]);
+CrossOrganizationSocialPolicy::clearCache();
+$store->markRead(2, 'u2', $crossConversationId, false, $now);
+$readOutboxesAfterEpochJump = $pdo->query(
+    "SELECT organization, event_id, payload_json
+       FROM im_message_outbox
+      WHERE conversation_id = " . $pdo->quote($crossConversationId) . "
+        AND event_type = 'conversation.read'
+   ORDER BY organization, id",
+)->fetchAll(PDO::FETCH_ASSOC);
+$jumpedReadOutboxCount = 0;
+foreach ($readOutboxesAfterEpochJump as $readOutboxAfterEpochJump) {
+    $payload = json_decode(
+        (string) $readOutboxAfterEpochJump['payload_json'], true, 512, JSON_THROW_ON_ERROR,
+    );
+    if (($payload['cross_org_access_snapshot_id'] ?? '') !== $jumpedReadSnapshotId) {
+        continue;
+    }
+    ++$jumpedReadOutboxCount;
+    $home = (int) $readOutboxAfterEpochJump['organization'];
+    $expectedEventId = hash('sha256', implode('|', [
+        $home, 'conversation.read', $crossConversationId, 2, 'u2', 1, $jumpedReadSnapshotId,
+    ]));
+    $expectedClientId = 'web-http-read-' . substr(hash(
+        'sha256',
+        '2|u2|' . $crossConversationId . '|1|' . $jumpedReadSnapshotId,
+    ), 0, 32);
+    $assert(
+        ($payload['read_state']['last_read_seq'] ?? 0) === 1
+        && ($payload['read_state']['cross_org_access_snapshot_id'] ?? '') === $jumpedReadSnapshotId
+        && $readOutboxAfterEpochJump['event_id'] === $expectedEventId
+        && ($payload['event_id'] ?? '') === $expectedEventId
+        && ($payload['origin_client_id'] ?? '') === $expectedClientId
+        && $expectedEventId !== ($readEpochRows[$home]['event_id'] ?? '')
+        && $expectedClientId !== ($readEpochRows[$home]['origin_client_id'] ?? ''),
+        'conversation.read epoch jump changes event and origin client IDs for home ' . $home,
+    );
+}
+$assert(
+    count($readOutboxesAfterEpochJump) === 4 && $jumpedReadOutboxCount === 2,
+    'direct read epoch N to N+2 writes one new event per home at the same read sequence',
+);
+$store->markRead(2, 'u2', $crossConversationId, false, $now);
+$jumpedReadOutboxCountAfterRetry = (int) $pdo->query(
+    "SELECT COUNT(*) FROM im_message_outbox
+      WHERE conversation_id = " . $pdo->quote($crossConversationId) . "
+        AND event_type = 'conversation.read'",
+)->fetchColumn();
+$assert(
+    $jumpedReadOutboxCountAfterRetry === 4,
+    'repeated HTTP markRead remains outbox-idempotent after an N+2 epoch jump',
+);
+$pdo->prepare(
+    "UPDATE sm_system_config SET `value` = ? WHERE `key` = 'cross_org_access_snapshot_id'",
+)->execute([$readSnapshotId]);
+CrossOrganizationSocialPolicy::clearCache();
 
 $organizationLogic = new SystemOrganizationLogic(new OrganizationImAccessService(new class() {
     public function setex(string $key, int $ttl, string $value): bool

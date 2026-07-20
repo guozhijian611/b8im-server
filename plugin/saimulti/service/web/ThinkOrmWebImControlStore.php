@@ -2275,17 +2275,28 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             ],
             $members,
         ));
-        $eventId = hash('sha256', implode('|', [
+        $eventIdTuple = [
             $homeOrganization,
             'conversation.read',
             $conversationId,
             $userOrganization,
             $userId,
             $readState['last_read_seq'],
-        ]));
+        ];
+        $clientIdTuple = [
+            $userOrganization,
+            $userId,
+            $conversationId,
+            $readState['last_read_seq'],
+        ];
+        if ($accessSnapshotId !== null) {
+            $eventIdTuple[] = $accessSnapshotId;
+            $clientIdTuple[] = $accessSnapshotId;
+        }
+        $eventId = hash('sha256', implode('|', $eventIdTuple));
         $clientId = 'web-http-read-' . substr(hash(
             'sha256',
-            $userOrganization . '|' . $userId . '|' . $conversationId . '|' . $readState['last_read_seq'],
+            implode('|', $clientIdTuple),
         ), 0, 32);
         $projectedReadState = [
             'conversation_id' => $conversationId,
@@ -2295,6 +2306,9 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             'user_organization' => $userOrganization,
             'user_id' => $userId,
             'time' => $now,
+            ...($accessSnapshotId === null
+                ? []
+                : ['cross_org_access_snapshot_id' => $accessSnapshotId]),
         ];
         $payload = [
             'event_id' => $eventId,
