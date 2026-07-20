@@ -403,6 +403,13 @@ final class ImUserManagementService
             'create_time' => $now,
             'update_time' => $now,
         ]);
+        Db::table('im_user_group_access_state')->insert([
+            'organization' => $organization,
+            'user_id' => $userId,
+            'access_snapshot_id' => 1,
+            'create_time' => $now,
+            'update_time' => $now,
+        ]);
 
         return $this->read($id, $organization);
     }

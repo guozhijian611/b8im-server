@@ -28,6 +28,15 @@ $service = new QaFixtureService();
 $ordinaryOrganization = Db::table('sm_system_organization')->where('id', 1)->find();
 $assert(is_array($ordinaryOrganization), 'Ordinary organization sentinel is missing before the fixture test.');
 $first = $service->provision();
+$firstPrimary = (int) $first['organizations'][QaFixtureService::PRIMARY_CODE]['id'];
+Db::table('im_user_group_access_state')
+    ->where('organization', $firstPrimary)
+    ->where('user_id', 'qa-im-user-a')
+    ->update(['access_snapshot_id' => 7]);
+Db::table('im_user_group_access_state')
+    ->where('organization', $firstPrimary)
+    ->where('user_id', 'qa-im-user-b')
+    ->delete();
 $firstLicenseVersion = (int) Db::table('sm_tenant_module_license')
     ->where('organization', (int) $first['organizations'][QaFixtureService::PRIMARY_CODE]['id'])
     ->where('module_key', 'announcement')
@@ -42,6 +51,18 @@ $assert($firstLicenseVersion === $secondLicenseVersion, 'Idempotent provision ch
 $primary = (int) $first['organizations'][QaFixtureService::PRIMARY_CODE]['id'];
 $isolated = (int) $first['organizations'][QaFixtureService::ISOLATED_CODE]['id'];
 $assert($primary !== $isolated, 'Primary and isolated organizations collapsed.');
+$assert(
+    (string) Db::table('im_user_group_access_state')->where('organization', $primary)->where('user_id', 'qa-im-user-a')->value('access_snapshot_id') === '7',
+    'Idempotent QA provision reset an existing positive group access snapshot.',
+);
+$assert(
+    (string) Db::table('im_user_group_access_state')->where('organization', $primary)->where('user_id', 'qa-im-user-b')->value('access_snapshot_id') === '1',
+    'QA provision did not repair a missing group access state.',
+);
+$assert(
+    (int) Db::table('im_user_group_access_state')->whereIn('organization', [$primary, $isolated])->count() === 3,
+    'QA group access states are incomplete or duplicated.',
+);
 $assert(Db::table('im_user')->where('organization', $primary)->whereIn('account', ['qa_im_a', 'qa_im_b'])->count() === 2, 'Primary IM users are missing.');
 $assert(Db::table('im_user')->where('organization', $isolated)->where('account', 'qa_im_x')->count() === 1, 'Isolated IM user is missing.');
 $announcementLicense = Db::table('sm_tenant_module_license')
@@ -96,10 +117,16 @@ $service->cleanup();
 $assert(Db::table('sm_system_organization')->whereIn('enterprise_code', [QaFixtureService::PRIMARY_CODE, QaFixtureService::ISOLATED_CODE])->count() === 0, 'Cleanup left QA organizations behind.');
 $assert(Db::table('sm_organization_route_publish')->whereIn('organization', [$primary, $isolated])->count() === 0, 'Cleanup left QA routing publications behind.');
 $assert(Db::table('sm_tenant_module_license')->whereIn('organization', [$primary, $isolated])->count() === 0, 'Cleanup left QA module licenses behind.');
+$assert(Db::table('im_user_group_access_state')->whereIn('organization', [$primary, $isolated])->count() === 0, 'Cleanup left QA group access states behind.');
 $assert(Db::table('sm_server_route_pool')->whereIn('route_pool_id', ['qa-im-primary-local', 'qa-im-isolated-local'])->count() === 0, 'Cleanup left QA route pools behind.');
 $assert(Db::table('sm_system_organization')->where('id', 1)->count() === 1, 'Cleanup damaged an ordinary organization.');
 $final = $service->provision();
 $assert(count($final['im_users']) === 3, 'Final reprovision did not restore all IM users.');
+$finalOrganizationIds = array_map(
+    static fn (array $organization): int => (int) $organization['id'],
+    array_values($final['organizations']),
+);
+$assert(Db::table('im_user_group_access_state')->whereIn('organization', $finalOrganizationIds)->count() === 3, 'Final reprovision did not restore all group access states.');
 $assert(($final['announcement_license']['status'] ?? null) === 'ENABLED', 'Final reprovision did not restore announcement license.');
 
 fwrite(STDOUT, json_encode(['passed' => true, 'final_fixture' => $final], JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT) . PHP_EOL);

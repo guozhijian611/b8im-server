@@ -56,10 +56,15 @@ $expectCode = static function (int $code, callable $callback) use ($assert): voi
 };
 
 $imConfigPath = null;
-foreach ([
+$imCandidates = [
     dirname(__DIR__, 2) . '/b8im-im/phinx.php',
     dirname(__DIR__, 4) . '/b8im-im/phinx.php',
-] as $candidate) {
+];
+$configuredImRoot = trim((string) getenv('B8IM_IM_ROOT'));
+if ($configuredImRoot !== '') {
+    array_unshift($imCandidates, $configuredImRoot . '/phinx.php');
+}
+foreach ($imCandidates as $candidate) {
     if (is_file($candidate)) {
         $imConfigPath = $candidate;
         break;
@@ -115,6 +120,52 @@ $expectCode(403, static fn () => $registration->register($organization, $inputDa
 Db::table('sm_tenant_account_policy')->where('organization', 1)->update(['register_enabled' => 1]);
 $expectCode(422, static fn () => $registration->register($organization, array_replace($inputData, ['code' => 'WXYZ']), '203.0.113.1'));
 
+$registrationAtomicTables = [
+    'im_user',
+    'im_user_profile',
+    'im_user_privacy_setting',
+    'im_user_security_policy',
+    'im_user_group_access_state',
+    'im_web_access_session',
+    'im_user_login_audit',
+];
+$registrationAtomicCounts = [];
+foreach ($registrationAtomicTables as $table) {
+    $registrationAtomicCounts[$table] = (int) Db::table($table)->count();
+}
+$quotaBeforeAtomicRegistration = (int) Db::table('sm_tenant_quota')
+    ->where('organization', 1)
+    ->where('quota_key', 'im_user_seats')
+    ->value('used_value');
+Db::execute(
+    "CREATE TRIGGER web_registration_login_audit_fail_test
+     BEFORE INSERT ON im_user_login_audit
+     FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'forced registration login audit failure'",
+);
+$registrationAtomicFailure = null;
+try {
+    $registration->register($organization, array_replace($inputData, [
+        'account' => 'web_register_atomic_failure',
+        'nickname' => 'Web Register Atomic Failure',
+        'device_id' => 'browser-register-atomic-failure',
+    ]), '203.0.113.9');
+} catch (Throwable $throwable) {
+    $registrationAtomicFailure = $throwable;
+} finally {
+    Db::execute('DROP TRIGGER IF EXISTS web_registration_login_audit_fail_test');
+}
+$assert($registrationAtomicFailure instanceof Throwable, 'Forced registration login audit failure did not abort registration.');
+foreach ($registrationAtomicCounts as $table => $count) {
+    $assert((int) Db::table($table)->count() === $count, "Registration rollback left rows in {$table}.");
+}
+$assert(
+    (int) Db::table('sm_tenant_quota')
+        ->where('organization', 1)
+        ->where('quota_key', 'im_user_seats')
+        ->value('used_value') === $quotaBeforeAtomicRegistration,
+    'Registration rollback changed the seat quota.',
+);
+
 $registered = $registration->register($organization, $inputData, '203.0.113.1');
 $assert($registered['organization'] === 1 && $registered['deployment_id'] === 'b8im-local', 'request-body organization affected registration scope');
 $assert(isset($registered['token']['access_token']) && $registered['user']['account'] === 'web_register_a', 'registration did not issue a Web session');
@@ -125,6 +176,13 @@ $imUserId = (int) $claims['id'];
 $assert((int) Db::table('im_user_profile')->where('organization', 1)->where('user_id', $userId)->count() === 1, 'registration profile missing');
 $assert((int) Db::table('im_user_privacy_setting')->where('organization', 1)->where('user_id', $userId)->count() === 1, 'registration privacy defaults missing');
 $assert((int) Db::table('im_user_security_policy')->where('organization', 1)->where('user_id', $userId)->count() === 1, 'registration security defaults missing');
+$registrationGroupAccessState = Db::table('im_user_group_access_state')
+    ->where('organization', 1)
+    ->where('user_id', $userId)
+    ->select()
+    ->toArray();
+$assert(count($registrationGroupAccessState) === 1, 'registration group access state missing or duplicated');
+$assert((string) $registrationGroupAccessState[0]['access_snapshot_id'] === '1', 'registration group access snapshot must start at 1');
 $assert((int) Db::table('sm_tenant_quota')->where('organization', 1)->where('quota_key', 'im_user_seats')->value('used_value') === 1, 'registration seat usage was not synchronized');
 $assert(Db::table('im_user_login_audit')->where('organization', 1)->where('user_id', $userId)->where('audit_scope', 'register')->where('login_result', 'success')->count() === 1, 'registration audit method missing');
 $expectCode(422, static fn () => $registration->register($organization, $inputData, '203.0.113.1'));
