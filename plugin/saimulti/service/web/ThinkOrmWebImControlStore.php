@@ -18,32 +18,34 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
     {
         $rows = Db::query(
             'SELECT c.*, gp.description, cm.unread_count, cm.is_pinned, cm.is_muted,
+                    cm.access_version, cm.access_state,
                     cm.conversation_remark, cm.message_group_id,
                     mg.name AS message_group_name, mi.id AS last_message_index_id,
                     COALESCE(c.last_message_time, c.create_time) AS sort_time
                FROM im_conversation_member cm
          INNER JOIN im_conversation c
                  ON c.organization = cm.organization
-                AND c.conversation_id = cm.conversation_id
+                AND BINARY c.conversation_id = BINARY cm.conversation_id
           LEFT JOIN im_group_profile gp
                  ON gp.organization = c.organization
-                AND gp.conversation_id = c.conversation_id
+                AND BINARY gp.conversation_id = BINARY c.conversation_id
                 AND gp.status = 1
                 AND gp.delete_time IS NULL
           LEFT JOIN im_message_group mg
                  ON mg.organization = cm.organization
-                AND mg.user_id = cm.user_id
+                AND BINARY mg.user_id = BINARY cm.user_id
                 AND mg.id = cm.message_group_id
                 AND mg.status = 1
                 AND mg.delete_time IS NULL
           LEFT JOIN im_message_index mi
                  ON mi.organization = c.organization
-                AND mi.message_id = c.last_message_id
+                AND BINARY mi.message_id = BINARY c.last_message_id
               WHERE cm.organization = ?
                 AND cm.member_organization = ?
-                AND cm.user_id = ?
-                AND cm.status = 1
+                AND BINARY cm.user_id = BINARY ?
                 AND cm.delete_time IS NULL
+                AND ((c.conversation_type = 2 AND cm.access_state IN ("active", "history_only"))
+                     OR (c.conversation_type <> 2 AND cm.status = 1))
                 AND c.status = 1
                 AND c.delete_time IS NULL
            ORDER BY cm.is_pinned ASC,
@@ -203,9 +205,10 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 'UPDATE im_conversation_member
                     SET message_group_id = ?, update_time = ?
                   WHERE organization = ?
-                    AND conversation_id = ?
+                    AND BINARY conversation_id = BINARY ?
                     AND member_organization = ?
-                    AND user_id = ?
+                    AND BINARY user_id = BINARY ?
+                    AND access_state = "active"
                     AND status = 1
                     AND delete_time IS NULL',
                 [$messageGroupId, $now, $organization, $conversationId, $organization, $userId],
@@ -291,7 +294,8 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         if ($conversationId === '') {
             return $this->emptyMessagePage($afterSeq, $beforeSeq);
         }
-        $this->assertActiveConversationMember($organization, $conversationId, $userId);
+        $access = (new WebImConversationAccessGuard())->assertReadable($organization, $userId, $conversationId);
+        $includeSenderUser = (bool) ($access['is_active'] ?? true);
         $this->assertMembershipPeriod($organization, $conversationId, $userId);
 
         $newer = $afterSeq > 0;
@@ -299,18 +303,19 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         $cursor = $newer ? $afterSeq : ($beforeSeq > 0 ? $beforeSeq : 0);
         $direction = $newer ? 'ASC' : 'DESC';
         $candidates = Db::query(
-            'SELECT i.global_seq, i.message_id, i.message_seq, i.shard_table
+            'SELECT i.global_seq, i.message_id, i.message_seq, i.shard_table,
+                    i.sender_id, i.sender_organization
                FROM im_message_index i
               WHERE i.organization = ?
-                AND i.conversation_id = ?
+                AND BINARY i.conversation_id = BINARY ?
                 AND i.message_seq ' . $comparison . ' ?
                 AND EXISTS (
                     SELECT 1
                       FROM im_conversation_membership_period mp
                      WHERE mp.organization = i.organization
-                       AND mp.conversation_id = i.conversation_id
+                       AND BINARY mp.conversation_id = BINARY i.conversation_id
                        AND mp.member_organization = ?
-                       AND mp.user_id = ?
+                       AND BINARY mp.user_id = BINARY ?
                        AND mp.status = 1
                        AND i.message_seq >= mp.visible_from_message_seq
                        AND (mp.visible_until_message_seq IS NULL OR i.message_seq <= mp.visible_until_message_seq)
@@ -318,10 +323,10 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 AND NOT EXISTS (
                     SELECT 1 FROM im_message_user_delete ud
                      WHERE ud.organization = i.organization
-                       AND ud.conversation_id = i.conversation_id
-                       AND ud.message_id = i.message_id
+                       AND BINARY ud.conversation_id = BINARY i.conversation_id
+                       AND BINARY ud.message_id = BINARY i.message_id
                        AND ud.user_organization = ?
-                       AND ud.user_id = ?
+                       AND BINARY ud.user_id = BINARY ?
                 )
            ORDER BY i.message_seq ' . $direction . '
               LIMIT ' . ($limit + 1),
@@ -334,6 +339,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             $conversationId,
             $page,
             $userId,
+            $includeSenderUser,
         );
         usort($messages, static fn (array $left, array $right): int =>
             (int) $left['message_seq'] <=> (int) $right['message_seq']);
@@ -369,11 +375,12 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                        FROM im_conversation_member cm
                  INNER JOIN im_conversation c
                          ON c.organization = cm.organization
-                        AND c.conversation_id = cm.conversation_id
+                        AND BINARY c.conversation_id = BINARY cm.conversation_id
                       WHERE cm.organization = ?
                         AND cm.member_organization = ?
-                        AND cm.user_id = ?
+                        AND BINARY cm.user_id = BINARY ?
                         AND cm.status = 1
+                        AND cm.access_state = "active"
                         AND cm.delete_time IS NULL
                         AND c.status = 1
                         AND c.delete_time IS NULL
@@ -1056,80 +1063,13 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         array $memberIds,
         string $now,
     ): array {
-        $conversationId = Db::transaction(function () use (
+        $conversationId = (new GroupMemberAccessService())->createGroup(
             $organization,
             $ownerUserId,
             $title,
             $memberIds,
             $now,
-        ): string {
-            $members = $this->activeUsersForUpdate($organization, $memberIds, false);
-            if (count($members) !== count($memberIds) || !isset($members[$ownerUserId])) {
-                throw new ApiException('群成员不存在或已停用。', 422);
-            }
-            foreach ($memberIds as $memberId) {
-                if (!hash_equals($memberId, $ownerUserId)
-                    && !$this->areFriends($organization, $ownerUserId, $organization, $memberId, true)) {
-                    throw new ApiException('只能邀请好友加入群聊。', 403);
-                }
-            }
-
-            $conversationId = 'group_' . bin2hex(random_bytes(16));
-            Db::table('im_conversation')->insert([
-                'organization' => $organization,
-                'conversation_id' => $conversationId,
-                'conversation_type' => self::CONVERSATION_GROUP,
-                'title' => $title,
-                'owner_user_id' => $ownerUserId,
-                'owner_organization' => $organization,
-                'status' => 1,
-                'create_time' => $now,
-                'update_time' => $now,
-            ]);
-            Db::table('im_group_profile')->insert([
-                'organization' => $organization,
-                'conversation_id' => $conversationId,
-                'owner_user_id' => $ownerUserId,
-                'group_kind' => 'normal',
-                'history_visibility' => 'since_join',
-                'status' => 1,
-                'create_time' => $now,
-                'update_time' => $now,
-            ]);
-            foreach ($memberIds as $memberId) {
-                Db::table('im_conversation_member')->insert([
-                    'organization' => $organization,
-                    'conversation_id' => $conversationId,
-                    'user_id' => $memberId,
-                    'member_organization' => $organization,
-                    'member_role' => hash_equals($memberId, $ownerUserId) ? 'owner' : 'member',
-                    'inviter_user_id' => hash_equals($memberId, $ownerUserId) ? null : $ownerUserId,
-                    'inviter_organization' => hash_equals($memberId, $ownerUserId) ? 0 : $organization,
-                    'status' => 1,
-                    'mute_status' => 0,
-                    'access_version' => 1,
-                    'join_at' => $now,
-                    'create_time' => $now,
-                    'update_time' => $now,
-                ]);
-                Db::table('im_conversation_membership_period')->insert([
-                    'organization' => $organization,
-                    'conversation_id' => $conversationId,
-                    'user_id' => $memberId,
-                    'member_organization' => $organization,
-                    'period_no' => 1,
-                    'visible_from_message_seq' => 1,
-                    'visible_until_message_seq' => null,
-                    'join_at' => $now,
-                    'leave_at' => null,
-                    'status' => 1,
-                    'create_time' => $now,
-                    'update_time' => $now,
-                ]);
-            }
-
-            return $conversationId;
-        });
+        );
 
         $row = $this->conversationRow($organization, $ownerUserId, $conversationId);
         if ($row === null) {
@@ -1141,9 +1081,18 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
 
     public function groupMembers(int $organization, string $userId, string $conversationId): array
     {
-        $this->assertGroupRole($organization, $conversationId, $userId, ['owner', 'admin', 'member']);
+        $viewer = $this->assertGroupRole(
+            $organization,
+            $conversationId,
+            $userId,
+            ['owner', 'admin', 'member'],
+        );
 
-        return $this->groupMemberRows($organization, $conversationId);
+        return $this->groupMemberRows(
+            $organization,
+            $conversationId,
+            in_array((string) $viewer['member_role'], ['owner', 'admin'], true),
+        );
     }
 
     public function addGroupMembers(
@@ -1151,39 +1100,17 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         string $operatorUserId,
         string $conversationId,
         array $memberIds,
+        array $expectedVersions,
         string $now,
     ): array {
-        Db::transaction(function () use (
+        (new GroupMemberAccessService())->join(
             $organization,
             $operatorUserId,
             $conversationId,
             $memberIds,
+            $expectedVersions,
             $now,
-        ): void {
-            $this->assertGroupRole($organization, $conversationId, $operatorUserId, ['owner', 'admin'], true);
-            $members = $this->activeUsersForUpdate($organization, $memberIds, false);
-            if (count($members) !== count($memberIds)) {
-                throw new ApiException('群成员不存在或已停用。', 422);
-            }
-            foreach ($memberIds as $memberId) {
-                if (!$this->areFriends(
-                    $organization,
-                    $operatorUserId,
-                    $organization,
-                    $memberId,
-                    true,
-                )) {
-                    throw new ApiException('只能邀请自己的好友加入群聊。', 403);
-                }
-                $this->ensureGroupMember(
-                    $organization,
-                    $conversationId,
-                    $memberId,
-                    $operatorUserId,
-                    $now,
-                );
-            }
-        });
+        );
 
         return $this->groupMembers($organization, $operatorUserId, $conversationId);
     }
@@ -1227,13 +1154,18 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 $conversationUpdates['avatar'] = $avatarFileId !== '' ? $avatarFileId : null;
             }
             if (count($conversationUpdates) > 1) {
-                Db::table('im_conversation')
-                    ->where('organization', $organization)
-                    ->where('conversation_id', $conversationId)
-                    ->where('conversation_type', self::CONVERSATION_GROUP)
-                    ->where('status', 1)
-                    ->whereNull('delete_time')
-                    ->update($conversationUpdates);
+                $assignments = [];
+                $params = [];
+                foreach ($conversationUpdates as $column => $value) {
+                    $assignments[] = $column . ' = ?';
+                    $params[] = $value;
+                }
+                Db::execute(
+                    'UPDATE im_conversation SET ' . implode(', ', $assignments) . '
+                      WHERE organization = ? AND BINARY conversation_id = BINARY ?
+                        AND conversation_type = 2 AND status = 1 AND delete_time IS NULL',
+                    array_merge($params, [$organization, $conversationId]),
+                );
             }
             $descriptionChanged = $description !== null
                 && !hash_equals(
@@ -1245,7 +1177,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                     'UPDATE im_group_profile
                         SET description = ?, update_time = ?
                       WHERE organization = ?
-                        AND conversation_id = ?
+                        AND BINARY conversation_id = BINARY ?
                         AND status = 1
                         AND delete_time IS NULL',
                     [$description !== '' ? $description : null, $now, $organization, $conversationId],
@@ -1308,9 +1240,10 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 'SELECT user_id, member_role
                    FROM im_conversation_member
                   WHERE organization = ?
-                    AND conversation_id = ?
+                    AND BINARY conversation_id = BINARY ?
                     AND member_organization = ?
                     AND status = 1
+                    AND access_state = "active"
                     AND delete_time IS NULL
                   FOR UPDATE',
                 [$organization, $conversationId, $organization],
@@ -1329,10 +1262,11 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 'UPDATE im_conversation_member
                     SET member_role = "member", update_time = ?
                   WHERE organization = ?
-                    AND conversation_id = ?
+                    AND BINARY conversation_id = BINARY ?
                     AND member_organization = ?
                     AND member_role = "admin"
                     AND status = 1
+                    AND access_state = "active"
                     AND delete_time IS NULL',
                 [$now, $organization, $conversationId, $organization],
             );
@@ -1342,10 +1276,11 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                     'UPDATE im_conversation_member
                         SET member_role = "admin", update_time = ?
                       WHERE organization = ?
-                        AND conversation_id = ?
+                        AND BINARY conversation_id = BINARY ?
                         AND member_organization = ?
-                        AND user_id IN (' . $placeholders . ')
+                        AND BINARY user_id IN (' . $placeholders . ')
                         AND status = 1
+                        AND access_state = "active"
                         AND delete_time IS NULL',
                     array_merge([$now, $organization, $conversationId, $organization], $managerUserIds),
                 );
@@ -1384,10 +1319,11 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 'UPDATE im_conversation_member
                     SET mute_status = ?, mute_until = ?, update_time = ?
                   WHERE organization = ?
-                    AND conversation_id = ?
+                    AND BINARY conversation_id = BINARY ?
                     AND member_organization = ?
-                    AND user_id = ?
+                    AND BINARY user_id = BINARY ?
                     AND status = 1
+                    AND access_state = "active"
                     AND delete_time IS NULL',
                 [
                     $status === 2 ? 1 : 0,
@@ -1412,75 +1348,40 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         string $operatorUserId,
         string $conversationId,
         string $memberUserId,
+        string $expectedVersion,
         string $now,
     ): array {
-        Db::transaction(function () use (
-            $organization,
-            $operatorUserId,
-            $conversationId,
-            $memberUserId,
-            $now,
-        ): void {
-            $this->assertGroupRole($organization, $conversationId, $operatorUserId, ['owner', 'admin'], true);
-            $target = $this->groupMemberForUpdate($organization, $conversationId, $memberUserId);
-            if ($target !== null && (int) $target['status'] === 3) {
-                return;
-            }
-            $this->assertCanManageGroupMember(
-                $organization,
-                $conversationId,
-                $operatorUserId,
-                $memberUserId,
-                true,
-            );
-            $conversation = Db::query(
-                'SELECT last_message_seq FROM im_conversation
-                  WHERE organization = ? AND conversation_id = ? AND status = 1 AND delete_time IS NULL
-                  LIMIT 1
-                  FOR UPDATE',
-                [$organization, $conversationId],
-            )[0] ?? null;
-            if ($conversation === null) {
-                throw new ApiException('群聊不存在。', 404);
-            }
-            $lastMessageSeq = (int) $conversation['last_message_seq'];
-            Db::execute(
-                'UPDATE im_conversation_membership_period
-                    SET visible_until_message_seq = ?, leave_at = ?, update_time = ?
-                  WHERE organization = ?
-                    AND conversation_id = ?
-                    AND member_organization = ?
-                    AND user_id = ?
-                    AND status = 1
-                    AND visible_until_message_seq IS NULL',
-                [
-                    $lastMessageSeq,
-                    $now,
-                    $now,
-                    $organization,
-                    $conversationId,
-                    $organization,
-                    $memberUserId,
-                ],
-            );
-            Db::execute(
-                'UPDATE im_conversation_member
-                    SET member_role = "member",
-                        status = 3,
-                        mute_status = 0,
-                        mute_until = NULL,
-                        access_version = access_version + 1,
-                        update_time = ?
-                  WHERE organization = ?
-                    AND conversation_id = ?
-                    AND member_organization = ?
-                    AND user_id = ?
-                    AND status = 1
-                    AND delete_time IS NULL',
-                [$now, $organization, $conversationId, $organization, $memberUserId],
-            );
-        });
+        (new GroupMemberAccessService())->remove(
+            $organization, $operatorUserId, $conversationId, $memberUserId, $expectedVersion, $now,
+        );
 
+        return $this->groupMembers($organization, $operatorUserId, $conversationId);
+    }
+
+    public function leaveGroup(int $organization, string $userId, string $conversationId, string $expectedVersion, string $now): array
+    {
+        (new GroupMemberAccessService())->leave($organization, $userId, $conversationId, $expectedVersion, $now);
+        return ['conversation_id' => $conversationId, 'left' => true];
+    }
+
+    public function suspendGroupMember(int $organization, string $operatorUserId, string $conversationId, string $memberUserId, string $expectedVersion, string $now): array
+    {
+        (new GroupMemberAccessService())->suspend($organization, $operatorUserId, $conversationId, $memberUserId, $expectedVersion, $now);
+        return $this->groupMembers($organization, $operatorUserId, $conversationId);
+    }
+
+    public function restoreGroupMember(int $organization, string $operatorUserId, string $conversationId, string $memberUserId, string $expectedVersion, string $now): array
+    {
+        (new GroupMemberAccessService())->restore($organization, $operatorUserId, $conversationId, $memberUserId, $expectedVersion, $now);
+        return $this->groupMembers($organization, $operatorUserId, $conversationId);
+    }
+
+    public function revokeGroupMemberHistory(int $organization, string $operatorUserId, string $conversationId, string $memberUserId, string $expectedVersion, array $periodNumbers, string $now): array
+    {
+        (new GroupMemberAccessService())->revokeHistory(
+            $organization, $operatorUserId, $conversationId, $memberUserId,
+            $expectedVersion, $periodNumbers, $now,
+        );
         return $this->groupMembers($organization, $operatorUserId, $conversationId);
     }
 
@@ -1508,16 +1409,23 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             if ($isMuted !== null) {
                 $updates['is_muted'] = $isMuted ? 1 : 2;
             }
-            Db::table('im_conversation_member')
-                ->where('id', (int) $member['id'])
-                ->where('organization', $organization)
-                ->where('member_organization', $organization)
-                ->where('user_id', $userId)
-                ->where('status', 1)
-                ->update($updates);
+            $assignments = [];
+            $params = [];
+            foreach ($updates as $column => $value) {
+                $assignments[] = $column . ' = ?';
+                $params[] = $value;
+            }
+            $params = array_merge($params, [(int) $member['id'], $organization, $organization, $userId]);
+            Db::execute(
+                'UPDATE im_conversation_member SET ' . implode(', ', $assignments) . '
+                  WHERE id = ? AND organization = ? AND member_organization = ?
+                    AND BINARY user_id = BINARY ? AND status = 1 AND access_state = "active"',
+                $params,
+            );
             $current = Db::query(
                 'SELECT is_pinned, is_muted FROM im_conversation_member
-                  WHERE id = ? AND organization = ? AND member_organization = ? AND user_id = ? AND status = 1
+                  WHERE id = ? AND organization = ? AND member_organization = ?
+                    AND BINARY user_id = BINARY ? AND status = 1 AND access_state = "active"
                   LIMIT 1',
                 [(int) $member['id'], $organization, $organization, $userId],
             )[0] ?? null;
@@ -1602,19 +1510,20 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         int $messageType,
         int $limit,
     ): array {
-        $this->assertActiveConversationMember($organization, $conversationId, $userId);
+        $access = (new WebImConversationAccessGuard())->assertReadable($organization, $userId, $conversationId);
+        $includeSenderUser = (bool) ($access['is_active'] ?? true);
         $this->assertMembershipPeriod($organization, $conversationId, $userId);
         $shards = Db::query(
             'SELECT DISTINCT i.shard_table
                FROM im_message_index i
               WHERE i.organization = ?
-                AND i.conversation_id = ?
+                AND BINARY i.conversation_id = BINARY ?
                 AND EXISTS (
                     SELECT 1 FROM im_conversation_membership_period mp
                      WHERE mp.organization = i.organization
-                       AND mp.conversation_id = i.conversation_id
+                       AND BINARY mp.conversation_id = BINARY i.conversation_id
                        AND mp.member_organization = ?
-                       AND mp.user_id = ?
+                       AND BINARY mp.user_id = BINARY ?
                        AND mp.status = 1
                        AND i.message_seq >= mp.visible_from_message_seq
                        AND (mp.visible_until_message_seq IS NULL OR i.message_seq <= mp.visible_until_message_seq)
@@ -1624,8 +1533,10 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
 
         $messages = [];
         foreach ($shards as $shard) {
-            $table = $this->quoteShard((string) $shard['shard_table']);
+            $shardTable = (string) $shard['shard_table'];
+            $table = $this->quoteShard($shardTable);
             $params = [
+                $shardTable,
                 $organization,
                 $conversationId,
                 $organization,
@@ -1637,17 +1548,22 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                       FROM ' . $table . ' m
                 INNER JOIN im_message_index i
                         ON i.organization = m.organization
-                       AND i.message_id = m.message_id
+                       AND BINARY i.message_id = BINARY m.message_id
+                       AND BINARY i.conversation_id = BINARY m.conversation_id
+                       AND i.message_seq = m.message_seq
+                       AND i.sender_organization = m.sender_organization
+                       AND BINARY i.sender_id = BINARY m.sender_id
+                       AND BINARY i.shard_table = BINARY ?
                      WHERE m.organization = ?
-                       AND m.conversation_id = ?
+                       AND BINARY m.conversation_id = BINARY ?
                        AND m.status = 1
                        AND m.delete_time IS NULL
                        AND EXISTS (
                            SELECT 1 FROM im_conversation_membership_period mp
                             WHERE mp.organization = m.organization
-                              AND mp.conversation_id = m.conversation_id
+                              AND BINARY mp.conversation_id = BINARY m.conversation_id
                               AND mp.member_organization = ?
-                              AND mp.user_id = ?
+                              AND BINARY mp.user_id = BINARY ?
                               AND mp.status = 1
                               AND m.message_seq >= mp.visible_from_message_seq
                               AND (mp.visible_until_message_seq IS NULL OR m.message_seq <= mp.visible_until_message_seq)
@@ -1655,10 +1571,10 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                        AND NOT EXISTS (
                            SELECT 1 FROM im_message_user_delete ud
                             WHERE ud.organization = m.organization
-                              AND ud.conversation_id = m.conversation_id
-                              AND ud.message_id = m.message_id
+                              AND BINARY ud.conversation_id = BINARY m.conversation_id
+                              AND BINARY ud.message_id = BINARY m.message_id
                               AND ud.user_organization = ?
-                              AND ud.user_id = ?
+                              AND BINARY ud.user_id = BINARY ?
                        )';
             if ($messageType > 0) {
                 $sql .= ' AND m.message_type = ?';
@@ -1671,7 +1587,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             $sql .= ' ORDER BY m.message_seq DESC LIMIT ' . $limit;
             foreach (Db::query($sql, $params) as $message) {
                 $message['global_seq'] = (string) ($message['home_global_seq'] ?? '');
-                $messages[] = $this->formatMessage($message, $organization);
+                $messages[] = $this->formatMessage($message, $organization, $includeSenderUser);
             }
         }
         usort($messages, static fn (array $left, array $right): int =>
@@ -1691,7 +1607,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         $conversation = Db::query(
             'SELECT next_message_seq FROM im_conversation
               WHERE organization = ?
-                AND conversation_id = ?
+                AND BINARY conversation_id = BINARY ?
                 AND conversation_type = 2
                 AND status = 1
                 AND delete_time IS NULL
@@ -1786,9 +1702,10 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         $members = Db::query(
             'SELECT member_organization, user_id FROM im_conversation_member
               WHERE organization = ?
-                AND conversation_id = ?
+                AND BINARY conversation_id = BINARY ?
                 AND member_organization = ?
                 AND status = 1
+                AND access_state = "active"
                 AND delete_time IS NULL
               FOR UPDATE',
             [$organization, $conversationId, $organization],
@@ -1825,10 +1742,11 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 'UPDATE im_conversation_member
                     SET unread_count = unread_count + 1, update_time = ?
                   WHERE organization = ?
-                    AND conversation_id = ?
+                    AND BINARY conversation_id = BINARY ?
                     AND member_organization = ?
-                    AND user_id IN (' . $placeholders . ')
+                    AND BINARY user_id IN (' . $placeholders . ')
                     AND status = 1
+                    AND access_state = "active"
                     AND delete_time IS NULL',
                 array_merge([$now, $organization, $conversationId, $organization], $recipientUserIds),
             );
@@ -1841,7 +1759,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                     last_message_time = ?,
                     last_message_summary = ?,
                     update_time = ?
-              WHERE organization = ? AND conversation_id = ?',
+              WHERE organization = ? AND BINARY conversation_id = BINARY ?',
             [
                 $messageSeq + 1,
                 $messageSeq,
@@ -1868,7 +1786,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
 
         $message = Db::query(
             'SELECT * FROM ' . $this->quoteShard($shardTable) . '
-              WHERE organization = ? AND message_id = ? LIMIT 1',
+              WHERE organization = ? AND BINARY message_id = BINARY ? LIMIT 1',
             [$organization, $messageId],
         )[0] ?? null;
         if ($message === null) {
@@ -1954,13 +1872,13 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             'SELECT i.message_id, i.message_seq
                FROM im_message_index i
               WHERE i.organization = ?
-                AND i.conversation_id = ?
+                AND BINARY i.conversation_id = BINARY ?
                 AND EXISTS (
                     SELECT 1 FROM im_conversation_membership_period mp
                      WHERE mp.organization = i.organization
-                       AND mp.conversation_id = i.conversation_id
+                       AND BINARY mp.conversation_id = BINARY i.conversation_id
                        AND mp.member_organization = ?
-                       AND mp.user_id = ?
+                       AND BINARY mp.user_id = BINARY ?
                        AND mp.status = 1
                        AND i.message_seq >= mp.visible_from_message_seq
                        AND (mp.visible_until_message_seq IS NULL OR i.message_seq <= mp.visible_until_message_seq)
@@ -1968,10 +1886,10 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 AND NOT EXISTS (
                     SELECT 1 FROM im_message_user_delete ud
                      WHERE ud.organization = i.organization
-                       AND ud.conversation_id = i.conversation_id
-                       AND ud.message_id = i.message_id
+                       AND BINARY ud.conversation_id = BINARY i.conversation_id
+                       AND BINARY ud.message_id = BINARY i.message_id
                        AND ud.user_organization = ?
-                       AND ud.user_id = ?
+                       AND BINARY ud.user_id = BINARY ?
                 )
            ORDER BY i.message_seq DESC
               LIMIT 1',
@@ -1984,10 +1902,11 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                     'UPDATE im_conversation_member
                         SET unread_count = 0, update_time = ?
                       WHERE organization = ?
-                        AND conversation_id = ?
+                        AND BINARY conversation_id = BINARY ?
                         AND member_organization = ?
-                        AND user_id = ?
+                        AND BINARY user_id = BINARY ?
                         AND status = 1
+                        AND access_state = "active"
                         AND delete_time IS NULL',
                     [$now, $homeOrganization, $conversationId, $organization, $userId],
                 );
@@ -2011,7 +1930,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 'SELECT conversation_type
                    FROM im_conversation
                   WHERE organization = ?
-                    AND conversation_id = ?
+                    AND BINARY conversation_id = BINARY ?
                     AND status = 1
                     AND delete_time IS NULL
                   LIMIT 1
@@ -2022,8 +1941,8 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 'SELECT message_id, message_seq
                    FROM im_message_index
                   WHERE organization = ?
-                    AND conversation_id = ?
-                    AND message_id = ?
+                    AND BINARY conversation_id = BINARY ?
+                    AND BINARY message_id = BINARY ?
                     AND message_seq = ?
                   LIMIT 1',
                 [$homeOrganization, $conversationId, $messageId, $messageSeq],
@@ -2083,10 +2002,11 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             'SELECT id, last_read_message_id, last_read_seq
                FROM im_conversation_member
               WHERE organization = ?
-                AND conversation_id = ?
+                AND BINARY conversation_id = BINARY ?
                 AND member_organization = ?
-                AND user_id = ?
+                AND BINARY user_id = BINARY ?
                 AND status = 1
+                AND access_state = "active"
                 AND delete_time IS NULL
               LIMIT 1
               FOR UPDATE',
@@ -2107,9 +2027,9 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             'SELECT message_id
                FROM im_message_index
               WHERE organization = ?
-                AND conversation_id = ?
+                AND BINARY conversation_id = BINARY ?
                 AND message_seq = ?
-                AND message_id = ?
+                AND BINARY message_id = BINARY ?
               LIMIT 1',
             [$homeOrganization, $conversationId, $effectiveSeq, $effectiveMessageId],
         )[0] ?? null;
@@ -2121,15 +2041,15 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             'SELECT COUNT(*) AS aggregate
                FROM im_message_index i
               WHERE i.organization = ?
-                AND i.conversation_id = ?
+                AND BINARY i.conversation_id = BINARY ?
                 AND i.message_seq > ?
-                AND NOT (i.sender_organization = ? AND i.sender_id = ?)
+                AND NOT (i.sender_organization = ? AND BINARY i.sender_id = BINARY ?)
                 AND EXISTS (
                     SELECT 1 FROM im_conversation_membership_period mp
                      WHERE mp.organization = i.organization
-                       AND mp.conversation_id = i.conversation_id
+                       AND BINARY mp.conversation_id = BINARY i.conversation_id
                        AND mp.member_organization = ?
-                       AND mp.user_id = ?
+                       AND BINARY mp.user_id = BINARY ?
                        AND mp.status = 1
                        AND i.message_seq >= mp.visible_from_message_seq
                        AND (mp.visible_until_message_seq IS NULL OR i.message_seq <= mp.visible_until_message_seq)
@@ -2137,14 +2057,14 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 AND NOT EXISTS (
                     SELECT 1 FROM im_message_user_delete ud
                      WHERE ud.organization = i.organization
-                       AND ud.message_id = i.message_id
+                       AND BINARY ud.message_id = BINARY i.message_id
                        AND ud.user_organization = ?
-                       AND ud.user_id = ?
+                       AND BINARY ud.user_id = BINARY ?
                 )
                 AND NOT EXISTS (
                     SELECT 1 FROM im_message_change mc
                      WHERE mc.organization = i.organization
-                       AND mc.message_id = i.message_id
+                       AND BINARY mc.message_id = BINARY i.message_id
                        AND mc.change_type = "delete_both"
                 )',
             [
@@ -2169,8 +2089,9 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
               WHERE id = ?
                 AND organization = ?
                 AND member_organization = ?
-                AND user_id = ?
+                AND BINARY user_id = BINARY ?
                 AND status = 1
+                AND access_state = "active"
                 AND delete_time IS NULL',
             [
                 $effectiveMessageId,
@@ -2207,14 +2128,14 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
              SELECT ?, i.conversation_id, i.message_id, ?, ?, 3, ?, ?, ?, ?
                FROM im_message_index i
               WHERE i.organization = ?
-                AND i.conversation_id = ?
+                AND BINARY i.conversation_id = BINARY ?
                 AND i.message_seq <= ?
                 AND EXISTS (
                     SELECT 1 FROM im_conversation_membership_period mp
                      WHERE mp.organization = i.organization
-                       AND mp.conversation_id = i.conversation_id
+                       AND BINARY mp.conversation_id = BINARY i.conversation_id
                        AND mp.member_organization = ?
-                       AND mp.user_id = ?
+                       AND BINARY mp.user_id = BINARY ?
                        AND mp.status = 1
                        AND i.message_seq >= mp.visible_from_message_seq
                        AND (mp.visible_until_message_seq IS NULL OR i.message_seq <= mp.visible_until_message_seq)
@@ -2261,9 +2182,10 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             'SELECT member_organization, user_id
                FROM im_conversation_member
               WHERE organization = ?
-                AND conversation_id = ?
+                AND BINARY conversation_id = BINARY ?
                 AND member_organization = ?
                 AND status = 1
+                AND access_state = "active"
                 AND delete_time IS NULL
            ORDER BY user_id ASC',
             [$homeOrganization, $conversationId, $homeOrganization],
@@ -2370,26 +2292,27 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                FROM im_conversation_member cm
          INNER JOIN im_conversation c
                  ON c.organization = cm.organization
-                AND c.conversation_id = cm.conversation_id
+                AND BINARY c.conversation_id = BINARY cm.conversation_id
           LEFT JOIN im_group_profile gp
                  ON gp.organization = c.organization
-                AND gp.conversation_id = c.conversation_id
+                AND BINARY gp.conversation_id = BINARY c.conversation_id
                 AND gp.status = 1
                 AND gp.delete_time IS NULL
           LEFT JOIN im_message_group mg
                  ON mg.organization = cm.organization
-                AND mg.user_id = cm.user_id
+                AND BINARY mg.user_id = BINARY cm.user_id
                 AND mg.id = cm.message_group_id
                 AND mg.status = 1
                 AND mg.delete_time IS NULL
           LEFT JOIN im_message_index mi
                  ON mi.organization = c.organization
-                AND mi.message_id = c.last_message_id
+                AND BINARY mi.message_id = BINARY c.last_message_id
               WHERE cm.organization = ?
                 AND cm.member_organization = ?
-                AND cm.user_id = ?
-                AND cm.conversation_id = ?
+                AND BINARY cm.user_id = BINARY ?
+                AND BINARY cm.conversation_id = BINARY ?
                 AND cm.status = 1
+                AND cm.access_state = "active"
                 AND cm.delete_time IS NULL
                 AND c.status = 1
                 AND c.delete_time IS NULL
@@ -2402,7 +2325,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
     private function formatConversation(int $organization, string $userId, array $row): array
     {
         $type = (int) $row['conversation_type'];
-        $access = (new WebImConversationAccessGuard())->assertAccessible(
+        $access = (new WebImConversationAccessGuard())->assertReadable(
             $organization,
             $userId,
             (string) $row['conversation_id'],
@@ -2410,6 +2333,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         if ($access['conversation_type'] !== $type) {
             throw new \RuntimeException('Conversation projection type does not match persisted topology.');
         }
+        $activeAccess = (bool) ($access['is_active'] ?? true);
         $peer = null;
         $friendRemark = '';
         if ($type === self::CONVERSATION_SINGLE) {
@@ -2464,12 +2388,14 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 : 'none';
             $peer = $this->userView($peerRow, $friendRemark, $relationStatus, $organization);
         }
-        $conversationRemark = (string) ($row['conversation_remark'] ?? '');
+        $conversationRemark = $activeAccess ? (string) ($row['conversation_remark'] ?? '') : '';
         $title = $type === self::CONVERSATION_SINGLE
             ? ($friendRemark !== ''
                 ? $friendRemark
                 : (string) ($peer['display_name'] ?? $peer['nickname'] ?? '单聊'))
-            : ($conversationRemark !== '' ? $conversationRemark : ((string) ($row['title'] ?? '') ?: '群聊'));
+            : (!$activeAccess
+                ? '群聊'
+                : ($conversationRemark !== '' ? $conversationRemark : ((string) ($row['title'] ?? '') ?: '群聊')));
         $last = $this->visibleConversationLastState(
             $organization,
             $userId,
@@ -2485,9 +2411,11 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             'title' => $title,
             'avatar' => $type === self::CONVERSATION_SINGLE
                 ? (string) ($peer['avatar_file_id'] ?? '')
-                : (string) ($row['avatar'] ?? ''),
-            'description' => $type === self::CONVERSATION_GROUP ? (string) ($row['description'] ?? '') : '',
-            'avatar_members' => $type === self::CONVERSATION_GROUP
+                : ($activeAccess ? (string) ($row['avatar'] ?? '') : ''),
+            'description' => $type === self::CONVERSATION_GROUP && $activeAccess
+                ? (string) ($row['description'] ?? '')
+                : '',
+            'avatar_members' => $type === self::CONVERSATION_GROUP && $activeAccess
                 ? $this->groupAvatarMembers($organization, (string) $row['conversation_id'])
                 : [],
             'peer_user' => $peer,
@@ -2497,11 +2425,18 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             'last_message_summary' => $last['summary'],
             'last_message_time' => $last['message_time'],
             'sort_time' => $last['sort_time'],
-            'unread_count' => (int) ($row['unread_count'] ?? 0),
-            'is_pinned' => (int) ($row['is_pinned'] ?? 2) === 1,
-            'is_muted' => (int) ($row['is_muted'] ?? 2) === 1,
-            'message_group_id' => (int) ($row['message_group_id'] ?? 0),
-            'message_group_name' => (string) ($row['message_group_name'] ?? ''),
+            'unread_count' => $activeAccess ? (int) ($row['unread_count'] ?? 0) : 0,
+            'is_pinned' => $activeAccess && (int) ($row['is_pinned'] ?? 2) === 1,
+            'is_muted' => $activeAccess && (int) ($row['is_muted'] ?? 2) === 1,
+            'message_group_id' => $activeAccess ? (int) ($row['message_group_id'] ?? 0) : 0,
+            'message_group_name' => $activeAccess ? (string) ($row['message_group_name'] ?? '') : '',
+            'access_version' => $type === self::CONVERSATION_GROUP
+                ? (string) ($row['access_version'] ?? $access['member']['access_version'] ?? '')
+                : null,
+            'access_state' => $type === self::CONVERSATION_GROUP
+                ? (string) ($row['access_state'] ?? $access['member']['access_state'] ?? '')
+                : null,
+            'periods' => $type === self::CONVERSATION_GROUP ? ($access['periods'] ?? []) : [],
         ];
     }
 
@@ -2513,16 +2448,17 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         string $conversationCreatedAt,
     ): array {
         $candidates = Db::query(
-            'SELECT i.id, i.message_id, i.message_seq, i.shard_table
+            'SELECT i.id, i.message_id, i.message_seq, i.shard_table,
+                    i.sender_id, i.sender_organization
                FROM im_message_index i
               WHERE i.organization = ?
-                AND i.conversation_id = ?
+                AND BINARY i.conversation_id = BINARY ?
                 AND EXISTS (
                     SELECT 1 FROM im_conversation_membership_period mp
                      WHERE mp.organization = i.organization
-                       AND mp.conversation_id = i.conversation_id
+                       AND BINARY mp.conversation_id = BINARY i.conversation_id
                        AND mp.member_organization = ?
-                       AND mp.user_id = ?
+                       AND BINARY mp.user_id = BINARY ?
                        AND mp.status = 1
                        AND i.message_seq >= mp.visible_from_message_seq
                        AND (mp.visible_until_message_seq IS NULL OR i.message_seq <= mp.visible_until_message_seq)
@@ -2530,10 +2466,10 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 AND NOT EXISTS (
                     SELECT 1 FROM im_message_user_delete ud
                      WHERE ud.organization = i.organization
-                       AND ud.conversation_id = i.conversation_id
-                       AND ud.message_id = i.message_id
+                       AND BINARY ud.conversation_id = BINARY i.conversation_id
+                       AND BINARY ud.message_id = BINARY i.message_id
                        AND ud.user_organization = ?
-                       AND ud.user_id = ?
+                       AND BINARY ud.user_id = BINARY ?
                 )
            ORDER BY i.message_seq DESC
               LIMIT 50',
@@ -2542,12 +2478,14 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         foreach ($candidates as $candidate) {
             $message = Db::query(
                 'SELECT * FROM ' . $this->quoteShard((string) $candidate['shard_table']) . '
-                  WHERE organization = ? AND conversation_id = ? AND message_id = ? LIMIT 1',
+                  WHERE organization = ? AND BINARY conversation_id = BINARY ?
+                    AND BINARY message_id = BINARY ? LIMIT 1',
                 [$organization, $conversationId, (string) $candidate['message_id']],
             )[0] ?? null;
             if ($message === null) {
                 throw new \RuntimeException('IM message index points to a missing shard body.');
             }
+            $this->assertIndexedMessageBinding($candidate, $message, $conversationId);
             if (($message['delete_time'] ?? null) !== null || (int) ($message['status'] ?? 0) === 3) {
                 continue;
             }
@@ -2601,15 +2539,16 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                FROM im_conversation_member cm
          INNER JOIN im_user u
                  ON u.organization = cm.member_organization
-                AND u.user_id = cm.user_id
+                AND BINARY u.user_id = BINARY cm.user_id
           LEFT JOIN im_user_profile p
                  ON p.organization = u.organization
-                AND p.user_id = u.user_id
+                AND BINARY p.user_id = BINARY u.user_id
                 AND p.status = 1
                 AND p.delete_time IS NULL
               WHERE cm.organization = ?
-                AND cm.conversation_id = ?
+                AND BINARY cm.conversation_id = BINARY ?
                 AND cm.status = 1
+                AND cm.access_state = "active"
                 AND cm.delete_time IS NULL
                 AND u.delete_time IS NULL
            ORDER BY FIELD(cm.member_role, "owner", "admin", "member"), cm.id ASC
@@ -2621,28 +2560,34 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
     }
 
     /** @return list<array<string, mixed>> */
-    private function groupMemberRows(int $organization, string $conversationId): array
+    private function groupMemberRows(
+        int $organization,
+        string $conversationId,
+        bool $includeInactive,
+    ): array
     {
-        $rows = Db::query(
-            'SELECT cm.member_role, cm.mute_status, cm.mute_until, cm.join_at,
+        $sql = 'SELECT cm.member_role, cm.status AS membership_status,
+                    cm.mute_status, cm.mute_until, cm.join_at,
+                    cm.access_version, cm.access_state,
                     u.*, COALESCE(p.signature, "") AS signature
                FROM im_conversation_member cm
          INNER JOIN im_user u
                  ON u.organization = cm.member_organization
-                AND u.user_id = cm.user_id
+                AND BINARY u.user_id = BINARY cm.user_id
           LEFT JOIN im_user_profile p
                  ON p.organization = u.organization
-                AND p.user_id = u.user_id
+                AND BINARY p.user_id = BINARY u.user_id
                 AND p.status = 1
                 AND p.delete_time IS NULL
               WHERE cm.organization = ?
-                AND cm.conversation_id = ?
-                AND cm.status = 1
+                AND BINARY cm.conversation_id = BINARY ?
                 AND cm.delete_time IS NULL
-                AND u.delete_time IS NULL
-           ORDER BY FIELD(cm.member_role, "owner", "admin", "member"), cm.id ASC',
-            [$organization, $conversationId],
-        );
+                AND u.delete_time IS NULL';
+        if (!$includeInactive) {
+            $sql .= ' AND cm.status = 1 AND cm.access_state = "active"';
+        }
+        $sql .= ' ORDER BY FIELD(cm.member_role, "owner", "admin", "member"), cm.id ASC';
+        $rows = Db::query($sql, [$organization, $conversationId]);
 
         return array_map(function (array $row): array {
             $muteStatus = (int) ($row['mute_status'] ?? 0);
@@ -2657,6 +2602,9 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 'status' => $muteStatus === 1 ? 2 : 1,
                 'mute_until' => $muteStatus === 1 ? (string) ($row['mute_until'] ?? '') : '',
                 'join_time' => (string) ($row['join_at'] ?? ''),
+                'membership_status' => (int) $row['membership_status'],
+                'access_version' => (string) $row['access_version'],
+                'access_state' => (string) $row['access_state'],
             ];
         }, $rows);
     }
@@ -2734,6 +2682,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         string $conversationId,
         array $candidates,
         string $viewerUserId,
+        bool $includeSenderUser,
     ): array {
         if ($candidates === []) {
             return [];
@@ -2751,8 +2700,8 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             $rows = Db::query(
                 'SELECT * FROM ' . $this->quoteShard($table) . '
                   WHERE organization = ?
-                    AND conversation_id = ?
-                    AND message_id IN (' . $placeholders . ')',
+                    AND BINARY conversation_id = BINARY ?
+                    AND BINARY message_id IN (' . $placeholders . ')',
                 array_merge([$organization, $conversationId], $messageIds),
             );
             foreach ($rows as $row) {
@@ -2767,11 +2716,12 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 throw new \RuntimeException('IM message index points to a missing shard body.');
             }
             $body = $bodies[$messageId];
+            $this->assertIndexedMessageBinding($candidate, $body, $conversationId);
             if (($body['delete_time'] ?? null) !== null || (int) ($body['status'] ?? 0) === 3) {
                 continue;
             }
             $body['global_seq'] = (string) ($candidate['global_seq'] ?? '');
-            $messages[] = $this->formatMessage($body, $organization);
+            $messages[] = $this->formatMessage($body, $organization, $includeSenderUser);
         }
 
         $outgoingMessageIds = [];
@@ -2798,6 +2748,21 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         return $messages;
     }
 
+    /** @param array<string,mixed> $index @param array<string,mixed> $body */
+    private function assertIndexedMessageBinding(
+        array $index,
+        array $body,
+        string $conversationId,
+    ): void {
+        if (!hash_equals($conversationId, (string) ($body['conversation_id'] ?? ''))
+            || !hash_equals((string) ($index['message_id'] ?? ''), (string) ($body['message_id'] ?? ''))
+            || (string) ($index['message_seq'] ?? '') !== (string) ($body['message_seq'] ?? '')
+            || (int) ($index['sender_organization'] ?? 0) !== (int) ($body['sender_organization'] ?? 0)
+            || !hash_equals((string) ($index['sender_id'] ?? ''), (string) ($body['sender_id'] ?? ''))) {
+            throw new \RuntimeException('IM message index and shard body binding is inconsistent.');
+        }
+    }
+
     /** @param list<string> $messageIds @return array<string, string> */
     private function outgoingDeliveryStatuses(
         int $organization,
@@ -2814,10 +2779,10 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                     SELECT r.message_id, r.user_id, MAX(r.status) AS max_status
                       FROM im_message_receipt r
                      WHERE r.organization = ?
-                       AND r.message_id IN (' . $placeholders . ')
+                       AND BINARY r.message_id IN (' . $placeholders . ')
                        AND (
                            r.user_organization <> ?
-                           OR r.user_id <> ?
+                           OR BINARY r.user_id <> BINARY ?
                        )
                   GROUP BY r.message_id, r.user_organization, r.user_id
                ) recipient
@@ -2841,7 +2806,11 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
      * @param array<string, mixed> $message
      * @return array<string, mixed>
      */
-    private function formatMessage(array $message, ?int $viewerOrganization = null): array
+    private function formatMessage(
+        array $message,
+        ?int $viewerOrganization = null,
+        bool $includeSenderUser = true,
+    ): array
     {
         $status = (int) ($message['status'] ?? 0);
         $content = json_decode((string) ($message['content'] ?? '{}'), true);
@@ -2858,7 +2827,9 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         $viewerOrg = $viewerOrganization !== null && $viewerOrganization > 0
             ? $viewerOrganization
             : $messageOrganization;
-        $sender = $this->resolveMessageSender($senderOrganization, $senderId);
+        $sender = $includeSenderUser
+            ? $this->resolveMessageSender($senderOrganization, $senderId)
+            : null;
 
         return [
             'id' => (int) $message['id'],
@@ -2918,14 +2889,14 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         return (Db::query(
             'SELECT 1 AS present
                FROM im_cross_organization_conversation
-              WHERE conversation_id = ?
+              WHERE BINARY conversation_id = BINARY ?
               LIMIT 1',
             [$conversationId],
         )[0] ?? null) !== null
             || (Db::query(
                 'SELECT 1 AS present
                    FROM im_conversation_member
-                  WHERE conversation_id = ?
+                  WHERE BINARY conversation_id = BINARY ?
                     AND member_organization <> organization
                     AND status = 1
                     AND delete_time IS NULL
@@ -2939,9 +2910,9 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         $period = Db::query(
             'SELECT id FROM im_conversation_membership_period
               WHERE organization = ?
-                AND conversation_id = ?
+                AND BINARY conversation_id = BINARY ?
                 AND member_organization = ?
-                AND user_id = ?
+                AND BINARY user_id = BINARY ?
                 AND status = 1
               LIMIT 1',
             [$organization, $conversationId, $organization, $userId],
@@ -2974,20 +2945,21 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                   FROM im_conversation_member cm
             INNER JOIN im_conversation c
                     ON c.organization = cm.organization
-                   AND c.conversation_id = cm.conversation_id
+                   AND BINARY c.conversation_id = BINARY cm.conversation_id
                    AND c.conversation_type = 2
                    AND c.status = 1
                    AND c.delete_time IS NULL
             INNER JOIN im_group_profile gp
                     ON gp.organization = c.organization
-                   AND gp.conversation_id = c.conversation_id
+                   AND BINARY gp.conversation_id = BINARY c.conversation_id
                    AND gp.status = 1
                    AND gp.delete_time IS NULL
                  WHERE cm.organization = ?
-                   AND cm.conversation_id = ?
+                   AND BINARY cm.conversation_id = BINARY ?
                    AND cm.member_organization = ?
-                   AND cm.user_id = ?
+                   AND BINARY cm.user_id = BINARY ?
                    AND cm.status = 1
+                   AND cm.access_state = "active"
                    AND cm.delete_time IS NULL
                  LIMIT 1' . ($lock ? ' FOR UPDATE' : '');
         $member = Db::query($sql, [$organization, $conversationId, $organization, $userId])[0] ?? null;
@@ -3037,131 +3009,11 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         bool $lock = true,
     ): ?array {
         $sql = 'SELECT * FROM im_conversation_member
-                 WHERE organization = ? AND conversation_id = ? AND member_organization = ? AND user_id = ?
+                 WHERE organization = ? AND BINARY conversation_id = BINARY ?
+                   AND member_organization = ? AND BINARY user_id = BINARY ?
                  LIMIT 1' . ($lock ? ' FOR UPDATE' : '');
 
         return Db::query($sql, [$organization, $conversationId, $organization, $userId])[0] ?? null;
-    }
-
-    private function ensureGroupMember(
-        int $organization,
-        string $conversationId,
-        string $userId,
-        string $inviterUserId,
-        string $now,
-    ): void {
-        $member = $this->groupMemberForUpdate($organization, $conversationId, $userId);
-        if ($member === null) {
-            Db::table('im_conversation_member')->insert([
-                'organization' => $organization,
-                'conversation_id' => $conversationId,
-                'user_id' => $userId,
-                'member_organization' => $organization,
-                'member_role' => 'member',
-                'inviter_user_id' => $inviterUserId,
-                'inviter_organization' => $organization,
-                'status' => 1,
-                'mute_status' => 0,
-                'access_version' => 1,
-                'join_at' => $now,
-                'create_time' => $now,
-                'update_time' => $now,
-            ]);
-            $this->openMembershipPeriod($organization, $conversationId, $userId, $now);
-            return;
-        }
-        if ((int) $member['status'] === 1 && $member['delete_time'] === null) {
-            $this->openMembershipPeriod($organization, $conversationId, $userId, $now);
-            return;
-        }
-        if ((string) $member['member_role'] === 'owner') {
-            throw new \RuntimeException('A group owner cannot be reactivated as a regular member.');
-        }
-        Db::execute(
-            'UPDATE im_conversation_member
-                SET member_role = "member",
-                    inviter_user_id = ?,
-                    inviter_organization = ?,
-                    status = 1,
-                    mute_status = 0,
-                    mute_until = NULL,
-                    access_version = access_version + 1,
-                    join_at = ?,
-                    delete_time = NULL,
-                    update_time = ?
-              WHERE id = ? AND organization = ? AND conversation_id = ?
-                AND member_organization = ? AND user_id = ?',
-            [
-                $inviterUserId,
-                $organization,
-                $now,
-                $now,
-                (int) $member['id'],
-                $organization,
-                $conversationId,
-                $organization,
-                $userId,
-            ],
-        );
-        $this->openMembershipPeriod($organization, $conversationId, $userId, $now);
-    }
-
-    private function openMembershipPeriod(int $organization, string $conversationId, string $userId, string $now): void
-    {
-        $open = Db::query(
-            'SELECT id FROM im_conversation_membership_period
-              WHERE organization = ?
-                AND conversation_id = ?
-                AND member_organization = ?
-                AND user_id = ?
-                AND status = 1
-                AND visible_until_message_seq IS NULL
-              LIMIT 1
-              FOR UPDATE',
-            [$organization, $conversationId, $organization, $userId],
-        )[0] ?? null;
-        if ($open !== null) {
-            return;
-        }
-        $conversation = Db::query(
-            'SELECT c.next_message_seq, gp.history_visibility
-               FROM im_conversation c
-         INNER JOIN im_group_profile gp
-                 ON gp.organization = c.organization
-                AND gp.conversation_id = c.conversation_id
-                AND gp.status = 1
-                AND gp.delete_time IS NULL
-              WHERE c.organization = ? AND c.conversation_id = ? AND c.status = 1 AND c.delete_time IS NULL
-              LIMIT 1
-              FOR UPDATE',
-            [$organization, $conversationId],
-        )[0] ?? null;
-        if ($conversation === null) {
-            throw new ApiException('群聊不存在。', 404);
-        }
-        $period = Db::query(
-            'SELECT COALESCE(MAX(period_no), 0) + 1 AS period_no
-               FROM im_conversation_membership_period
-              WHERE organization = ? AND conversation_id = ? AND member_organization = ? AND user_id = ?',
-            [$organization, $conversationId, $organization, $userId],
-        )[0]['period_no'] ?? 1;
-        $visibleFrom = (string) $conversation['history_visibility'] === 'all'
-            ? 1
-            : max((int) $conversation['next_message_seq'], 1);
-        Db::table('im_conversation_membership_period')->insert([
-            'organization' => $organization,
-            'conversation_id' => $conversationId,
-            'user_id' => $userId,
-            'member_organization' => $organization,
-            'period_no' => max((int) $period, 1),
-            'visible_from_message_seq' => $visibleFrom,
-            'visible_until_message_seq' => null,
-            'join_at' => $now,
-            'leave_at' => null,
-            'status' => 1,
-            'create_time' => $now,
-            'update_time' => $now,
-        ]);
     }
 
     /** @return array{0: array<string, mixed>, 1: array<string, mixed>} */
@@ -3519,7 +3371,8 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
     {
         return (Db::query(
             'SELECT id FROM im_conversation
-              WHERE organization = ? AND conversation_id = ? AND status = 1 AND delete_time IS NULL
+              WHERE organization = ? AND BINARY conversation_id = BINARY ?
+                AND status = 1 AND delete_time IS NULL
               LIMIT 1',
             [$organization, $conversationId],
         )[0] ?? null) !== null;

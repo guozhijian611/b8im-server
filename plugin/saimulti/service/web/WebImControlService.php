@@ -289,7 +289,12 @@ final class WebImControlService
     }
 
     /** @param array<string, mixed> $identity @return list<array<string, mixed>> */
-    public function addGroupMembers(array $identity, string $conversationId, mixed $memberIds): array
+    public function addGroupMembers(
+        array $identity,
+        string $conversationId,
+        mixed $memberIds,
+        mixed $expectedVersions,
+    ): array
     {
         [$organization, $userId] = $this->identity($identity);
         $members = array_values(array_filter(
@@ -307,6 +312,7 @@ final class WebImControlService
             $userId,
             $this->identifier($conversationId, 'conversation_id', 64),
             $members,
+            $this->expectedVersionMap($expectedVersions, $members),
             $this->nowText(),
             ),
         );
@@ -410,7 +416,7 @@ final class WebImControlService
     }
 
     /** @param array<string, mixed> $identity @return list<array<string, mixed>> */
-    public function removeGroupMember(array $identity, string $conversationId, string $memberUserId): array
+    public function removeGroupMember(array $identity, string $conversationId, string $memberUserId, mixed $expectedVersion): array
     {
         [$organization, $userId] = $this->identity($identity);
 
@@ -421,9 +427,65 @@ final class WebImControlService
             $userId,
             $this->identifier($conversationId, 'conversation_id', 64),
             $this->identifier($memberUserId, 'member_user_id', 64),
+            $this->positiveDecimal($expectedVersion, 'expected_access_version'),
             $this->nowText(),
             ),
         );
+    }
+
+    /** @param array<string,mixed> $identity @return array{conversation_id:string,left:bool} */
+    public function leaveGroup(array $identity, string $conversationId, mixed $expectedVersion): array
+    {
+        [$organization, $userId] = $this->identity($identity);
+        return $this->store->leaveGroup(
+            $organization,
+            $userId,
+            $this->identifier($conversationId, 'conversation_id', 64),
+            $this->positiveDecimal($expectedVersion, 'expected_access_version'),
+            $this->nowText(),
+        );
+    }
+
+    /** @param array<string,mixed> $identity @return list<array<string,mixed>> */
+    public function suspendGroupMember(array $identity, string $conversationId, string $memberUserId, mixed $expectedVersion): array
+    {
+        return $this->manageGroupAccess($identity, $conversationId, $memberUserId, $expectedVersion, 'suspend');
+    }
+
+    /** @param array<string,mixed> $identity @return list<array<string,mixed>> */
+    public function restoreGroupMember(array $identity, string $conversationId, string $memberUserId, mixed $expectedVersion): array
+    {
+        return $this->manageGroupAccess($identity, $conversationId, $memberUserId, $expectedVersion, 'restore');
+    }
+
+    /** @param array<string,mixed> $identity @return list<array<string,mixed>> */
+    public function revokeGroupMemberHistory(
+        array $identity,
+        string $conversationId,
+        string $memberUserId,
+        mixed $expectedVersion,
+        mixed $periodNumbers,
+    ): array {
+        [$organization, $userId] = $this->identity($identity);
+        if (!is_array($periodNumbers)) {
+            throw new ApiException('period_numbers 格式无效。', 422);
+        }
+        $periods = [];
+        foreach ($periodNumbers as $periodNumber) {
+            $value = $this->positiveDecimal($periodNumber, 'period_no');
+            $periods[$value] = $value;
+        }
+        ksort($periods, SORT_STRING);
+        $rows = $this->store->revokeGroupMemberHistory(
+            $organization,
+            $userId,
+            $this->identifier($conversationId, 'conversation_id', 64),
+            $this->identifier($memberUserId, 'member_user_id', 64),
+            $this->positiveDecimal($expectedVersion, 'expected_access_version'),
+            array_values($periods),
+            $this->nowText(),
+        );
+        return array_map(fn (array $member): array => $this->projectGroupMember($member), $rows);
     }
 
     /** @param array<string, mixed> $identity @return array{conversation_id: string, is_pinned: bool, is_muted: bool} */
@@ -502,6 +564,63 @@ final class WebImControlService
         );
     }
 
+    /** @param array<string,mixed> $identity @return list<array<string,mixed>> */
+    private function manageGroupAccess(
+        array $identity,
+        string $conversationId,
+        string $memberUserId,
+        mixed $expectedVersion,
+        string $action,
+    ): array {
+        [$organization, $userId] = $this->identity($identity);
+        $arguments = [
+            $organization,
+            $userId,
+            $this->identifier($conversationId, 'conversation_id', 64),
+            $this->identifier($memberUserId, 'member_user_id', 64),
+            $this->positiveDecimal($expectedVersion, 'expected_access_version'),
+            $this->nowText(),
+        ];
+        $rows = match ($action) {
+            'suspend' => $this->store->suspendGroupMember(...$arguments),
+            'restore' => $this->store->restoreGroupMember(...$arguments),
+            default => throw new \LogicException('Unknown group access action.'),
+        };
+        return array_map(fn (array $member): array => $this->projectGroupMember($member), $rows);
+    }
+
+    /** @param list<string> $memberIds @return array<string,string> */
+    private function expectedVersionMap(mixed $value, array $memberIds): array
+    {
+        if (!is_array($value)) {
+            throw new ApiException('expected_access_versions 格式无效。', 422);
+        }
+        $allowed = array_fill_keys($memberIds, true);
+        $result = [];
+        foreach ($value as $userId => $version) {
+            if (!is_string($userId)) {
+                throw new ApiException('expected_access_versions 格式无效。', 422);
+            }
+            $userId = $this->identifier($userId, 'member_user_id', 64);
+            if (!isset($allowed[$userId])) {
+                throw new ApiException('expected_access_versions 含非目标成员。', 422);
+            }
+            $result[$userId] = $this->positiveDecimal($version, 'expected_access_version');
+        }
+        ksort($result, SORT_STRING);
+        return $result;
+    }
+
+    private function positiveDecimal(mixed $value, string $name): string
+    {
+        if (!is_string($value)
+            || preg_match('/^[1-9][0-9]{0,19}$/D', $value) !== 1
+            || (strlen($value) === 20 && strcmp($value, '18446744073709551615') > 0)) {
+            throw new ApiException($name . ' 必须是正规范正十进制字符串。', 422);
+        }
+        return $value;
+    }
+
     /** @param array<string, mixed> $identity @return array{int, string} */
     private function identity(array $identity): array
     {
@@ -518,10 +637,12 @@ final class WebImControlService
 
     private function identifier(string $value, string $name, int $maxLength, int $code = 422): string
     {
-        $value = trim($value);
         if (
             $value === ''
+            || trim($value) !== $value
             || strlen($value) > $maxLength
+            || str_contains($value, "\0")
+            || str_contains($value, '|')
             || preg_match('/^[A-Za-z0-9][A-Za-z0-9_.:@-]*$/', $value) !== 1
         ) {
             throw new ApiException($name . ' 格式无效。', $code);
@@ -532,8 +653,6 @@ final class WebImControlService
 
     private function optionalIdentifier(string $value, string $name, int $maxLength): string
     {
-        $value = trim($value);
-
         return $value === '' ? '' : $this->identifier($value, $name, $maxLength);
     }
 

@@ -88,12 +88,13 @@ interface WebImControlStoreInterface
     /** @return list<array<string, mixed>> */
     public function groupMembers(int $organization, string $userId, string $conversationId): array;
 
-    /** @param list<string> $memberIds @return list<array<string, mixed>> */
+    /** @param list<string> $memberIds @param array<string,string> $expectedVersions @return list<array<string, mixed>> */
     public function addGroupMembers(
         int $organization,
         string $operatorUserId,
         string $conversationId,
         array $memberIds,
+        array $expectedVersions,
         string $now,
     ): array;
 
@@ -135,6 +136,47 @@ interface WebImControlStoreInterface
         string $operatorUserId,
         string $conversationId,
         string $memberUserId,
+        string $expectedVersion,
+        string $now,
+    ): array;
+
+    /** @return array{conversation_id:string,left:bool} */
+    public function leaveGroup(
+        int $organization,
+        string $userId,
+        string $conversationId,
+        string $expectedVersion,
+        string $now,
+    ): array;
+
+    /** @return list<array<string,mixed>> */
+    public function suspendGroupMember(
+        int $organization,
+        string $operatorUserId,
+        string $conversationId,
+        string $memberUserId,
+        string $expectedVersion,
+        string $now,
+    ): array;
+
+    /** @return list<array<string,mixed>> */
+    public function restoreGroupMember(
+        int $organization,
+        string $operatorUserId,
+        string $conversationId,
+        string $memberUserId,
+        string $expectedVersion,
+        string $now,
+    ): array;
+
+    /** @param list<string> $periodNumbers @return list<array<string,mixed>> */
+    public function revokeGroupMemberHistory(
+        int $organization,
+        string $operatorUserId,
+        string $conversationId,
+        string $memberUserId,
+        string $expectedVersion,
+        array $periodNumbers,
         string $now,
     ): array;
 

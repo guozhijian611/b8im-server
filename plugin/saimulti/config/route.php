@@ -85,6 +85,14 @@ Route::group('/saimulti', function () {
 	Route::get('/app/im/requests', [\plugin\saimulti\app\controller\web\ImController::class, 'requests']);
 	Route::post('/app/im/sendFriendRequest', [\plugin\saimulti\app\controller\web\ImController::class, 'sendFriendRequest']);
 	Route::post('/app/im/handleFriendRequest', [\plugin\saimulti\app\controller\web\ImController::class, 'handleFriendRequest']);
+	Route::post('/app/im/createGroup', [\plugin\saimulti\app\controller\web\ImController::class, 'createGroup']);
+	Route::get('/app/im/groupMembers', [\plugin\saimulti\app\controller\web\ImController::class, 'groupMembers']);
+	Route::post('/app/im/addGroupMembers', [\plugin\saimulti\app\controller\web\ImController::class, 'addGroupMembers']);
+	Route::post('/app/im/removeGroupMember', [\plugin\saimulti\app\controller\web\ImController::class, 'removeGroupMember']);
+	Route::post('/app/im/leaveGroup', [\plugin\saimulti\app\controller\web\ImController::class, 'leaveGroup']);
+	Route::post('/app/im/suspendGroupMember', [\plugin\saimulti\app\controller\web\ImController::class, 'suspendGroupMember']);
+	Route::post('/app/im/restoreGroupMember', [\plugin\saimulti\app\controller\web\ImController::class, 'restoreGroupMember']);
+	Route::post('/app/im/revokeGroupMemberHistory', [\plugin\saimulti\app\controller\web\ImController::class, 'revokeGroupMemberHistory']);
 	Route::post('/app/im/prepareUpload', [\plugin\saimulti\app\controller\web\ImController::class, 'prepareUpload']);
 	Route::post('/app/im/upload', [\plugin\saimulti\app\controller\web\ImController::class, 'upload']);
 	Route::post('/app/im/resolveAssetUrl', [\plugin\saimulti\app\controller\web\ImController::class, 'resolveAssetUrl']);
@@ -130,6 +138,14 @@ Route::group('/saimulti', function () {
 	Route::options('/app/im/requests', static fn () => response('', 204));
 	Route::options('/app/im/sendFriendRequest', static fn () => response('', 204));
 	Route::options('/app/im/handleFriendRequest', static fn () => response('', 204));
+	Route::options('/app/im/createGroup', static fn () => response('', 204));
+	Route::options('/app/im/groupMembers', static fn () => response('', 204));
+	Route::options('/app/im/addGroupMembers', static fn () => response('', 204));
+	Route::options('/app/im/removeGroupMember', static fn () => response('', 204));
+	Route::options('/app/im/leaveGroup', static fn () => response('', 204));
+	Route::options('/app/im/suspendGroupMember', static fn () => response('', 204));
+	Route::options('/app/im/restoreGroupMember', static fn () => response('', 204));
+	Route::options('/app/im/revokeGroupMemberHistory', static fn () => response('', 204));
 	Route::options('/app/im/prepareUpload', static fn () => response('', 204));
 	Route::options('/app/im/upload', static fn () => response('', 204));
 	Route::options('/app/im/resolveAssetUrl', static fn () => response('', 204));
@@ -186,6 +202,10 @@ Route::group('/saimulti', function () {
 	Route::post('/web/im/updateGroupManagers', [\plugin\saimulti\app\controller\web\ImController::class, 'updateGroupManagers']);
 	Route::post('/web/im/updateGroupMemberStatus', [\plugin\saimulti\app\controller\web\ImController::class, 'updateGroupMemberStatus']);
 	Route::post('/web/im/removeGroupMember', [\plugin\saimulti\app\controller\web\ImController::class, 'removeGroupMember']);
+	Route::post('/web/im/leaveGroup', [\plugin\saimulti\app\controller\web\ImController::class, 'leaveGroup']);
+	Route::post('/web/im/suspendGroupMember', [\plugin\saimulti\app\controller\web\ImController::class, 'suspendGroupMember']);
+	Route::post('/web/im/restoreGroupMember', [\plugin\saimulti\app\controller\web\ImController::class, 'restoreGroupMember']);
+	Route::post('/web/im/revokeGroupMemberHistory', [\plugin\saimulti\app\controller\web\ImController::class, 'revokeGroupMemberHistory']);
 	Route::post('/web/im/updateFriendRemark', [\plugin\saimulti\app\controller\web\ImController::class, 'updateFriendRemark']);
 	Route::get('/web/im/searchMessages', [\plugin\saimulti\app\controller\web\ImController::class, 'searchMessages']);
 	Route::post('/web/im/prepareUpload', [\plugin\saimulti\app\controller\web\ImController::class, 'prepareUpload']);
@@ -255,6 +275,10 @@ Route::group('/saimulti', function () {
 		'/web/im/updateGroupManagers',
 		'/web/im/updateGroupMemberStatus',
 		'/web/im/removeGroupMember',
+		'/web/im/leaveGroup',
+		'/web/im/suspendGroupMember',
+		'/web/im/restoreGroupMember',
+		'/web/im/revokeGroupMemberHistory',
 		'/web/im/updateFriendRemark',
 		'/web/im/searchMessages',
 		'/web/im/prepareUpload',

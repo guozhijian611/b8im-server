@@ -47,6 +47,14 @@ $expectedRoutes = [
     'GET /saimulti/app/im/searchUsers' => 'searchUsers',
     'POST /saimulti/app/im/sendFriendRequest' => 'sendFriendRequest',
     'POST /saimulti/app/im/handleFriendRequest' => 'handleFriendRequest',
+    'POST /saimulti/app/im/createGroup' => 'createGroup',
+    'GET /saimulti/app/im/groupMembers' => 'groupMembers',
+    'POST /saimulti/app/im/addGroupMembers' => 'addGroupMembers',
+    'POST /saimulti/app/im/removeGroupMember' => 'removeGroupMember',
+    'POST /saimulti/app/im/leaveGroup' => 'leaveGroup',
+    'POST /saimulti/app/im/suspendGroupMember' => 'suspendGroupMember',
+    'POST /saimulti/app/im/restoreGroupMember' => 'restoreGroupMember',
+    'POST /saimulti/app/im/revokeGroupMemberHistory' => 'revokeGroupMemberHistory',
 ];
 $expectedMiddleware = [AppClientRequest::class, CheckWebLogin::class];
 sort($expectedMiddleware);
@@ -94,6 +102,29 @@ $assert(
         === ['identity', 'friendOrganization', 'friendUserId', 'remark'],
     'Friend remark contract must use a composite identity.',
 );
+
+$controlReflection = new ReflectionClass(WebImControlService::class);
+$controlWithoutDependencies = $controlReflection->newInstanceWithoutConstructor();
+$identifierMethod = $controlReflection->getMethod('identifier');
+$optionalIdentifierMethod = $controlReflection->getMethod('optionalIdentifier');
+$assert(
+    $identifierMethod->invoke($controlWithoutDependencies, 'User_1', 'user_id', 64) === 'User_1',
+    'Canonical identifier bytes changed during validation.',
+);
+foreach ([" User_1", "User_1 ", "User\0_1", 'User|1'] as $invalidIdentifier) {
+    $expectApiCode(422, static fn () => $identifierMethod->invoke(
+        $controlWithoutDependencies,
+        $invalidIdentifier,
+        'user_id',
+        64,
+    ));
+}
+$expectApiCode(422, static fn () => $optionalIdentifierMethod->invoke(
+    $controlWithoutDependencies,
+    ' ',
+    'conversation_id',
+    64,
+));
 
 $tokens = new WebTokenService(str_repeat('app-contact-route-secret-', 2), 'HS256');
 $user = ['id' => 9, 'user_id' => 'app_user_9', 'account' => 'alice'];

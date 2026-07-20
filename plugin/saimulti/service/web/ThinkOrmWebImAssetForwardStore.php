@@ -45,6 +45,7 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
                 $messageId,
                 $fileId,
                 null,
+                false,
             );
         });
     }
@@ -76,6 +77,7 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
                 $messageId,
                 $sourceFileId,
                 $kind,
+                true,
             );
 
             Db::execute(
@@ -103,7 +105,7 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
                 'SELECT file_id, user_id, kind, name, url, storage_path, size_byte, mime_type, extension,
                         status, delete_time
                    FROM im_upload_asset
-                  WHERE organization = ? AND file_id = ?
+                  WHERE organization = ? AND BINARY file_id = BINARY ?
                   LIMIT 1
                   FOR UPDATE',
                 [$organization, $derivedFileId],
@@ -125,11 +127,11 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
     ): ?array {
         $sql = 'SELECT file_id, user_id, kind, name, url, storage_path, size_byte, mime_type, extension
                   FROM im_upload_asset
-                 WHERE organization = ? AND file_id = ?
+                 WHERE organization = ? AND BINARY file_id = BINARY ?
                    AND status = 1 AND delete_time IS NULL';
         $params = [$organization, $fileId];
         if ($ownerUserId !== null) {
-            $sql .= ' AND user_id = ?';
+            $sql .= ' AND BINARY user_id = BINARY ?';
             $params[] = $ownerUserId;
         }
         $sql .= ' LIMIT 1';
@@ -148,54 +150,55 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
         string $messageId,
         string $fileId,
         ?string $expectedKind,
+        bool $requireActive,
     ): array {
         CrossOrganizationSocialPolicy::lockSharedInsideTransaction();
         $viewerMembership = Db::query(
-            'SELECT id
-               FROM im_conversation_member
-              WHERE organization = ?
-                AND conversation_id = ?
-                AND member_organization = ?
-                AND user_id = ?
-                AND status = 1
-                AND delete_time IS NULL
-              LIMIT 1',
+            'SELECT 1 AS present FROM im_conversation_member
+              WHERE organization = ? AND BINARY conversation_id = BINARY ?
+                AND member_organization = ? AND BINARY user_id = BINARY ?
+                AND delete_time IS NULL LIMIT 1',
             [$organization, $conversationId, $organization, $userId],
         )[0] ?? null;
         if ($viewerMembership === null) {
             throw new ApiException('原附件消息不存在或不可见。', 404);
         }
-        (new WebImConversationAccessGuard())->assertAccessible(
-            $organization,
-            $userId,
-            $conversationId,
-            true,
-        );
+        $guard = new WebImConversationAccessGuard();
+        if ($requireActive) {
+            $guard->assertAccessible($organization, $userId, $conversationId, true);
+        } else {
+            $guard->assertReadable($organization, $userId, $conversationId, true);
+        }
+        $membershipClause = $requireActive
+            ? 'cm.status = 1 AND (c.conversation_type <> 2 OR cm.access_state = "active")'
+            : '((c.conversation_type = 2 AND cm.access_state IN ("active", "history_only"))
+                OR (c.conversation_type <> 2 AND cm.status = 1))';
         $source = Db::query(
-            'SELECT i.message_seq, i.shard_table, i.sender_organization
+            'SELECT i.conversation_id, i.message_id, i.message_seq, i.shard_table,
+                    i.sender_id, i.sender_organization
                FROM im_message_index i
          INNER JOIN im_conversation c
                  ON c.organization = i.organization
-                AND c.conversation_id = i.conversation_id
+                AND BINARY c.conversation_id = BINARY i.conversation_id
                 AND c.status = 1
                 AND c.delete_time IS NULL
          INNER JOIN im_conversation_member cm
                 ON cm.organization = i.organization
-                AND cm.conversation_id = i.conversation_id
+                AND BINARY cm.conversation_id = BINARY i.conversation_id
                 AND cm.member_organization = ?
-                AND cm.user_id = ?
-                AND cm.status = 1
+                AND BINARY cm.user_id = BINARY ?
                 AND cm.delete_time IS NULL
+                AND ' . $membershipClause . '
               WHERE i.organization = ?
-                AND i.conversation_id = ?
-                AND i.message_id = ?
+                AND BINARY i.conversation_id = BINARY ?
+                AND BINARY i.message_id = BINARY ?
                 AND EXISTS (
                     SELECT 1
                       FROM im_conversation_membership_period mp
                      WHERE mp.organization = i.organization
-                       AND mp.conversation_id = i.conversation_id
+                       AND BINARY mp.conversation_id = BINARY i.conversation_id
                        AND mp.member_organization = ?
-                       AND mp.user_id = ?
+                       AND BINARY mp.user_id = BINARY ?
                        AND mp.status = 1
                        AND i.message_seq >= mp.visible_from_message_seq
                        AND (mp.visible_until_message_seq IS NULL OR i.message_seq <= mp.visible_until_message_seq)
@@ -204,10 +207,10 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
                     SELECT 1
                       FROM im_message_user_delete ud
                      WHERE ud.organization = i.organization
-                       AND ud.conversation_id = i.conversation_id
-                       AND ud.message_id = i.message_id
+                       AND BINARY ud.conversation_id = BINARY i.conversation_id
+                       AND BINARY ud.message_id = BINARY i.message_id
                        AND ud.user_organization = ?
-                       AND ud.user_id = ?
+                       AND BINARY ud.user_id = BINARY ?
                 )
               LIMIT 1
               FOR UPDATE',
@@ -228,9 +231,11 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
         }
 
         $message = Db::query(
-            'SELECT sender_id, sender_organization, message_type, content, status, delete_time
+            'SELECT conversation_id, message_id, message_seq, sender_id, sender_organization,
+                    message_type, content, status, delete_time
                FROM ' . $this->quoteShard((string) $source['shard_table']) . '
-              WHERE organization = ? AND conversation_id = ? AND message_id = ?
+              WHERE organization = ? AND BINARY conversation_id = BINARY ?
+                AND BINARY message_id = BINARY ?
               LIMIT 1
               FOR UPDATE',
             [$organization, $conversationId, $messageId],
@@ -246,9 +251,13 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
         $sourceOrganization = (int) ($source['sender_organization'] ?? 0);
         if (
             $sourceOrganization <= 0
+            || !hash_equals((string) $source['conversation_id'], (string) $message['conversation_id'])
+            || !hash_equals((string) $source['message_id'], (string) $message['message_id'])
+            || (string) $source['message_seq'] !== (string) $message['message_seq']
             || (int) ($message['sender_organization'] ?? 0) !== $sourceOrganization
+            || !hash_equals((string) $source['sender_id'], (string) $message['sender_id'])
         ) {
-            throw new \RuntimeException('Attachment source message has inconsistent sender_organization.');
+            throw new \RuntimeException('Attachment source index and shard body binding is inconsistent.');
         }
 
         $content = json_decode((string) ($message['content'] ?? ''), true);

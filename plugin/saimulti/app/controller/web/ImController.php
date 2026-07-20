@@ -200,6 +200,7 @@ final class ImController extends WebController
             $this->webIdentity,
             (string) $request->input('conversation_id', ''),
             $request->input('member_ids', []),
+            $request->input('expected_access_versions', []),
         ));
     }
 
@@ -251,6 +252,47 @@ final class ImController extends WebController
             $this->webIdentity,
             (string) $request->input('conversation_id', ''),
             (string) $request->input('member_user_id', ''),
+            $request->input('expected_access_version', null),
+        ));
+    }
+
+    public function leaveGroup(Request $request): Response
+    {
+        return $this->success($this->control->leaveGroup(
+            $this->webIdentity,
+            (string) $request->input('conversation_id', ''),
+            $request->input('expected_access_version', null),
+        ));
+    }
+
+    public function suspendGroupMember(Request $request): Response
+    {
+        return $this->success($this->control->suspendGroupMember(
+            $this->webIdentity,
+            (string) $request->input('conversation_id', ''),
+            (string) $request->input('member_user_id', ''),
+            $request->input('expected_access_version', null),
+        ));
+    }
+
+    public function restoreGroupMember(Request $request): Response
+    {
+        return $this->success($this->control->restoreGroupMember(
+            $this->webIdentity,
+            (string) $request->input('conversation_id', ''),
+            (string) $request->input('member_user_id', ''),
+            $request->input('expected_access_version', null),
+        ));
+    }
+
+    public function revokeGroupMemberHistory(Request $request): Response
+    {
+        return $this->success($this->control->revokeGroupMemberHistory(
+            $this->webIdentity,
+            (string) $request->input('conversation_id', ''),
+            (string) $request->input('member_user_id', ''),
+            $request->input('expected_access_version', null),
+            $request->input('period_numbers', []),
         ));
     }
 

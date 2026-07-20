@@ -131,12 +131,14 @@ jobs:
         with:
           repository: guozhijian611/b8im-im
           path: b8im-im
+          ref: eda1783a8d494a25ea21df4151aac8d82cf429a4
 
       - name: Checkout IM shared path dependency
         uses: actions/checkout@v4
         with:
           repository: guozhijian611/b8im-im-shared
           path: b8im-im-shared
+          ref: 170b329f8733e5fac529306982add1334ab5d539
 
       - name: Checkout admin generator target
         uses: actions/checkout@v4

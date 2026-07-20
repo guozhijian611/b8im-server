@@ -435,6 +435,7 @@ $assert(
         'description', 'avatar_members', 'peer_user', 'last_message_id', 'last_message_seq',
         'last_message_index_id', 'last_message_summary', 'last_message_time', 'sort_time',
         'unread_count', 'is_pinned', 'is_muted', 'message_group_id', 'message_group_name',
+        'access_version', 'access_state', 'periods',
         'avatar_file_id', 'avatar_url', 'avatar_expires_at',
     ],
     'Conversation response contract is not exact.',
@@ -495,6 +496,61 @@ $periodCount = (int) Db::table('im_conversation_membership_period')
     ->count();
 $assert($periodCount === 3, 'Initial membership periods are incomplete.');
 
+$pdo->prepare(
+    'UPDATE im_conversation_member SET status = 99
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "user_c"',
+)->execute([$conversationId]);
+$expectRuntime(
+    static fn () => $service->conversations($carol),
+    'Invalid group membership status was not rejected.',
+);
+$pdo->prepare(
+    'UPDATE im_conversation_member SET status = 1
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "user_c"',
+)->execute([$conversationId]);
+$pdo->prepare(
+    'UPDATE im_conversation_membership_period SET visible_from_message_seq = 0
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "user_c" AND period_no = 1',
+)->execute([$conversationId]);
+$expectRuntime(
+    static fn () => $service->conversations($carol),
+    'Zero group membership period start was not rejected.',
+);
+$pdo->prepare(
+    'UPDATE im_conversation_membership_period SET visible_from_message_seq = 1,
+        visible_until_message_seq = 0
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "user_c" AND period_no = 1',
+)->execute([$conversationId]);
+$expectRuntime(
+    static fn () => $service->conversations($carol),
+    'Reverse group membership period interval was not rejected.',
+);
+$pdo->prepare(
+    'UPDATE im_conversation_membership_period SET visible_until_message_seq = NULL
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "user_c" AND period_no = 1',
+)->execute([$conversationId]);
+$pdo->prepare(
+    'INSERT INTO im_conversation_membership_period
+        (organization, conversation_id, user_id, member_organization, period_no,
+         visible_from_message_seq, visible_until_message_seq, join_at, leave_at,
+         status, create_time, update_time)
+     VALUES (901, ?, "user_c", 901, 2, 1, 1, ?, ?, 1, ?, ?)',
+)->execute([$conversationId, $now, $now, $now, $now]);
+$expectRuntime(
+    static fn () => $service->conversations($carol),
+    'Overlapping group membership periods were not rejected.',
+);
+$pdo->prepare(
+    'DELETE FROM im_conversation_membership_period
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "user_c" AND period_no = 2',
+)->execute([$conversationId]);
+
 $messageGroup = $service->createMessageGroup($alice, 'Work');
 $sameMessageGroup = $service->createMessageGroup($alice, 'Work');
 $assert($messageGroup === $sameMessageGroup, 'Message group create is not idempotent.');
@@ -527,7 +583,94 @@ foreach ($members as $member) {
     $roleMap[$member['user']['user_id']] = $member['role'];
 }
 $assert($roleMap === ['user_a' => 2, 'user_b' => 3, 'user_c' => 1], 'Final member_role mapping mismatch.');
-$expectApiCode(403, static fn () => $service->addGroupMembers($bob, $conversationId, ['user_d']));
+$expectApiCode(422, static fn () => $service->messages($alice, ' ', 0, '', 0, 0, 50));
+$expectApiCode(422, static fn () => $service->groupMembers($alice, $conversationId . '|'));
+$expectApiCode(403, static fn () => $service->addGroupMembers($bob, $conversationId, ['user_d'], []));
+$expectApiCode(422, static fn () => $service->addGroupMembers($alice, $conversationId, ['User_D'], []));
+$caseCollisionCount = (int) Db::query(
+    'SELECT COUNT(*) AS aggregate FROM im_conversation_member
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "User_D"',
+    [$conversationId],
+)[0]['aggregate'];
+$assert($caseCollisionCount === 0, 'Case-colliding user identity created a membership row.');
+$service->addGroupMembers($alice, $conversationId, ['user_d'], []);
+$expectApiCode(422, static fn () => $service->addGroupMembers($alice, $conversationId, ['user_d'], []));
+$service->addGroupMembers($alice, $conversationId, ['user_d'], ['user_d' => '1']);
+$danSnapshot = Db::query(
+    'SELECT access_snapshot_id, create_time, update_time FROM im_user_group_access_state
+      WHERE organization = 901 AND BINARY user_id = BINARY "user_d"',
+)[0];
+$pdo->exec(
+    'DELETE FROM im_user_group_access_state
+      WHERE organization = 901 AND BINARY user_id = BINARY "user_d"',
+);
+$missingSnapshotFailedClosed = false;
+try {
+    $service->leaveGroup($dan, $conversationId, '1');
+} catch (RuntimeException) {
+    $missingSnapshotFailedClosed = true;
+}
+$danBeforeSnapshotRestore = Db::query(
+    'SELECT status, access_version, access_state FROM im_conversation_member
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "user_d"',
+    [$conversationId],
+)[0];
+$assert(
+    $missingSnapshotFailedClosed
+    && (int) $danBeforeSnapshotRestore['status'] === 1
+    && (string) $danBeforeSnapshotRestore['access_version'] === '1'
+    && $danBeforeSnapshotRestore['access_state'] === 'active',
+    'A non-join transition recreated a missing access snapshot or mutated membership before failing.',
+);
+$pdo->prepare(
+    'INSERT INTO im_user_group_access_state
+        (organization, user_id, access_snapshot_id, create_time, update_time)
+     VALUES (901, "user_d", ?, ?, ?)',
+)->execute([
+    $danSnapshot['access_snapshot_id'],
+    $danSnapshot['create_time'],
+    $danSnapshot['update_time'],
+]);
+$service->leaveGroup($dan, $conversationId, '1');
+$service->leaveGroup($dan, $conversationId, '1');
+$emptyPeriod = Db::query(
+    'SELECT visible_from_message_seq, visible_until_message_seq, status
+       FROM im_conversation_membership_period
+      WHERE organization = 901 AND conversation_id = ? AND member_organization = 901
+        AND user_id = "user_d" AND period_no = 1',
+    [$conversationId],
+)[0];
+$emptyMember = Db::query(
+    'SELECT status, access_version, access_state FROM im_conversation_member
+      WHERE organization = 901 AND conversation_id = ? AND member_organization = 901
+        AND user_id = "user_d"',
+    [$conversationId],
+)[0];
+$assert(
+    (int) $emptyPeriod['visible_from_message_seq'] === 1
+    && $emptyPeriod['visible_until_message_seq'] === null
+    && (int) $emptyPeriod['status'] === 2
+    && (int) $emptyMember['status'] === 2
+    && (string) $emptyMember['access_version'] === '2'
+    && $emptyMember['access_state'] === 'revoked',
+    'Leaving an empty since_join period created an invalid closed interval.',
+);
+$regularMemberIds = array_column(array_column(
+    $service->groupMembers($carol, $conversationId),
+    'user',
+), 'user_id');
+$managerMemberIds = array_column(array_column(
+    $service->groupMembers($alice, $conversationId),
+    'user',
+), 'user_id');
+$assert(
+    !in_array('user_d', $regularMemberIds, true)
+    && in_array('user_d', $managerMemberIds, true),
+    'A regular group member could inspect historical or revoked members.',
+);
+$expectApiCode(403, static fn () => $service->messages($dan, $conversationId, 0, '', 0, 0, 50));
 $members = $service->updateGroupMemberStatus(
     $bob,
     $conversationId,
@@ -595,8 +738,151 @@ $insertMessage = static function (int $seq, string $text) use (
 };
 
 $insertMessage(1, 'visible before leave');
-$service->removeGroupMember($bob, $conversationId, 'user_c');
-$service->removeGroupMember($bob, $conversationId, 'user_c');
+$pdo->prepare(
+    'UPDATE im_group_profile SET history_visibility = "all", update_time = ?
+      WHERE organization = 901 AND conversation_id = ?',
+)->execute([$now, $conversationId]);
+$service->addGroupMembers($alice, $conversationId, ['user_d'], ['user_d' => '2']);
+$allReentry = Db::query(
+    'SELECT period_no, visible_from_message_seq FROM im_conversation_membership_period
+      WHERE organization = 901 AND conversation_id = ? AND member_organization = 901
+        AND user_id = "user_d" ORDER BY period_no DESC LIMIT 1',
+    [$conversationId],
+)[0];
+$assert(
+    (int) $allReentry['period_no'] === 2 && (int) $allReentry['visible_from_message_seq'] === 2,
+    'An all-history re-entry overlapped an earlier membership period.',
+);
+$service->suspendGroupMember($alice, $conversationId, 'user_d', '3');
+$service->suspendGroupMember($alice, $conversationId, 'user_d', '3');
+$suspendedDan = Db::query(
+    'SELECT access_version, access_state FROM im_conversation_member
+      WHERE organization = 901 AND conversation_id = ? AND member_organization = 901
+        AND user_id = "user_d"',
+    [$conversationId],
+)[0];
+$assert(
+    (string) $suspendedDan['access_version'] === '4' && $suspendedDan['access_state'] === 'revoked',
+    'Suspend did not revoke all group access or was not idempotent.',
+);
+$service->restoreGroupMember($alice, $conversationId, 'user_d', '4');
+$service->restoreGroupMember($alice, $conversationId, 'user_d', '4');
+$restoredDanPeriod = Db::query(
+    'SELECT period_no, visible_from_message_seq FROM im_conversation_membership_period
+      WHERE organization = 901 AND conversation_id = ? AND member_organization = 901
+        AND user_id = "user_d" AND status = 1 ORDER BY period_no DESC LIMIT 1',
+    [$conversationId],
+)[0];
+$assert(
+    (int) $restoredDanPeriod['period_no'] === 3
+    && (int) $restoredDanPeriod['visible_from_message_seq'] === 2,
+    'Restore did not create a new non-overlapping active period.',
+);
+$danSnapshotBeforeOverflow = (string) Db::query(
+    'SELECT access_snapshot_id FROM im_user_group_access_state
+      WHERE organization = 901 AND BINARY user_id = BINARY "user_d"',
+)[0]['access_snapshot_id'];
+$pdo->exec(
+    'UPDATE im_user_group_access_state SET access_snapshot_id = 18446744073709551615
+      WHERE organization = 901 AND BINARY user_id = BINARY "user_d"',
+);
+$expectApiCode(409, static fn () => $service->removeGroupMember(
+    $alice,
+    $conversationId,
+    'user_d',
+    '5',
+));
+$danAfterSnapshotOverflow = Db::query(
+    'SELECT status, access_version, access_state FROM im_conversation_member
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "user_d"',
+    [$conversationId],
+)[0];
+$danOpenAfterSnapshotOverflow = (int) Db::query(
+    'SELECT COUNT(*) AS aggregate FROM im_conversation_membership_period
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "user_d"
+        AND status = 1 AND visible_until_message_seq IS NULL',
+    [$conversationId],
+)[0]['aggregate'];
+$danOverflowAuditCount = (int) Db::query(
+    'SELECT COUNT(*) AS aggregate FROM im_group_member_access_audit
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "user_d"
+        AND access_version = 6',
+    [$conversationId],
+)[0]['aggregate'];
+$danOverflowOutboxCount = (int) Db::query(
+    'SELECT COUNT(*) AS aggregate FROM im_message_outbox
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND event_type = "group.member_access_changed"
+        AND payload_json LIKE ?',
+    [$conversationId, '%"target_user_id":"user_d"%"access_version":"6"%'],
+)[0]['aggregate'];
+$assert(
+    (int) $danAfterSnapshotOverflow['status'] === 1
+    && (string) $danAfterSnapshotOverflow['access_version'] === '5'
+    && $danAfterSnapshotOverflow['access_state'] === 'active'
+    && $danOpenAfterSnapshotOverflow === 1
+    && $danOverflowAuditCount === 0
+    && $danOverflowOutboxCount === 0,
+    'Snapshot overflow did not roll back member and period mutations atomically.',
+);
+$pdo->prepare(
+    'UPDATE im_user_group_access_state SET access_snapshot_id = ?
+      WHERE organization = 901 AND BINARY user_id = BINARY "user_d"',
+)->execute([$danSnapshotBeforeOverflow]);
+$service->removeGroupMember($alice, $conversationId, 'user_d', '5');
+$pdo->prepare(
+    'UPDATE im_group_profile SET history_visibility = "since_join", update_time = ?
+      WHERE organization = 901 AND conversation_id = ?',
+)->execute([$now, $conversationId]);
+
+$bobSnapshotBeforeRollback = (string) Db::table('im_user_group_access_state')
+    ->where('organization', 901)
+    ->where('user_id', 'user_b')
+    ->value('access_snapshot_id');
+$pdo->exec(
+    'CREATE TRIGGER web_test_fail_group_access_audit BEFORE INSERT ON im_group_member_access_audit
+     FOR EACH ROW SIGNAL SQLSTATE "45000" SET MESSAGE_TEXT = "injected audit failure"',
+);
+$rolledBack = false;
+try {
+    $service->leaveGroup($bob, $conversationId, '1');
+} catch (Throwable) {
+    $rolledBack = true;
+} finally {
+    $pdo->exec('DROP TRIGGER IF EXISTS web_test_fail_group_access_audit');
+}
+$bobAfterRollback = Db::query(
+    'SELECT status, access_version, access_state FROM im_conversation_member
+      WHERE organization = 901 AND conversation_id = ? AND member_organization = 901
+        AND user_id = "user_b"',
+    [$conversationId],
+)[0];
+$bobOpenPeriods = (int) Db::query(
+    'SELECT COUNT(*) AS aggregate FROM im_conversation_membership_period
+      WHERE organization = 901 AND conversation_id = ? AND member_organization = 901
+        AND user_id = "user_b" AND status = 1 AND visible_until_message_seq IS NULL',
+    [$conversationId],
+)[0]['aggregate'];
+$bobSnapshotAfterRollback = (string) Db::table('im_user_group_access_state')
+    ->where('organization', 901)
+    ->where('user_id', 'user_b')
+    ->value('access_snapshot_id');
+$assert(
+    $rolledBack
+    && (int) $bobAfterRollback['status'] === 1
+    && (string) $bobAfterRollback['access_version'] === '1'
+    && $bobAfterRollback['access_state'] === 'active'
+    && $bobOpenPeriods === 1
+    && $bobSnapshotAfterRollback === $bobSnapshotBeforeRollback,
+    'Audit failure did not roll back member, period, version and user snapshot atomically.',
+);
+
+$service->removeGroupMember($bob, $conversationId, 'user_c', '1');
+$service->removeGroupMember($bob, $conversationId, 'user_c', '1');
+$expectApiCode(409, static fn () => $service->removeGroupMember($alice, $conversationId, 'user_c', '1'));
 $closedPeriod = $pdo->prepare(
     'SELECT visible_until_message_seq FROM im_conversation_membership_period
       WHERE organization = 901 AND conversation_id = ?
@@ -604,8 +890,177 @@ $closedPeriod = $pdo->prepare(
 );
 $closedPeriod->execute([$conversationId]);
 $assert((int) $closedPeriod->fetchColumn() === 1, 'Removing a member did not close the visibility period.');
+$removedMemberStatus = (int) Db::query(
+    'SELECT status FROM im_conversation_member
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "user_c"',
+    [$conversationId],
+)[0]['status'];
+$assert($removedMemberStatus === 3, 'Removing a member did not persist membership status 3.');
+$carolAccessAudit = Db::query(
+    'SELECT event_id, access_snapshot_id, access_version, access_state, periods_json,
+            reason, actor_organization, actor_user_id
+       FROM im_group_member_access_audit
+      WHERE organization = 901 AND conversation_id = ? AND member_organization = 901
+        AND user_id = "user_c" AND access_version = 2 LIMIT 1',
+    [$conversationId],
+)[0] ?? null;
+$carolAccessOutbox = Db::query(
+    'SELECT event_id, routing_key, message_id, change_seq, payload_json
+       FROM im_message_outbox
+      WHERE organization = 901 AND conversation_id = ?
+        AND event_type = "group.member_access_changed"
+        AND payload_json LIKE ? LIMIT 1',
+    [$conversationId, '%"target_user_id":"user_c"%"access_version":"2"%'],
+)[0] ?? null;
+$carolAccessPayload = json_decode((string) ($carolAccessOutbox['payload_json'] ?? ''), true);
+$expectedCarolAccessEvent = hash('sha256', implode('|', [
+    901,
+    'group.member_access_changed',
+    $conversationId,
+    901,
+    'user_c',
+    (string) ($carolAccessAudit['access_snapshot_id'] ?? ''),
+    '2',
+]));
+$expectedCarolAggregate = sha1(implode('|', [
+    901,
+    'user_c',
+    $conversationId,
+    '2',
+    (string) ($carolAccessAudit['access_snapshot_id'] ?? ''),
+]));
+$assert(
+    $carolAccessAudit !== null
+    && $carolAccessOutbox !== null
+    && $carolAccessAudit['event_id'] === $expectedCarolAccessEvent
+    && $carolAccessOutbox['event_id'] === $expectedCarolAccessEvent
+    && $carolAccessOutbox['routing_key'] === 'group.member_access_changed'
+    && $carolAccessOutbox['message_id'] === $expectedCarolAggregate
+    && (int) $carolAccessOutbox['change_seq'] === 0
+    && (string) $carolAccessAudit['access_version'] === '2'
+    && $carolAccessAudit['access_state'] === 'history_only'
+    && $carolAccessAudit['reason'] === 'remove'
+    && (int) $carolAccessAudit['actor_organization'] === 901
+    && $carolAccessAudit['actor_user_id'] === 'user_b'
+    && json_decode((string) $carolAccessAudit['periods_json'], true) === [[
+        'period_no' => '1', 'from_seq' => '1', 'to_seq' => '1',
+    ]]
+    && ($carolAccessPayload['recipient_count'] ?? 0) === 1
+    && ($carolAccessPayload['recipient_identities'] ?? []) === [[
+        'organization' => 901, 'user_id' => 'user_c',
+    ]]
+    && ($carolAccessPayload['actor_user_id'] ?? '') === 'user_b',
+    'Group access audit/outbox did not persist the exact immutable transition contract.',
+);
+$service->updateGroupProfile(
+    $alice,
+    $conversationId,
+    'Post-leave private title',
+    $groupAvatarFileId,
+    'Post-leave private description',
+    false,
+);
+$pdo->prepare(
+    'UPDATE im_conversation_member SET conversation_remark = "Post-leave private remark"
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND member_organization = 901 AND BINARY user_id = BINARY "user_c"',
+)->execute([$conversationId]);
+$aliceNicknameBeforeHistoryRead = (string) Db::query(
+    'SELECT nickname FROM im_user
+      WHERE organization = 901 AND BINARY user_id = BINARY "user_a"',
+)[0]['nickname'];
+$pdo->exec(
+    'UPDATE im_user SET nickname = "Post-leave private sender"
+      WHERE organization = 901 AND BINARY user_id = BINARY "user_a"',
+);
+$removedCarolConversation = array_values(array_filter(
+    $service->conversations($carol),
+    static fn (array $conversation): bool => $conversation['conversation_id'] === $conversationId,
+))[0];
+$assert(
+    $removedCarolConversation['access_version'] === '2'
+    && $removedCarolConversation['access_state'] === 'history_only'
+    && $removedCarolConversation['title'] === '群聊'
+    && $removedCarolConversation['description'] === ''
+    && $removedCarolConversation['avatar_members'] === []
+    && $removedCarolConversation['avatar_file_id'] === ''
+    && $removedCarolConversation['avatar_url'] === ''
+    && $removedCarolConversation['avatar_expires_at'] === 0
+    && $removedCarolConversation['periods'] === [[
+        'period_no' => '1',
+        'from_seq' => '1',
+        'to_seq' => '1',
+    ]],
+    'History-only conversation projection is not bounded or leaked live member avatars.',
+);
+$removedPage = $service->messages($carol, $conversationId, 0, '', 0, 0, 50);
+$removedSearch = $service->searchMessages($carol, $conversationId, 'visible before leave', 0, 50);
+$assert(
+    array_column($removedPage['messages'], 'message_seq') === [1]
+    && ($removedPage['messages'][0]['sender_organization'] ?? 0) === 901
+    && ($removedPage['messages'][0]['sender_id'] ?? '') === 'user_a'
+    && array_key_exists('sender_user', $removedPage['messages'][0])
+    && $removedPage['messages'][0]['sender_user'] === null
+    && count($removedSearch) === 1
+    && array_key_exists('sender_user', $removedSearch[0])
+    && $removedSearch[0]['sender_user'] === null,
+    'History-only message reads leaked current sender profile or lost valid history.',
+);
+$pdo->prepare(
+    'UPDATE im_user SET nickname = ?
+      WHERE organization = 901 AND BINARY user_id = BINARY "user_a"',
+)->execute([$aliceNicknameBeforeHistoryRead]);
+$expectApiCode(403, static fn () => $service->markRead($carol, $conversationId, false));
+$expectApiCode(403, static fn () => $service->groupMembers($carol, $conversationId));
 $insertMessage(2, 'hidden while absent');
-$service->addGroupMembers($alice, $conversationId, ['user_c']);
+$pdo->prepare(
+    'UPDATE im_message_index SET message_seq = 0
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY "web-test-message-1"',
+)->execute([$conversationId]);
+$pdo->prepare(
+    'UPDATE im_message_index SET message_seq = 1
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY "web-test-message-2"',
+)->execute([$conversationId]);
+$expectRuntime(
+    static fn () => $service->messages($carol, $conversationId, 0, '', 0, 0, 50),
+    'Forged message index sequence exposed an out-of-period shard body.',
+);
+$expectRuntime(
+    static fn () => $service->conversations($carol),
+    'Conversation preview trusted a forged message index sequence.',
+);
+$assert(
+    $service->searchMessages($carol, $conversationId, 'hidden while absent', 0, 50) === [],
+    'Message search trusted a forged index-to-shard sequence binding.',
+);
+$pdo->prepare(
+    'UPDATE im_message_index SET message_seq = 2
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY "web-test-message-2"',
+)->execute([$conversationId]);
+$pdo->prepare(
+    'UPDATE im_message_index SET message_seq = 1
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY "web-test-message-1"',
+)->execute([$conversationId]);
+$pdo->prepare(
+    'UPDATE im_group_profile SET history_visibility = "all", update_time = ?
+      WHERE organization = 901 AND conversation_id = ?',
+)->execute([$now, $conversationId]);
+$service->addGroupMembers($alice, $conversationId, ['user_c'], ['user_c' => '2']);
+$pdo->prepare(
+    'UPDATE im_group_profile SET history_visibility = "since_join", update_time = ?
+      WHERE organization = 901 AND conversation_id = ?',
+)->execute([$now, $conversationId]);
+$expectApiCode(409, static fn () => $service->removeGroupMember(
+    $bob,
+    $conversationId,
+    'user_c',
+    '1',
+));
 $newPeriod = Db::query(
     'SELECT period_no, visible_from_message_seq, visible_until_message_seq
        FROM im_conversation_membership_period
@@ -618,7 +1073,7 @@ $assert(
     (int) $newPeriod['period_no'] === 2
     && (int) $newPeriod['visible_from_message_seq'] === 3
     && $newPeriod['visible_until_message_seq'] === null,
-    'Rejoining a since_join group did not open the next visibility period.',
+    'Rejoining an all-history group overlapped an earlier effective period.',
 );
 $carolConversations = $service->conversations($carol);
 $carolConversation = array_values(array_filter(
@@ -1582,6 +2037,50 @@ $assert(
     && str_contains($visibleUrl['url'], 'X-Amz-Signature='),
     'Owner or visible recipient did not receive a short-lived private URL.',
 );
+$pdo->prepare(
+    'UPDATE im_conversation
+        SET next_message_seq = 101, last_message_seq = 100, last_message_id = ?, update_time = ?
+      WHERE organization = 901 AND conversation_id = ?',
+)->execute([$assetMessageId, $now, $conversationId]);
+$service->removeGroupMember($bob, $conversationId, 'user_c', '3');
+$historyOnlyUrl = $assetUrlService->resolve(
+    $carol,
+    $sourceFileId,
+    $conversationId,
+    $assetMessageId,
+);
+$assert(
+    $historyOnlyUrl['expires_at'] === $urlNow + 300
+    && str_contains($historyOnlyUrl['url'], 'X-Amz-Signature='),
+    'History-only member could not resolve an attachment inside a valid closed period.',
+);
+$pdo->prepare(
+    'UPDATE `' . $messageTable . '` SET message_seq = 101
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY ?',
+)->execute([$conversationId, $assetMessageId]);
+$expectRuntime(
+    static fn () => $assetUrlService->resolve(
+        $carol,
+        $sourceFileId,
+        $conversationId,
+        $assetMessageId,
+    ),
+    'Attachment authorization trusted a forged index-to-shard sequence binding.',
+);
+$pdo->prepare(
+    'UPDATE `' . $messageTable . '` SET message_seq = 100
+      WHERE organization = 901 AND BINARY conversation_id = BINARY ?
+        AND BINARY message_id = BINARY ?',
+)->execute([$conversationId, $assetMessageId]);
+$expectApiCode(403, static fn () => $forwardService->derive(
+    $carol,
+    $conversationId,
+    $assetMessageId,
+    $sourceFileId,
+    'video',
+));
+$expectApiCode(403, static fn () => $service->markRead($carol, $conversationId, false));
 $expectApiCode(404, static fn () => $assetUrlService->resolve($outsider, $sourceFileId, $conversationId, $assetMessageId));
 $expectApiCode(404, static fn () => $assetUrlService->resolve($carol, $hiddenFileId, $conversationId, 'web-test-message-2'));
 $pdo->prepare(
@@ -1607,6 +2106,43 @@ $assert(
     'A temporary signed URL was persisted in asset metadata or the message body.',
 );
 
+$service->removeGroupMember($alice, $conversationId, 'user_b', '1');
+$expectApiCode(409, static fn () => $service->revokeGroupMemberHistory(
+    $alice,
+    $conversationId,
+    'user_b',
+    '18446744073709551615',
+    ['1'],
+));
+$service->revokeGroupMemberHistory($alice, $conversationId, 'user_b', '2', ['1']);
+$service->revokeGroupMemberHistory($alice, $conversationId, 'user_b', '2', ['1']);
+$expectApiCode(409, static fn () => $service->revokeGroupMemberHistory(
+    $alice,
+    $conversationId,
+    'user_b',
+    '2',
+    ['2'],
+));
+$bobRevoked = Db::query(
+    'SELECT access_version, access_state FROM im_conversation_member
+      WHERE organization = 901 AND conversation_id = ? AND member_organization = 901
+        AND user_id = "user_b"',
+    [$conversationId],
+)[0];
+$bobHistoryEvents = (int) Db::query(
+    'SELECT COUNT(*) AS aggregate FROM im_group_member_access_audit
+      WHERE organization = 901 AND conversation_id = ? AND member_organization = 901
+        AND user_id = "user_b" AND reason = "history_revoke"',
+    [$conversationId],
+)[0]['aggregate'];
+$assert(
+    (string) $bobRevoked['access_version'] === '3'
+    && $bobRevoked['access_state'] === 'revoked'
+    && $bobHistoryEvents === 1,
+    'History revoke did not revoke the selected closed period idempotently.',
+);
+$expectApiCode(403, static fn () => $service->messages($bob, $conversationId, 0, '', 0, 0, 50));
+
 $columns = $pdo->query(
     'SELECT COLUMN_NAME FROM information_schema.COLUMNS
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = "im_conversation_member"',
@@ -1616,6 +2152,7 @@ $assert(
     && in_array('mute_status', $columns, true)
     && in_array('join_at', $columns, true)
     && in_array('conversation_remark', $columns, true)
+    && in_array('access_state', $columns, true)
     && !in_array('role', $columns, true)
     && !in_array('join_time', $columns, true),
     'Integration test is not running against the final IM membership schema.',

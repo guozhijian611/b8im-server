@@ -35,7 +35,8 @@ final class WebImConversationAccessGuard
         string $conversationId,
         bool $lock = false,
     ): array {
-        if ($organization <= 0 || trim($userId) === '' || trim($conversationId) === '') {
+        if ($organization <= 0 || $userId === '' || trim($userId) !== $userId
+            || $conversationId === '' || trim($conversationId) !== $conversationId) {
             throw new ApiException('没有该会话的访问权限。', 403);
         }
         $lockedPolicy = $lock
@@ -50,7 +51,7 @@ final class WebImConversationAccessGuard
             'SELECT conversation_id, left_organization, left_user_id,
                     right_organization, right_user_id, status
                FROM im_cross_organization_conversation
-              WHERE conversation_id = ?
+              WHERE BINARY conversation_id = BINARY ?
               LIMIT 1',
             [$conversationId],
         )[0] ?? null;
@@ -66,7 +67,7 @@ final class WebImConversationAccessGuard
                 'SELECT conversation_id, left_organization, left_user_id,
                         right_organization, right_user_id, status
                    FROM im_cross_organization_conversation
-                  WHERE conversation_id = ?
+                  WHERE BINARY conversation_id = BINARY ?
                   LIMIT 1 FOR UPDATE',
                 [$conversationId],
             )[0] ?? null;
@@ -110,6 +111,26 @@ final class WebImConversationAccessGuard
                 $userId,
                 $members,
             );
+            if ((string) ($member['access_state'] ?? '') !== 'active') {
+                throw new ApiException('没有该会话的访问权限。', 403);
+            }
+            $foreign = Db::query(
+                'SELECT 1 AS present FROM im_conversation_member
+                  WHERE organization = ? AND BINARY conversation_id = BINARY ? AND member_organization <> ? LIMIT 1',
+                [$organization, $conversationId, $organization],
+            )[0] ?? null;
+            if ($foreign !== null) {
+                throw new \RuntimeException('Group conversation contains a foreign member.');
+            }
+            $periods = Db::query(
+                'SELECT period_no, visible_from_message_seq, visible_until_message_seq
+                   FROM im_conversation_membership_period
+                  WHERE organization = ? AND BINARY conversation_id = BINARY ? AND member_organization = ?
+                    AND BINARY user_id = BINARY ? AND status = 1
+               ORDER BY period_no ASC' . ($lock ? ' FOR UPDATE' : ''),
+                [$organization, $conversationId, $organization, $userId],
+            );
+            $normalizedPeriods = $this->validateEffectivePeriods($periods, true);
 
             return [
                 'conversation_type' => self::CONVERSATION_GROUP,
@@ -118,6 +139,8 @@ final class WebImConversationAccessGuard
                 'member' => $member,
                 'peer_identity' => null,
                 'cross_org_access_snapshot_id' => null,
+                'is_active' => true,
+                'periods' => $normalizedPeriods,
             ];
         }
         if ($type !== self::CONVERSATION_SINGLE) {
@@ -143,6 +166,151 @@ final class WebImConversationAccessGuard
             'peer_identity' => $peer,
             'cross_org_access_snapshot_id' => null,
         ];
+    }
+
+    /**
+     * Read access differs only for same-home groups: history_only members may
+     * read messages covered by an effective closed period. Singles keep the
+     * exact active topology checks in assertAccessible().
+     *
+     * @return array<string,mixed>
+     */
+    public function assertReadable(
+        int $organization,
+        string $userId,
+        string $conversationId,
+        bool $lock = false,
+    ): array {
+        if ($organization <= 0 || $userId === '' || trim($userId) !== $userId
+            || $conversationId === '' || trim($conversationId) !== $conversationId) {
+            throw new ApiException('没有该会话的访问权限。', 403);
+        }
+        $canonical = Db::query(
+            'SELECT 1 AS present FROM im_cross_organization_conversation
+              WHERE BINARY conversation_id = BINARY ? LIMIT 1',
+            [$conversationId],
+        )[0] ?? null;
+        if ($canonical !== null) {
+            return $this->assertAccessible($organization, $userId, $conversationId, $lock);
+        }
+        $this->assertActiveOrganizations([$organization], $lock);
+        $conversation = $this->activeConversation($organization, $conversationId, $lock);
+        if ($conversation === null) {
+            throw new ApiException('没有该会话的访问权限。', 403);
+        }
+        if ((int) $conversation['conversation_type'] !== self::CONVERSATION_GROUP) {
+            return $this->assertAccessible($organization, $userId, $conversationId, $lock);
+        }
+        $members = Db::query(
+            'SELECT * FROM im_conversation_member
+              WHERE organization = ? AND BINARY conversation_id = BINARY ? AND delete_time IS NULL
+           ORDER BY member_organization ASC, user_id COLLATE utf8mb4_bin ASC'
+                . ($lock ? ' FOR UPDATE' : ''),
+            [$organization, $conversationId],
+        );
+        $viewer = null;
+        foreach ($members as $member) {
+            if ((int) $member['member_organization'] !== $organization) {
+                throw new \RuntimeException('Group conversation contains a foreign member.');
+            }
+            if ((string) $member['user_id'] === $userId) {
+                $viewer = $member;
+            }
+        }
+        if ($viewer === null || !in_array((string) $viewer['access_state'], ['active', 'history_only'], true)) {
+            throw new ApiException('没有该会话的访问权限。', 403);
+        }
+        $periods = Db::query(
+            'SELECT period_no, visible_from_message_seq, visible_until_message_seq
+               FROM im_conversation_membership_period
+              WHERE organization = ? AND BINARY conversation_id = BINARY ? AND member_organization = ?
+                AND BINARY user_id = BINARY ? AND status = 1
+           ORDER BY period_no ASC' . ($lock ? ' FOR UPDATE' : ''),
+            [$organization, $conversationId, $organization, $userId],
+        );
+        $active = (string) $viewer['access_state'] === 'active';
+        $membershipStatus = (int) $viewer['status'];
+        if (($active && $membershipStatus !== 1)
+            || (!$active && !in_array($membershipStatus, [2, 3], true))) {
+            throw new \RuntimeException('Group member access state and periods are inconsistent.');
+        }
+        $normalizedPeriods = $this->validateEffectivePeriods($periods, $active);
+        return [
+            'conversation_type' => self::CONVERSATION_GROUP,
+            'is_cross_organization' => false,
+            'homes' => [$organization],
+            'member' => $viewer,
+            'peer_identity' => null,
+            'cross_org_access_snapshot_id' => null,
+            'is_active' => $active,
+            'periods' => $normalizedPeriods,
+        ];
+    }
+
+    /**
+     * @param list<array<string,mixed>> $periods
+     * @return list<array{period_no:string,from_seq:string,to_seq:?string}>
+     */
+    private function validateEffectivePeriods(array $periods, bool $active): array
+    {
+        $normalized = [];
+        $periodNumbers = [];
+        $openCount = 0;
+        $closedCount = 0;
+        foreach ($periods as $period) {
+            $periodNo = (string) ($period['period_no'] ?? '');
+            $from = (string) ($period['visible_from_message_seq'] ?? '');
+            $untilValue = $period['visible_until_message_seq'] ?? null;
+            $until = $untilValue === null ? null : (string) $untilValue;
+            if (!$this->isPositiveDecimal($periodNo) || !$this->isPositiveDecimal($from)
+                || ($until !== null && (!$this->isPositiveDecimal($until)
+                    || $this->compareDecimals($until, $from) < 0))) {
+                throw new \RuntimeException('Group membership period scalar is invalid.');
+            }
+            if (isset($periodNumbers[$periodNo])) {
+                throw new \RuntimeException('Group membership period number is duplicated.');
+            }
+            $periodNumbers[$periodNo] = true;
+            if ($until === null) {
+                ++$openCount;
+            } else {
+                ++$closedCount;
+            }
+            $normalized[] = [
+                'period_no' => $periodNo,
+                'from_seq' => $from,
+                'to_seq' => $until,
+            ];
+        }
+        for ($leftIndex = 0, $count = count($normalized); $leftIndex < $count; ++$leftIndex) {
+            for ($rightIndex = $leftIndex + 1; $rightIndex < $count; ++$rightIndex) {
+                $left = $normalized[$leftIndex];
+                $right = $normalized[$rightIndex];
+                $leftStartsBeforeRightEnds = $right['to_seq'] === null
+                    || $this->compareDecimals($left['from_seq'], $right['to_seq']) <= 0;
+                $rightStartsBeforeLeftEnds = $left['to_seq'] === null
+                    || $this->compareDecimals($right['from_seq'], $left['to_seq']) <= 0;
+                if ($leftStartsBeforeRightEnds && $rightStartsBeforeLeftEnds) {
+                    throw new \RuntimeException('Group membership periods overlap.');
+                }
+            }
+        }
+        if (($active && $openCount !== 1)
+            || (!$active && ($openCount !== 0 || $closedCount < 1))) {
+            throw new \RuntimeException('Group member access state and periods are inconsistent.');
+        }
+        return $normalized;
+    }
+
+    private function isPositiveDecimal(string $value): bool
+    {
+        return preg_match('/^[1-9][0-9]*$/D', $value) === 1;
+    }
+
+    private function compareDecimals(string $left, string $right): int
+    {
+        $length = strlen($left) <=> strlen($right);
+        return $length !== 0 ? $length : strcmp($left, $right);
     }
 
     /** @param list<int> $organizations */
@@ -307,7 +475,7 @@ final class WebImConversationAccessGuard
             'SELECT *
                FROM im_conversation
               WHERE organization = ?
-                AND conversation_id = ?
+                AND BINARY conversation_id = BINARY ?
                 AND status = 1
                 AND delete_time IS NULL
               LIMIT 1' . ($lock ? ' FOR UPDATE' : ''),
@@ -322,7 +490,7 @@ final class WebImConversationAccessGuard
             'SELECT *
                FROM im_conversation_member
               WHERE organization = ?
-                AND conversation_id = ?
+                AND BINARY conversation_id = BINARY ?
                 AND status = 1
                 AND delete_time IS NULL
            ORDER BY member_organization ASC, user_id ASC' . ($lock ? ' FOR UPDATE' : ''),
