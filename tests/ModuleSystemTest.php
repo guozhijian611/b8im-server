@@ -18,6 +18,7 @@ use plugin\saimulti\service\module\ClientConfigProjectionService;
 use plugin\saimulti\service\module\DistributedLockInterface;
 use plugin\saimulti\service\module\ManifestCatalog;
 use plugin\saimulti\service\module\ModuleAccessCacheInterface;
+use plugin\saimulti\service\module\ModuleAccessDecision;
 use plugin\saimulti\service\module\ModuleAccessService;
 use plugin\saimulti\service\module\ModuleAccessStoreInterface;
 use plugin\saimulti\service\module\ModuleAuthCacheInvalidator;
@@ -115,6 +116,8 @@ final class ModuleTestCache implements ModuleAccessCacheInterface
 
     public bool $failRead = false;
 
+    public bool $failWrite = false;
+
     public function get(string $key): ?array
     {
         if ($this->failRead) {
@@ -126,6 +129,10 @@ final class ModuleTestCache implements ModuleAccessCacheInterface
 
     public function set(string $key, array $value): void
     {
+        if ($this->failWrite) {
+            throw new RuntimeException('redis write unavailable');
+        }
+
         $this->values[$key] = $value;
     }
 
@@ -656,6 +663,83 @@ $assert(
     '有效缓存 deny 仍回源 DB',
 );
 $store->fail = false;
+$store->snapshot = $enabledSnapshot;
+
+$cache->values[$cacheKey] = $cachedDeny;
+$authoritativeReads = $store->tenantSnapshotReads;
+$assert(
+    $access->decideAuthoritatively(
+        1,
+        'announcement',
+        'web',
+        'announcement.web.page',
+    ) === ModuleAccessDecision::AVAILABLE,
+    '权威授权判断错误信任了 stale cached deny',
+);
+$assert(
+    $store->tenantSnapshotReads === $authoritativeReads + 1,
+    '权威授权判断没有直读 DB',
+);
+
+$cache->values[$cacheKey] = $cached;
+$store->fail = true;
+$assert(
+    $access->decideAuthoritatively(
+        1,
+        'announcement',
+        'web',
+        'announcement.web.page',
+    ) === ModuleAccessDecision::UNAVAILABLE,
+    'cached allow + DB failure 未返回 UNAVAILABLE',
+);
+$store->fail = false;
+
+$store->snapshot = $enabledSnapshot;
+$store->snapshot['license_status'] = TenantModuleStatus::DISABLED->value;
+$assert(
+    $access->decideAuthoritatively(
+        1,
+        'announcement',
+        'web',
+        'announcement.web.page',
+    ) === ModuleAccessDecision::DENIED,
+    'DB deny 未返回 DENIED',
+);
+
+$store->missing = true;
+$assert(
+    $access->decideAuthoritatively(
+        1,
+        'announcement',
+        'web',
+        'announcement.web.page',
+    ) === ModuleAccessDecision::DENIED,
+    'DB 缺失授权未返回 DENIED',
+);
+$store->missing = false;
+
+$store->snapshot = $enabledSnapshot;
+$cache->failWrite = true;
+$assert(
+    $access->decideAuthoritatively(
+        1,
+        'announcement',
+        'web',
+        'announcement.web.page',
+    ) === ModuleAccessDecision::AVAILABLE,
+    '缓存写失败改变了 DB allow 结论',
+);
+$store->snapshot['license_status'] = TenantModuleStatus::UNAUTHORIZED->value;
+$assert(
+    $access->decideAuthoritatively(
+        1,
+        'announcement',
+        'web',
+        'announcement.web.page',
+    ) === ModuleAccessDecision::DENIED,
+    '缓存写失败改变了 DB deny 结论',
+);
+$cache->failWrite = false;
 $store->snapshot = $enabledSnapshot;
 
 $rawRedis = new ModuleRawRedisTestHandler();

@@ -10,7 +10,7 @@ use plugin\saimulti\exception\SearchProjectionIntegrityException;
 use plugin\saimulti\service\web\MessageShardRouteValidator;
 use support\think\Db;
 
-final class SearchService
+final class SearchService implements SearchDocumentProjectionServiceInterface
 {
     private const INDEX = 'sm_search_index';
     private const DOC = 'sm_search_doc';

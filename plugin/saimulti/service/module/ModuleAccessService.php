@@ -62,6 +62,33 @@ final class ModuleAccessService
         return $this->snapshotAllows($cacheValue, $platform, $capability);
     }
 
+    public function decideAuthoritatively(
+        int $organization,
+        string $moduleKey,
+        string $platform = 'server',
+        ?string $capability = null,
+    ): ModuleAccessDecision {
+        $this->assertIdentifiers($organization, $moduleKey);
+        $cacheKey = $this->cacheKey($organization, $moduleKey);
+
+        try {
+            $snapshot = $this->store->tenantSnapshot($organization, $moduleKey);
+            $cacheValue = $this->toCacheValue($snapshot);
+        } catch (Throwable) {
+            return ModuleAccessDecision::UNAVAILABLE;
+        }
+
+        try {
+            $this->cache->set($cacheKey, $cacheValue);
+        } catch (Throwable) {
+            // The authoritative MySQL result for this decision is unchanged.
+        }
+
+        return $this->snapshotAllows($cacheValue, $platform, $capability)
+            ? ModuleAccessDecision::AVAILABLE
+            : ModuleAccessDecision::DENIED;
+    }
+
     public function assertAvailable(
         int $organization,
         string $moduleKey,
