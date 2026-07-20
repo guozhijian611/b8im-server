@@ -44,15 +44,6 @@ final class SearchController extends AdminController
         return $this->success((new SearchService())->jobList($org, $request->get(), true));
     }
 
-    #[Permission('平台写入文档', 'saimulti:admin:search:job')]
-    public function docUpsert(Request $request): Response
-    {
-        $org = $this->org($request);
-        $input = is_array($request->post()) ? $request->post() : [];
-
-        return $this->success((new SearchService())->upsertDocument($org, $input));
-    }
-
     private function org(Request $request): int
     {
         $org = $request->input('organization') ?? $request->get('organization');

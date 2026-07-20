@@ -4,7 +4,10 @@ declare(strict_types=1);
 
 namespace plugin\saimulti\service\module;
 
+use B8im\ImShared\Protocol\MessageType;
 use plugin\saimulti\exception\ApiException;
+use plugin\saimulti\exception\SearchProjectionIntegrityException;
+use plugin\saimulti\service\web\MessageShardRouteValidator;
 use support\think\Db;
 use Throwable;
 
@@ -169,60 +172,111 @@ final class SearchService
         ];
     }
 
-    // ---------- documents (for consumers / admin seed) ----------
+    // ---------- documents (internal consumers only) ----------
     /**
-     * Upsert an indexable message document.
+     * Rebuild one search document exclusively from the authoritative home
+     * message index and its canonical physical body.
      *
-     * @param array<string, mixed> $input
      * @return array<string, mixed>
      */
-    public function upsertDocument(int $organization, array $input): array
+    public function upsertMessageDocument(int $homeOrganization, string $messageId): array
     {
-        $this->assertOrg($organization);
-        $this->indexRead($organization, true);
-        $messageId = $this->idStr((string) ($input['message_id'] ?? ''), 'message_id');
-        $conversationId = $this->accessId(
-            (string) ($input['conversation_id'] ?? ''),
-            'conversation_id',
-        );
-        $content = trim((string) ($input['content'] ?? ''));
-        if ($content === '') {
-            throw new ApiException('content 必填。', 422);
-        }
-        if (mb_strlen($content) > 20000) {
-            $content = mb_substr($content, 0, 20000);
-        }
-        $visibility = array_key_exists('visibility', $input)
-            ? $this->bool01($input['visibility'])
-            : 1;
-        $now = date('Y-m-d H:i:s');
-        $existing = Db::table(self::DOC)
-            ->where('organization', $organization)
-            ->where('message_id', $messageId)
-            ->find();
-        $payload = [
-            'conversation_id' => $conversationId,
-            'sender_user_id' => $this->limitStr((string) ($input['sender_user_id'] ?? ''), 64),
-            'message_type' => max(0, $this->intVal($input['message_type'] ?? 0, 'message_type')),
-            'message_seq' => max(0, $this->intVal($input['message_seq'] ?? 0, 'message_seq')),
-            'content' => $content,
-            'visibility' => $visibility,
-            'sent_at' => $this->nullableDate((string) ($input['sent_at'] ?? '')),
-            'update_time' => $now,
-        ];
-        if ($existing === null) {
-            $id = (int) Db::table(self::DOC)->insertGetId($payload + [
-                'organization' => $organization,
-                'message_id' => $messageId,
-                'create_time' => $now,
-            ]);
-        } else {
-            Db::table(self::DOC)->where('id', $existing['id'])->update($payload);
-            $id = (int) $existing['id'];
-        }
-        $this->refreshDocCount($organization);
+        $this->assertOrg($homeOrganization);
+        $messageId = $this->idStr($messageId, 'message_id');
+        $this->indexRead($homeOrganization, true);
 
-        return $this->formatDoc($this->docRow($organization, $id));
+        return Db::transaction(function () use ($homeOrganization, $messageId): array {
+            $searchIndexRows = Db::query(
+                'SELECT id FROM sm_search_index
+                  WHERE organization = ? AND delete_time IS NULL
+                  FOR UPDATE',
+                [$homeOrganization],
+            );
+            if (count($searchIndexRows) !== 1) {
+                throw new SearchProjectionIntegrityException('Search index state is missing or ambiguous.');
+            }
+            $indexRows = Db::query(
+                'SELECT organization, message_id, conversation_id, message_seq,
+                        sender_id, sender_organization, client_msg_id, storage_node,
+                        shard_table, create_time AS index_create_time
+                   FROM im_message_index
+                  WHERE organization = ?
+                    AND BINARY message_id = BINARY ?
+                  FOR UPDATE',
+                [$homeOrganization, $messageId],
+            );
+            if (count($indexRows) !== 1) {
+                throw new SearchProjectionIntegrityException(
+                    'Authoritative IM message index row is missing or ambiguous.',
+                );
+            }
+            $index = $indexRows[0];
+            $conversationId = $this->authoritativeAccessId(
+                (string) ($index['conversation_id'] ?? ''),
+                'conversation_id',
+            );
+            $shardTable = (new MessageShardRouteValidator())->assertIndexRoute(
+                $index,
+                $homeOrganization,
+                $conversationId,
+            );
+            $bodyRows = Db::query(
+                'SELECT organization, conversation_id, conversation_type, message_id,
+                        message_seq, client_msg_id, sender_id, sender_organization,
+                        message_type, content, status, create_time, delete_time
+                   FROM ' . $this->quoteShard($shardTable) . '
+                  WHERE organization = ?
+                    AND BINARY conversation_id = BINARY ?
+                    AND BINARY message_id = BINARY ?
+                  FOR UPDATE',
+                [$homeOrganization, $conversationId, $messageId],
+            );
+            if (count($bodyRows) !== 1) {
+                throw new SearchProjectionIntegrityException(
+                    'Authoritative IM message shard body is missing or ambiguous.',
+                );
+            }
+            $body = $bodyRows[0];
+            $this->assertIndexedBodyBinding(
+                $index,
+                $body,
+                $homeOrganization,
+                $conversationId,
+                $messageId,
+            );
+
+            $now = date('Y-m-d H:i:s');
+            $existing = Db::table(self::DOC)
+                ->where('organization', $homeOrganization)
+                ->whereRaw('BINARY message_id = BINARY ?', [$messageId])
+                ->lock(true)
+                ->find();
+            $payload = [
+                'conversation_id' => $conversationId,
+                'sender_organization' => (int) $body['sender_organization'],
+                'sender_user_id' => (string) $body['sender_id'],
+                'message_type' => (int) $body['message_type'],
+                'message_seq' => (string) $body['message_seq'],
+                'content' => (string) ($body['content'] ?? ''),
+                'visibility' => (int) $body['status'] === 1
+                    && ($body['delete_time'] ?? null) === null ? 1 : 0,
+                'sent_at' => (string) $body['create_time'],
+                'update_time' => $now,
+            ];
+            if ($existing === null) {
+                $id = (int) Db::table(self::DOC)->insertGetId($payload + [
+                    'organization' => $homeOrganization,
+                    'message_id' => $messageId,
+                    'create_time' => $now,
+                ]);
+            } else {
+                Db::table(self::DOC)->where('id', $existing['id'])->update($payload);
+                $id = (int) $existing['id'];
+            }
+            $this->refreshDocCount($homeOrganization);
+
+            return $this->formatDoc($this->docRow($homeOrganization, $id));
+        });
     }
 
     public function hideDocument(int $organization, string $messageId): array
@@ -299,11 +353,30 @@ final class SearchService
                 [$conversationId],
             );
         }
-        $sender = (string) ($filters['sender_user_id'] ?? '');
-        if ($sender !== '') {
+        $hasSenderOrganization = array_key_exists('sender_organization', $filters);
+        $hasSenderUserId = array_key_exists('sender_user_id', $filters);
+        if ($hasSenderOrganization !== $hasSenderUserId) {
+            throw new ApiException(
+                '发送者筛选必须同时提供 sender_organization 和 sender_user_id。',
+                422,
+            );
+        }
+        if ($hasSenderOrganization) {
+            $senderOrganization = $this->intVal(
+                $filters['sender_organization'],
+                'sender_organization',
+            );
+            if ($senderOrganization <= 0) {
+                throw new ApiException('sender_organization 无效。', 422);
+            }
+            $senderUserId = $this->accessId(
+                (string) $filters['sender_user_id'],
+                'sender_user_id',
+            );
+            $query->where('sender_organization', $senderOrganization);
             $query->whereRaw(
                 'BINARY sender_user_id = BINARY ?',
-                [$this->accessId($sender, 'sender_user_id')],
+                [$senderUserId],
             );
         }
         if (isset($filters['message_type']) && $filters['message_type'] !== '' && $filters['message_type'] !== null) {
@@ -347,6 +420,8 @@ EXISTS (
        AND BINARY mi.message_id = BINARY sm_search_doc.message_id
        AND BINARY mi.conversation_id = BINARY sm_search_doc.conversation_id
        AND mi.message_seq = sm_search_doc.message_seq
+       AND mi.create_time = sm_search_doc.sent_at
+       AND mi.sender_organization = sm_search_doc.sender_organization
        AND BINARY mi.sender_id = BINARY sm_search_doc.sender_user_id
        AND c.status = 1
        AND c.delete_time IS NULL
@@ -686,21 +761,28 @@ SQL;
     private function createIndex(int $organization, int $actorId): array
     {
         $now = date('Y-m-d H:i:s');
-        $id = (int) Db::table(self::INDEX)->insertGetId([
-            'organization' => $organization,
-            'backend' => 'mysql',
-            'status' => 'idle',
-            'doc_count' => 0,
-            'last_built_at' => null,
-            'last_error' => '',
-            'created_by' => $actorId > 0 ? $actorId : null,
-            'updated_by' => $actorId > 0 ? $actorId : null,
-            'create_time' => $now,
-            'update_time' => $now,
-        ]);
-        $row = Db::table(self::INDEX)->where('id', $id)->find();
+        $actor = $actorId > 0 ? $actorId : null;
+        Db::execute(
+            <<<'SQL'
+INSERT INTO sm_search_index
+                (organization, backend, status, doc_count, last_built_at,
+                 last_error, created_by, updated_by, create_time, update_time)
+VALUES (?, 'mysql', 'idle', 0, NULL, '', ?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE id = id
+SQL,
+            [$organization, $actor, $actor, $now, $now],
+        );
+        $row = Db::table(self::INDEX)
+            ->where('organization', $organization)
+            ->whereNull('delete_time')
+            ->find();
+        if (!is_array($row)) {
+            throw new SearchProjectionIntegrityException(
+                'Search index state cannot be created because its unique identity is inactive.',
+            );
+        }
 
-        return is_array($row) ? $row : [];
+        return $row;
     }
 
     private function refreshDocCount(int $organization): void
@@ -714,6 +796,62 @@ SQL;
             'status' => $count > 0 ? 'ready' : 'idle',
             'update_time' => date('Y-m-d H:i:s'),
         ]);
+    }
+
+    /** @param array<string, mixed> $index @param array<string, mixed> $body */
+    private function assertIndexedBodyBinding(
+        array $index,
+        array $body,
+        int $homeOrganization,
+        string $conversationId,
+        string $messageId,
+    ): void {
+        $senderOrganization = (int) ($index['sender_organization'] ?? 0);
+        $senderUserId = (string) ($index['sender_id'] ?? '');
+        $messageType = (int) ($body['message_type'] ?? 0);
+        $status = (int) ($body['status'] ?? 0);
+        if ((int) ($index['organization'] ?? 0) !== $homeOrganization
+            || (int) ($body['organization'] ?? 0) !== $homeOrganization
+            || !hash_equals($messageId, (string) ($index['message_id'] ?? ''))
+            || !hash_equals($messageId, (string) ($body['message_id'] ?? ''))
+            || !hash_equals($conversationId, (string) ($body['conversation_id'] ?? ''))
+            || (string) ($index['message_seq'] ?? '') !== (string) ($body['message_seq'] ?? '')
+            || !hash_equals(
+                (string) ($index['client_msg_id'] ?? ''),
+                (string) ($body['client_msg_id'] ?? ''),
+            )
+            || !hash_equals(
+                (string) ($index['index_create_time'] ?? ''),
+                (string) ($body['create_time'] ?? ''),
+            )
+            || $senderOrganization <= 0
+            || $senderOrganization !== (int) ($body['sender_organization'] ?? 0)
+            || $senderUserId === ''
+            || !hash_equals($senderUserId, (string) ($body['sender_id'] ?? ''))
+            || !in_array((int) ($body['conversation_type'] ?? 0), [1, 2], true)
+            || !MessageType::isFirstStage($messageType)
+            || !in_array($status, [1, 2, 3], true)) {
+            throw new SearchProjectionIntegrityException(
+                'IM message index and shard body binding is inconsistent.',
+            );
+        }
+        $this->authoritativeAccessId($senderUserId, 'sender_user_id');
+        if ((string) ($index['client_msg_id'] ?? '') === '') {
+            throw new SearchProjectionIntegrityException(
+                'IM message index client identity is invalid.',
+            );
+        }
+    }
+
+    private function quoteShard(string $table): string
+    {
+        if (preg_match('/^im_message_\d{4}_\d{6}$/D', $table) !== 1) {
+            throw new SearchProjectionIntegrityException(
+                'IM message index contains an invalid shard table.',
+            );
+        }
+
+        return '`' . $table . '`';
     }
 
     private function canFulltext(string $keyword): bool
@@ -828,6 +966,7 @@ SQL;
             'organization' => (int) $row['organization'],
             'message_id' => (string) $row['message_id'],
             'conversation_id' => (string) $row['conversation_id'],
+            'sender_organization' => (int) ($row['sender_organization'] ?? 0),
             'sender_user_id' => (string) ($row['sender_user_id'] ?? ''),
             'message_type' => (int) $row['message_type'],
             'message_seq' => (int) $row['message_seq'],
@@ -876,13 +1015,24 @@ SQL;
         }
     }
 
+    private function authoritativeAccessId(string $value, string $label): string
+    {
+        try {
+            return $this->accessId($value, $label);
+        } catch (ApiException $exception) {
+            throw new SearchProjectionIntegrityException(
+                'Authoritative IM message ' . $label . ' is invalid.',
+                previous: $exception,
+            );
+        }
+    }
+
     private function accessId(string $value, string $label): string
     {
         if ($value === ''
             || strlen($value) > 64
             || trim($value) !== $value
-            || str_contains($value, "\0")
-            || str_contains($value, '|')) {
+            || preg_match('/[\x00\x09\x0A\x0B\x0D|]/', $value) === 1) {
             throw new ApiException($label . '无效。', 422);
         }
 
@@ -925,41 +1075,6 @@ SQL;
         }
 
         return $normalized;
-    }
-
-    private function limitStr(string $value, int $max): string
-    {
-        $value = trim($value);
-        if (mb_strlen($value) > $max) {
-            return mb_substr($value, 0, $max);
-        }
-
-        return $value;
-    }
-
-    private function bool01(mixed $value): int
-    {
-        if ($value === 1 || $value === '1' || $value === true || $value === 'true') {
-            return 1;
-        }
-        if ($value === 0 || $value === '0' || $value === false || $value === 'false') {
-            return 0;
-        }
-        throw new ApiException('visibility 无效。', 422);
-    }
-
-    private function nullableDate(string $value): ?string
-    {
-        $value = trim($value);
-        if ($value === '') {
-            return null;
-        }
-        $ts = strtotime($value);
-        if ($ts === false) {
-            throw new ApiException('sent_at 无效。', 422);
-        }
-
-        return date('Y-m-d H:i:s', $ts);
     }
 
     private function intVal(mixed $value, string $label): int

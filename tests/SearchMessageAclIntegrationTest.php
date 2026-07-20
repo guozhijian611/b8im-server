@@ -20,10 +20,12 @@ putenv('DB_NAME=' . $database);
 $_ENV['DB_NAME'] = $database;
 $_SERVER['DB_NAME'] = $database;
 
+use B8im\ImShared\Support\MessageShardIdentity;
 use plugin\saimulti\app\controller\app\SearchController as AppSearchController;
 use plugin\saimulti\app\controller\web\SearchController as WebSearchController;
 use plugin\saimulti\basic\WebController;
 use plugin\saimulti\exception\ApiException;
+use plugin\saimulti\exception\SearchProjectionIntegrityException;
 use plugin\saimulti\service\module\SearchService;
 use support\Request;
 use support\think\Db;
@@ -77,6 +79,32 @@ $expectApiCode = static function (int $code, callable $callback, string $message
     }
     throw new RuntimeException($message . ' did not fail closed.');
 };
+$expectRuntime = static function (callable $callback, string $message) use ($assert): void {
+    try {
+        $callback();
+    } catch (RuntimeException) {
+        $assert(true, $message);
+        return;
+    }
+    throw new RuntimeException($message . ' did not fail closed.');
+};
+$expectIntegrity = static function (callable $callback, string $message) use ($assert): void {
+    try {
+        $callback();
+    } catch (SearchProjectionIntegrityException $exception) {
+        $assert(
+            $exception::class === SearchProjectionIntegrityException::class,
+            $message . ' returned the wrong integrity exception type.',
+        );
+        return;
+    } catch (Throwable $exception) {
+        throw new RuntimeException(
+            $message . ' returned ' . $exception::class . ' instead of a reportable integrity exception.',
+            previous: $exception,
+        );
+    }
+    throw new RuntimeException($message . ' did not fail closed.');
+};
 $singleId = static function (int $leftOrg, string $leftUser, int $rightOrg, string $rightUser): string {
     $identities = [$leftOrg . ':' . $leftUser, $rightOrg . ':' . $rightUser];
     sort($identities, SORT_STRING);
@@ -107,7 +135,8 @@ CREATE TABLE sm_search_index (
 CREATE TABLE sm_search_doc (
  id bigint unsigned AUTO_INCREMENT PRIMARY KEY, organization int unsigned NOT NULL,
  message_id varchar(64) NOT NULL, conversation_id varchar(64) NOT NULL,
- sender_user_id varchar(64) NOT NULL, message_type int unsigned NOT NULL,
+ sender_organization int unsigned NOT NULL, sender_user_id varchar(64) NOT NULL,
+ message_type int unsigned NOT NULL,
  message_seq bigint unsigned NOT NULL, content text NOT NULL, visibility tinyint unsigned NOT NULL,
  sent_at datetime NULL, create_time datetime NULL, update_time datetime NULL,
  UNIQUE KEY uni_org_message (organization, message_id), FULLTEXT KEY ft_content (content)
@@ -117,8 +146,12 @@ CREATE TABLE im_message_index (
  global_seq bigint unsigned NOT NULL, message_id varchar(64) NOT NULL,
  conversation_id varchar(64) NOT NULL, message_seq bigint unsigned NOT NULL,
  sender_id varchar(64) NOT NULL, sender_organization int unsigned NOT NULL,
- create_time datetime NULL,
+ client_msg_id varchar(80) NOT NULL DEFAULT '', storage_node varchar(64) NOT NULL DEFAULT '',
+ shard_table varchar(64) NOT NULL DEFAULT '', create_time datetime NULL,
  UNIQUE KEY uni_org_message (organization, message_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+CREATE TABLE im_runtime_config (
+ config_key varchar(100) PRIMARY KEY, config_value varchar(255) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 CREATE TABLE im_conversation (
  id bigint unsigned AUTO_INCREMENT PRIMARY KEY, organization int unsigned NOT NULL,
@@ -157,6 +190,10 @@ SQL);
         'INSERT INTO sm_search_index (organization,backend,status,doc_count) '
         . 'VALUES (101,"mysql","ready",0),(202,"mysql","ready",0)',
     );
+    $pdo->exec(
+        'INSERT INTO im_runtime_config (config_key,config_value) '
+        . 'VALUES ("message_shard_buckets","8")',
+    );
 
     $conversation = $pdo->prepare(
         'INSERT INTO im_conversation (organization,conversation_id,conversation_type,status) '
@@ -174,13 +211,14 @@ SQL);
     );
     $document = $pdo->prepare(
         'INSERT INTO sm_search_doc '
-        . '(organization,message_id,conversation_id,sender_user_id,message_type,message_seq,'
-        . 'content,visibility,sent_at) VALUES (?, ?, ?, "sender", 1, ?, ?, ?, ?)',
+        . '(organization,message_id,conversation_id,sender_organization,sender_user_id,'
+        . 'message_type,message_seq,content,visibility,sent_at) '
+        . 'VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)',
     );
     $messageIndex = $pdo->prepare(
         'INSERT INTO im_message_index '
         . '(organization,global_seq,message_id,conversation_id,message_seq,sender_id,'
-        . 'sender_organization,create_time) VALUES (?,?,?,?,?,"sender",?,?)',
+        . 'sender_organization,create_time) VALUES (?,?,?,?,?,?,?,?)',
     );
     $docNo = 0;
     $addDoc = static function (
@@ -189,17 +227,23 @@ SQL);
         int $messageSeq,
         string $label,
         int $visibility = 1,
+        int $senderOrganization = 0,
+        string $senderUserId = 'sender',
     ) use ($document, $messageIndex, &$docNo): string {
         ++$docNo;
         $messageId = 'search-acl-' . $docNo;
         $sentAt = sprintf('2026-07-20 12:%02d:00', $docNo);
         $document->execute([
-            $organization, $messageId, $conversationId, $messageSeq,
+            $organization, $messageId, $conversationId,
+            $senderOrganization > 0 ? $senderOrganization : $organization,
+            $senderUserId, $messageSeq,
             'x searchable ' . $label, $visibility, $sentAt,
         ]);
         $messageIndex->execute([
             $organization, $docNo, $messageId, $conversationId, $messageSeq,
-            $organization, $sentAt,
+            $senderUserId,
+            $senderOrganization > 0 ? $senderOrganization : $organization,
+            $sentAt,
         ]);
         return $messageId;
     };
@@ -267,6 +311,18 @@ SQL);
     $crossMessage = $addDoc(101,$crossSingle,1,'cross-single');
     $addDoc(202,$crossSingle,1,'cross-other-home');
 
+    $sameBareCross = $singleId(101,'shared',202,'shared');
+    $pdo->prepare(
+        'INSERT INTO im_cross_organization_conversation VALUES (?,101,"shared",202,"shared",1)',
+    )->execute([$sameBareCross]);
+    foreach ([101,202] as $home) {
+        $conversation->execute([$home,$sameBareCross,1,1]);
+        $member->execute([$home,$sameBareCross,101,'shared',1,'active']);
+        $member->execute([$home,$sameBareCross,202,'shared',1,'active']);
+    }
+    $sameBareSender101 = $addDoc(101,$sameBareCross,1,'same-bare-sender-home',1,101,'shared');
+    $sameBareSender202 = $addDoc(101,$sameBareCross,2,'same-bare-sender-peer',1,202,'shared');
+
     $otherOrgGroup = 'group_other_org';
     $conversation->execute([202,$otherOrgGroup,2,1]);
     $member->execute([202,$otherOrgGroup,202,'shared',1,'active']);
@@ -285,8 +341,215 @@ SQL);
     $forgedSender = $addDoc(101,$activeGroup,2,'丁-forged-sender');
     $pdo->prepare('UPDATE sm_search_doc SET sender_user_id="other" WHERE organization=101 AND message_id=?')
         ->execute([$forgedSender]);
+    $forgedSenderOrganization = $addDoc(101,$activeGroup,2,'戊-forged-sender-org');
+    $pdo->prepare(
+        'UPDATE sm_search_doc SET sender_organization=202 '
+        . 'WHERE organization=101 AND message_id=?',
+    )->execute([$forgedSenderOrganization]);
+    $forgedSentAt = $addDoc(101,$activeGroup,2,'己-forged-sent-at');
+    $pdo->prepare(
+        'UPDATE sm_search_doc SET sent_at="2026-07-21 00:00:00" '
+        . 'WHERE organization=101 AND message_id=?',
+    )->execute([$forgedSentAt]);
 
     $service = new SearchService();
+    $assert(
+        !(new ReflectionClass(SearchService::class))->hasMethod('upsertDocument'),
+        'Search service retained the caller-controlled document writer.',
+    );
+    $writerMethod = new ReflectionMethod(SearchService::class, 'upsertMessageDocument');
+    $assert(
+        array_map(
+            static fn (ReflectionParameter $parameter): string => $parameter->getName(),
+            $writerMethod->getParameters(),
+        ) === ['homeOrganization', 'messageId'],
+        'Internal search writer accepted caller-controlled message identity fields.',
+    );
+    $writerConversation = 'single_writer_authoritative';
+    $writerSentAt = '2026-07-20 16:00:00';
+    $writerShard = MessageShardIdentity::tableName(101, $writerConversation, $writerSentAt, 8);
+    $quotedWriterShard = '`' . $writerShard . '`';
+    $pdo->exec(
+        'CREATE TABLE ' . $quotedWriterShard . ' (
+          id bigint unsigned AUTO_INCREMENT PRIMARY KEY,
+          organization int unsigned NOT NULL,
+          conversation_id varchar(64) NOT NULL,
+          conversation_type tinyint unsigned NOT NULL,
+          message_id varchar(64) NOT NULL,
+          message_seq bigint unsigned NOT NULL,
+          client_msg_id varchar(80) NOT NULL,
+          sender_id varchar(64) NOT NULL,
+          sender_organization int unsigned NOT NULL,
+          message_type tinyint unsigned NOT NULL,
+          content longtext NULL,
+          status tinyint unsigned NOT NULL,
+          create_time datetime NULL,
+          delete_time datetime NULL,
+          UNIQUE KEY uni_org_message (organization,message_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci',
+    );
+    $writerIndex = $pdo->prepare(
+        'INSERT INTO im_message_index
+         (organization,global_seq,message_id,conversation_id,message_seq,sender_id,
+          sender_organization,client_msg_id,storage_node,shard_table,create_time)
+         VALUES (101,?,?,?,?,?,?,?,?,?,?)',
+    );
+    $writerBody = $pdo->prepare(
+        'INSERT INTO ' . $quotedWriterShard . '
+         (organization,conversation_id,conversation_type,message_id,message_seq,client_msg_id,
+          sender_id,sender_organization,message_type,content,status,create_time,delete_time)
+         VALUES (101,?,1,?,?,?,?,?,1,?,1,?,NULL)',
+    );
+    $writerIndex->execute([
+        501,
+        'writer-valid',
+        $writerConversation,
+        1,
+        'same_sender',
+        202,
+        'writer-client-1',
+        'mysql-primary',
+        $writerShard,
+        $writerSentAt,
+    ]);
+    $writerBody->execute([
+        $writerConversation,
+        'writer-valid',
+        1,
+        'writer-client-1',
+        'same_sender',
+        202,
+        '{"text":"writer authoritative searchable"}',
+        $writerSentAt,
+    ]);
+    $written = $service->upsertMessageDocument(101, 'writer-valid');
+    $assert(
+        $written['conversation_id'] === $writerConversation
+        && $written['sender_organization'] === 202
+        && $written['sender_user_id'] === 'same_sender'
+        && $written['message_seq'] === 1
+        && $written['message_type'] === 1
+        && $written['content'] === '{"text":"writer authoritative searchable"}'
+        && $written['visibility'] === 1
+        && $written['sent_at'] === $writerSentAt,
+        'Internal writer did not derive the document from the exact index/body pair.',
+    );
+    $pdo->exec(
+        'UPDATE sm_search_doc SET conversation_id="forged",sender_organization=101,
+          sender_user_id="forged",message_seq=99,content="forged",visibility=0
+         WHERE organization=101 AND message_id="writer-valid"',
+    );
+    $rewritten = $service->upsertMessageDocument(101, 'writer-valid');
+    $assert(
+        $rewritten['conversation_id'] === $writerConversation
+        && $rewritten['sender_organization'] === 202
+        && $rewritten['sender_user_id'] === 'same_sender'
+        && $rewritten['message_seq'] === 1
+        && $rewritten['content'] === '{"text":"writer authoritative searchable"}'
+        && $rewritten['visibility'] === 1,
+        'Internal writer preserved caller-forged search document fields.',
+    );
+    $pdo->exec(
+        'UPDATE ' . $quotedWriterShard . ' SET status=2 WHERE message_id="writer-valid"',
+    );
+    $assert(
+        $service->upsertMessageDocument(101, 'writer-valid')['visibility'] === 0,
+        'Internal writer did not derive recalled visibility from the body status.',
+    );
+    $pdo->prepare(
+        'UPDATE im_message_index SET conversation_id=?
+          WHERE organization=101 AND message_id="writer-valid"',
+    )->execute(["bad\tconversation"]);
+    $expectIntegrity(
+        static fn () => $service->upsertMessageDocument(101, 'writer-valid'),
+        'Writer with an invalid authoritative conversation identity',
+    );
+    $pdo->prepare(
+        'UPDATE im_message_index SET conversation_id=?
+          WHERE organization=101 AND message_id="writer-valid"',
+    )->execute([$writerConversation]);
+    $pdo->prepare(
+        'UPDATE im_message_index SET sender_id=?
+          WHERE organization=101 AND message_id="writer-valid"',
+    )->execute(["bad\tsender"]);
+    $pdo->prepare(
+        'UPDATE ' . $quotedWriterShard . ' SET sender_id=?
+          WHERE organization=101 AND message_id="writer-valid"',
+    )->execute(["bad\tsender"]);
+    $expectIntegrity(
+        static fn () => $service->upsertMessageDocument(101, 'writer-valid'),
+        'Writer with an invalid authoritative sender identity',
+    );
+    $pdo->exec(
+        'UPDATE im_message_index SET sender_id="same_sender"
+          WHERE organization=101 AND message_id="writer-valid"',
+    );
+    $pdo->exec(
+        'UPDATE ' . $quotedWriterShard . ' SET sender_id="same_sender"
+          WHERE organization=101 AND message_id="writer-valid"',
+    );
+    $expectRuntime(
+        static fn () => $service->upsertMessageDocument(101, 'writer-missing-index'),
+        'Writer without authoritative index',
+    );
+    $writerIndex->execute([
+        502,
+        'writer-missing-body',
+        $writerConversation,
+        2,
+        'same_sender',
+        202,
+        'writer-client-2',
+        'mysql-primary',
+        $writerShard,
+        $writerSentAt,
+    ]);
+    $expectRuntime(
+        static fn () => $service->upsertMessageDocument(101, 'writer-missing-body'),
+        'Writer without authoritative body',
+    );
+    $writerIndex->execute([
+        503,
+        'writer-mismatch',
+        $writerConversation,
+        3,
+        'same_sender',
+        202,
+        'writer-client-3',
+        'mysql-primary',
+        $writerShard,
+        $writerSentAt,
+    ]);
+    $writerBody->execute([
+        $writerConversation,
+        'writer-mismatch',
+        3,
+        'writer-client-3',
+        'same_sender',
+        101,
+        '{"text":"mismatched sender"}',
+        $writerSentAt,
+    ]);
+    $expectRuntime(
+        static fn () => $service->upsertMessageDocument(101, 'writer-mismatch'),
+        'Writer with mismatched index/body identity',
+    );
+    $writerIndex->execute([
+        504,
+        'writer-wrong-route',
+        $writerConversation,
+        4,
+        'same_sender',
+        202,
+        'writer-client-4',
+        'mysql-primary',
+        'im_message_202607_999999',
+        $writerSentAt,
+    ]);
+    $expectRuntime(
+        static fn () => $service->upsertMessageDocument(101, 'writer-wrong-route'),
+        'Writer with a mutable forged shard route',
+    );
     $assert(
         $service->indexList(['page'=>1,'limit'=>20])['total'] === 2,
         'Platform index management was incorrectly scoped as an end user.',
@@ -295,11 +558,87 @@ SQL);
         $service->indexRead(202, false)['organization'] === 202,
         'Tenant index management was incorrectly scoped by the Web user ACL.',
     );
-    $expected = [$activeFirst,$activeLater,$historyFirst,$historySecond,$sameSingleMessage,$crossMessage];
+    $barrier = sys_get_temp_dir() . '/b8im-search-index-' . bin2hex(random_bytes(8));
+    $worker = __DIR__ . '/support/search_index_create_worker.php';
+    $processes = [];
+    $readyFiles = [];
+    try {
+        for ($i = 0; $i < 2; ++$i) {
+            $ready = $barrier . '.ready-' . $i;
+            $pipes = [];
+            $process = proc_open(
+                [PHP_BINARY, $worker, $barrier, $ready, '303'],
+                [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+                $pipes,
+                null,
+                null,
+                ['bypass_shell' => true],
+            );
+            if (!is_resource($process)) {
+                throw new RuntimeException('Unable to start search index concurrency worker.');
+            }
+            $processes[] = [$process, $pipes];
+            $readyFiles[] = $ready;
+        }
+        $readyDeadline = microtime(true) + 10;
+        while (count(array_filter($readyFiles, 'is_file')) !== 2) {
+            if (microtime(true) >= $readyDeadline) {
+                throw new RuntimeException(
+                    'Search index concurrency workers did not become ready.',
+                );
+            }
+            usleep(10000);
+        }
+        if (!touch($barrier)) {
+            throw new RuntimeException('Unable to release search index concurrency workers.');
+        }
+        foreach ($processes as [$process, $pipes]) {
+            $stdout = stream_get_contents($pipes[1]);
+            $stderr = stream_get_contents($pipes[2]);
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            $status = proc_close($process);
+            $assert(
+                $status === 0 && trim((string) $stdout) === '303',
+                'Concurrent first index creation failed: ' . trim((string) $stderr),
+            );
+        }
+        $processes = [];
+    } finally {
+        @unlink($barrier);
+        foreach ($readyFiles as $ready) {
+            @unlink($ready);
+        }
+        foreach ($processes as [$process, $pipes]) {
+            foreach ($pipes as $pipe) {
+                if (is_resource($pipe)) {
+                    fclose($pipe);
+                }
+            }
+            if (is_resource($process)) {
+                proc_terminate($process);
+                proc_close($process);
+            }
+        }
+    }
+    $assert(
+        (int) $pdo->query('SELECT COUNT(*) FROM sm_search_index WHERE organization=303')->fetchColumn() === 1,
+        'Concurrent first index creation did not converge to exactly one row.',
+    );
+    $expected = [
+        $activeFirst,
+        $activeLater,
+        $historyFirst,
+        $historySecond,
+        $sameSingleMessage,
+        $crossMessage,
+        $sameBareSender101,
+        $sameBareSender202,
+    ];
     $actual = [];
-    for ($page = 1; $page <= 3; ++$page) {
+    for ($page = 1; $page <= 4; ++$page) {
         $result = $service->searchMessages(101,'shared',['q'=>'searchable','page'=>$page,'limit'=>2]);
-        $assert($result['total'] === 6, 'SQL ACL total included unauthorized documents.');
+        $assert($result['total'] === 8, 'SQL ACL total included unauthorized documents.');
         $assert(count($result['data']) === 2, 'SQL ACL returned a short authorized page.');
         array_push($actual, ...array_column($result['data'], 'message_id'));
     }
@@ -315,8 +654,66 @@ SQL);
         'Case-insensitive collation matched a different conversation filter.',
     );
     $assert(
-        $service->searchMessages(101,'shared',['q'=>'searchable','sender_user_id'=>'Sender'])['total'] === 0,
+        $service->searchMessages(101,'shared',[
+            'q'=>'searchable',
+            'sender_organization'=>101,
+            'sender_user_id'=>'Sender',
+        ])['total'] === 0,
         'Case-insensitive collation matched a different sender identity filter.',
+    );
+    $sender101 = $service->searchMessages(101,'shared',[
+        'q'=>'same-bare-sender',
+        'conversation_id'=>$sameBareCross,
+        'sender_organization'=>101,
+        'sender_user_id'=>'shared',
+    ]);
+    $assert(
+        $sender101['total'] === 1
+        && $sender101['data'][0]['message_id'] === $sameBareSender101
+        && $sender101['data'][0]['sender_organization'] === 101,
+        'Composite sender filter did not isolate the home sender identity.',
+    );
+    $sender202 = $service->searchMessages(101,'shared',[
+        'q'=>'same-bare-sender',
+        'conversation_id'=>$sameBareCross,
+        'sender_organization'=>202,
+        'sender_user_id'=>'shared',
+    ]);
+    $assert(
+        $sender202['total'] === 1
+        && $sender202['data'][0]['message_id'] === $sameBareSender202
+        && $sender202['data'][0]['sender_organization'] === 202,
+        'Composite sender filter did not isolate the peer sender identity.',
+    );
+    foreach ([
+        ['sender_organization'=>101],
+        ['sender_user_id'=>'shared'],
+        ['sender_organization'=>0,'sender_user_id'=>'shared'],
+        ['sender_organization'=>'','sender_user_id'=>'shared'],
+        ['sender_organization'=>101,'sender_user_id'=>''],
+        ['sender_organization'=>101,'sender_user_id'=>"bad\tidentity"],
+        ['sender_organization'=>101,'sender_user_id'=>"bad\nidentity"],
+        ['sender_organization'=>101,'sender_user_id'=>"bad\videntity"],
+        ['sender_organization'=>101,'sender_user_id'=>"bad\ridentity"],
+        ['sender_organization'=>101,'sender_user_id'=>str_repeat('界', 22)],
+    ] as $invalidSenderFilter) {
+        $expectApiCode(
+            422,
+            static fn () => $service->searchMessages(
+                101,
+                'shared',
+                ['q'=>'searchable'] + $invalidSenderFilter,
+            ),
+            'Partial or invalid composite sender filter',
+        );
+    }
+    $assert(
+        $service->searchMessages(101, 'shared', [
+            'q'=>'searchable',
+            'sender_organization'=>101,
+            'sender_user_id'=>str_repeat('界', 21),
+        ])['total'] === 0,
+        'A canonical 63-byte UTF-8 sender identity was rejected.',
     );
     $assert(
         $service->searchMessages(101,'shared',['q'=>'中','conversation_id'=>$activeGroup])['total'] === 1,
@@ -333,6 +730,8 @@ SQL);
         ['乙', 'Forged search message_seq detached from the authoritative message index.'],
         ['丙', 'Search document without an authoritative message index row was accepted.'],
         ['丁', 'Forged search sender detached from the authoritative message index.'],
+        ['戊', 'Forged search sender organization detached from the authoritative message index.'],
+        ['己', 'Forged search sent_at detached from the authoritative message index.'],
     ] as [$keyword, $message]) {
         $assert(
             $service->searchMessages(
@@ -361,6 +760,22 @@ SQL);
     $assert(
         $history['total'] === 2 && array_column($history['data'], 'message_seq') === [7,2],
         'history_only did not enforce disjoint membership periods.',
+    );
+    $assert(
+        $service->searchMessages(
+            101,
+            'shared',
+            ['q'=>'gap','conversation_id'=>$historyGroup],
+        )['total'] === 0,
+        'Closed history period leaked a message from the gap before rejoin.',
+    );
+    $assert(
+        $service->searchMessages(
+            101,
+            'shared',
+            ['q'=>'after','conversation_id'=>$historyGroup],
+        )['total'] === 0,
+        'Closed history period leaked a message after the final leave watermark.',
     );
     foreach ([
         'group_revoked',

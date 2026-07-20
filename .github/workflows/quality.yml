@@ -48,6 +48,8 @@ jobs:
       REDIS_PORT: 6379
       CACHE_STORE: redis
       IM_TOKEN_SECRET: b8im-ci-im-token-signing-secret-2026
+      B8IM_IM_ROOT: ${{ github.workspace }}/b8im-im
+      B8IM_SEARCH_MODULE_ROOT: ${{ github.workspace }}/b8im-module-search
 
     steps:
       - name: Checkout backend
@@ -117,6 +119,7 @@ jobs:
         with:
           repository: guozhijian611/b8im-module-search
           path: b8im-module-search
+          ref: 57010797b91c03d684a9e76e46c7d7e7e2c7fa2e
           token: ${{ secrets.B8IM_CI_READ_TOKEN }}
 
       - name: Checkout moments module path dependency
@@ -131,14 +134,14 @@ jobs:
         with:
           repository: guozhijian611/b8im-im
           path: b8im-im
-          ref: eda1783a8d494a25ea21df4151aac8d82cf429a4
+          ref: 918bdddf03102884f7b55037d67e03e497f8616e
 
       - name: Checkout IM shared path dependency
         uses: actions/checkout@v4
         with:
           repository: guozhijian611/b8im-im-shared
           path: b8im-im-shared
-          ref: 170b329f8733e5fac529306982add1334ab5d539
+          ref: 3ed922c7b8d7359aed3443ae87e5b0f29b09fe88
 
       - name: Checkout admin generator target
         uses: actions/checkout@v4

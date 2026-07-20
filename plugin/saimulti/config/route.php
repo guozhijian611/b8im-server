@@ -461,7 +461,6 @@ Route::group("/saimulti", function () {
 	Route::get('/admin/search/indexRead', [\plugin\saimulti\app\controller\admin\SearchController::class, 'indexRead']);
 	Route::post('/admin/search/rebuild', [\plugin\saimulti\app\controller\admin\SearchController::class, 'rebuild']);
 	Route::get('/admin/search/jobIndex', [\plugin\saimulti\app\controller\admin\SearchController::class, 'jobIndex']);
-	Route::post('/admin/search/docUpsert', [\plugin\saimulti\app\controller\admin\SearchController::class, 'docUpsert']);
 
 	// 商业模块 moments（平台）
 	Route::get('/admin/moments/index', [\plugin\saimulti\app\controller\admin\MomentsController::class, 'index']);
@@ -588,7 +587,6 @@ Route::group("/saimulti", function () {
 	Route::get('/tenant/search/indexRead', [$se, 'indexRead']);
 	Route::post('/tenant/search/rebuild', [$se, 'rebuild']);
 	Route::get('/tenant/search/jobIndex', [$se, 'jobIndex']);
-	Route::post('/tenant/search/docUpsert', [$se, 'docUpsert']);
 
 	// 租户 moments
 	Route::get('/tenant/moments/index', [\plugin\saimulti\app\controller\tenant\MomentsController::class, 'index']);

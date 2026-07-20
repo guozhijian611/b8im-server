@@ -76,6 +76,23 @@ foreach ($expectedRoutes as $routeKey => $action) {
     $assert($optionsMiddleware === $expectedMiddleware, $optionsKey . ' escaped the App middleware group.');
 }
 
+foreach ([
+    'POST /saimulti/admin/search/docUpsert',
+    'POST /saimulti/tenant/search/docUpsert',
+] as $removedSearchWriteRoute) {
+    $assert(
+        ($routes[$removedSearchWriteRoute] ?? []) === [],
+        $removedSearchWriteRoute . ' exposed caller-controlled search document writes.',
+    );
+}
+$assert(
+    !(new ReflectionClass(\plugin\saimulti\app\controller\admin\SearchController::class))
+        ->hasMethod('docUpsert')
+    && !(new ReflectionClass(\plugin\saimulti\app\controller\tenant\SearchController::class))
+        ->hasMethod('docUpsert'),
+    'Search controllers retained the public docUpsert action.',
+);
+
 $parameterNames = static fn (string $method): array => array_map(
     static fn (ReflectionParameter $parameter): string => $parameter->getName(),
     (new ReflectionMethod(WebImControlService::class, $method))->getParameters(),

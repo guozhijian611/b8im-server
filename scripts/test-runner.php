@@ -29,6 +29,7 @@ $environment = [
     'WEB_REGISTER_QR_TEST_DB_NAME' => "nb8im_{$suffix}_web_register_qr_test",
     'ANNOUNCEMENT_TEST_DB_NAME' => "nb8im_{$suffix}_announcement_test",
     'SEARCH_ACL_TEST_DB_NAME' => "nb8im_{$suffix}_search_acl_test",
+    'SEARCH_MODULE_MIGRATION_TEST_DB_NAME' => "nb8im_{$suffix}_search_module_migration_test",
     'WEB_IM_TEST_DB_NAME' => "nb8im_{$suffix}_web_test",
 ];
 putenv('OTEL_SDK_DISABLED=true');
@@ -106,6 +107,7 @@ $databaseByTest = [
     'ModuleLifecycleIntegrationTest.php' => 'MODULE_TEST_DB_NAME',
     'ModuleTenantAclIntegrationTest.php' => 'MODULE_ACL_TEST_DB_NAME',
     'SearchMessageAclIntegrationTest.php' => 'SEARCH_ACL_TEST_DB_NAME',
+    'SearchModuleMigrationIntegrationTest.php' => 'SEARCH_MODULE_MIGRATION_TEST_DB_NAME',
     'RoutingConfigIntegrationTest.php' => 'ROUTING_TEST_DB_NAME',
     'TraceCenterMigrationIntegrationTest.php' => 'ROUTING_TEST_DB_NAME',
     'TenantImPolicyIntegrationTest.php' => 'TENANT_IM_POLICY_TEST_DB_NAME',
