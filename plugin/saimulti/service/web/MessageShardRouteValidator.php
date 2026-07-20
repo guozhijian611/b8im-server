@@ -40,7 +40,11 @@ final class MessageShardRouteValidator
         string $conversationId,
     ): string {
         $indexedConversationId = (string) ($index['conversation_id'] ?? '');
-        $indexedCreateTime = (string) ($index['index_create_time'] ?? '');
+        $shardTable = (string) ($index['shard_table'] ?? '');
+        $indexedCreateTime = $index['index_create_time'] ?? null;
+        if (!is_string($indexedCreateTime) || $indexedCreateTime === '') {
+            throw new \RuntimeException('IM message index shard time is invalid.');
+        }
         $expected = $this->expectedTable(
             $organization,
             $conversationId,
@@ -49,7 +53,7 @@ final class MessageShardRouteValidator
         if ((int) ($index['organization'] ?? 0) !== $organization
             || !hash_equals($conversationId, $indexedConversationId)
             || (string) ($index['storage_node'] ?? '') !== 'mysql-primary'
-            || !hash_equals($expected, (string) ($index['shard_table'] ?? ''))) {
+            || !hash_equals($expected, $shardTable)) {
             throw new \RuntimeException('IM message index shard route is inconsistent.');
         }
         return $expected;

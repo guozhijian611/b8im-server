@@ -201,6 +201,147 @@ $columnExists = static function (string $column) use ($pdo, $database): bool {
     $statement->execute([$database, $column]);
     return (int) $statement->fetchColumn() === 1;
 };
+$jobColumns = static function () use ($pdo, $database): array {
+    $statement = $pdo->prepare(
+        'SELECT COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE,COLUMN_DEFAULT
+           FROM information_schema.COLUMNS
+          WHERE TABLE_SCHEMA=? AND TABLE_NAME=\'sm_search_job\'
+       ORDER BY ORDINAL_POSITION',
+    );
+    $statement->execute([$database]);
+    $columns = [];
+    foreach ($statement->fetchAll() as $column) {
+        $columns[(string) $column['COLUMN_NAME']] = $column;
+    }
+    return $columns;
+};
+$assertV3JobSchema = static function (string $context) use (
+    $pdo,
+    $database,
+    $jobColumns,
+    $assert,
+): void {
+    $columns = $jobColumns();
+    $expected = [
+        'cursor_global_seq' => ['bigint unsigned', 'NO', '0'],
+        'high_water_global_seq' => ['bigint unsigned', 'NO', null],
+        'worker_id' => ['varchar(64)', 'YES', null],
+        'claim_token' => ['char(40)', 'YES', null],
+        'locked_until' => ['datetime', 'YES', null],
+        'retry_count' => ['int unsigned', 'NO', '0'],
+        'next_retry_at' => ['datetime', 'YES', null],
+    ];
+    foreach ($expected as $name => [$type, $nullable, $default]) {
+        $column = $columns[$name] ?? null;
+        $defaultMatches = $default === null
+            ? ($column['COLUMN_DEFAULT'] ?? null) === null
+            : (string) ($column['COLUMN_DEFAULT'] ?? '') === $default;
+        $assert(
+            is_array($column)
+            && strtolower((string) $column['COLUMN_TYPE']) === $type
+            && (string) $column['IS_NULLABLE'] === $nullable
+            && $defaultMatches,
+            $context . ' has an invalid sm_search_job.' . $name . ' contract: '
+                . json_encode($column, JSON_UNESCAPED_SLASHES),
+        );
+    }
+    $pending = $pdo->query(
+        'SELECT GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX)
+           FROM information_schema.STATISTICS
+          WHERE TABLE_SCHEMA=' . $pdo->quote($database) . '
+            AND TABLE_NAME=\'sm_search_job\' AND INDEX_NAME=\'idx_pending\'',
+    )->fetchColumn();
+    $assert(
+        $pending === 'status,next_retry_at,locked_until,id',
+        $context . ' has an invalid idx_pending order.',
+    );
+    $checkStatement = $pdo->prepare(
+        'SELECT CHECK_CLAUSE FROM information_schema.CHECK_CONSTRAINTS
+          WHERE CONSTRAINT_SCHEMA=? AND CONSTRAINT_NAME=\'chk_search_job_cursor_high_water\'',
+    );
+    $checkStatement->execute([$database]);
+    $check = strtolower((string) $checkStatement->fetchColumn());
+    $normalizedCheck = preg_replace('/[[:space:]\x60()]+/', '', $check);
+    $assert(
+        $normalizedCheck === 'cursor_global_seq<=high_water_global_seq',
+        $context . ' has an invalid cursor/high-water CHECK.',
+    );
+};
+$assertV2JobSchema = static function (string $context) use ($pdo, $database, $jobColumns, $assert): void {
+    $columns = $jobColumns();
+    $assert(
+        array_keys($columns) === [
+            'id',
+            'organization',
+            'job_type',
+            'status',
+            'processed',
+            'total',
+            'error_message',
+            'created_by',
+            'updated_by',
+            'started_at',
+            'finished_at',
+            'create_time',
+            'update_time',
+        ],
+        $context . ' did not restore the exact v0.2 job columns.',
+    );
+    $expected = [
+        'id' => ['bigint unsigned', 'NO', null],
+        'organization' => ['int unsigned', 'NO', null],
+        'job_type' => ['varchar(32)', 'NO', 'rebuild'],
+        'status' => ['varchar(20)', 'NO', 'pending'],
+        'processed' => ['bigint unsigned', 'NO', '0'],
+        'total' => ['bigint unsigned', 'NO', '0'],
+        'error_message' => ['varchar(500)', 'NO', ''],
+        'created_by' => ['int unsigned', 'YES', null],
+        'updated_by' => ['int unsigned', 'YES', null],
+        'started_at' => ['datetime', 'YES', null],
+        'finished_at' => ['datetime', 'YES', null],
+        'create_time' => ['datetime', 'YES', null],
+        'update_time' => ['datetime', 'YES', null],
+    ];
+    foreach ($expected as $name => [$type, $nullable, $default]) {
+        $column = $columns[$name] ?? [];
+        $defaultMatches = $default === null
+            ? ($column['COLUMN_DEFAULT'] ?? null) === null
+            : (string) ($column['COLUMN_DEFAULT'] ?? '') === $default;
+        $assert(
+            strtolower((string) ($column['COLUMN_TYPE'] ?? '')) === $type
+            && (string) ($column['IS_NULLABLE'] ?? '') === $nullable
+            && $defaultMatches,
+            $context . ' has an invalid historical job column ' . $name . '.',
+        );
+    }
+    $statement = $pdo->prepare(
+        'SELECT COUNT(*) FROM information_schema.STATISTICS
+          WHERE TABLE_SCHEMA=? AND TABLE_NAME=\'sm_search_job\' AND INDEX_NAME=\'idx_pending\'',
+    );
+    $statement->execute([$database]);
+    $checkStatement = $pdo->prepare(
+        'SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS
+          WHERE CONSTRAINT_SCHEMA=? AND TABLE_NAME=\'sm_search_job\'
+            AND CONSTRAINT_NAME=\'chk_search_job_cursor_high_water\'',
+    );
+    $checkStatement->execute([$database]);
+    $baseIndex = $pdo->prepare(
+        'SELECT GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX)
+           FROM information_schema.STATISTICS
+          WHERE TABLE_SCHEMA=? AND TABLE_NAME=\'sm_search_job\'
+            AND INDEX_NAME=\'idx_org_status\'',
+    );
+    $baseIndex->execute([$database]);
+    $assert(
+        (int) $statement->fetchColumn() === 0
+        && (int) $checkStatement->fetchColumn() === 0,
+        $context . ' retained v0.3 job index or CHECK state.',
+    );
+    $assert(
+        $baseIndex->fetchColumn() === 'organization,status,id',
+        $context . ' did not restore the exact v0.2 job index.',
+    );
+};
 $phinxVersions = static function () use ($pdo): array {
     return array_map(
         'intval',
@@ -279,6 +420,19 @@ $managerFor = static fn (string $root): ModuleManager => new ModuleManager(
     new SearchLifecycleLock(),
     authCacheInvalidator: $authCaches,
 );
+$rollbackSearchToV2 = static function () use ($configPath, $migrationDirectory): void {
+    $configValues = require $configPath;
+    $configValues['paths']['migrations'] = [$migrationDirectory];
+    $environment = (string) config('plugin.saimulti.module.migration_environment', 'default');
+    $configValues['environments'][$environment]['migration_table'] = 'phinxlog_module_search';
+    $input = new ArrayInput([]);
+    $input->setInteractive(false);
+    (new PhinxManager(
+        new Config($configValues, $configPath),
+        $input,
+        new BufferedOutput(),
+    ))->rollback($environment, 20260716070000, false);
+};
 $actor = ['type' => 'admin', 'id' => 1, 'ip' => '127.0.0.1'];
 
 try {
@@ -301,6 +455,7 @@ try {
         && $phinxVersions() === [20260716070000, 20260720193000],
         'Fresh search v0.3 install did not apply its complete schema/history.',
     );
+    $assertV3JobSchema('Fresh search v0.3 install');
     $freshUninstalled = $freshManager->uninstall('search', false, $actor);
     $assert(
         $freshUninstalled['system']['status'] === 'UNINSTALLED'
@@ -377,6 +532,7 @@ try {
     );
     $assert((int) $pdo->query('SELECT COUNT(*) FROM sm_search_doc')->fetchColumn() === 0, 'Upgrade retained old docs.');
     $assert((int) $pdo->query('SELECT COUNT(*) FROM sm_search_job')->fetchColumn() === 0, 'Upgrade retained old jobs.');
+    $assertV3JobSchema('Search v0.2→v0.3 upgrade');
     $index = $pdo->query(
         'SELECT status,doc_count,last_built_at,last_error FROM sm_search_index WHERE organization=101',
     )->fetch();
@@ -397,6 +553,33 @@ try {
         $indexColumns === 'organization,sender_organization,sender_user_id,visibility,sent_at',
         'Search v0.3 compound sender index shape is invalid.',
     );
+    $uint64Max = '18446744073709551615';
+    $maxJob = $pdo->prepare(
+        'INSERT INTO sm_search_job
+            (organization,job_type,status,processed,total,cursor_global_seq,
+             high_water_global_seq,error_message)
+         VALUES (101,\'rebuild\',\'pending\',0,0,?,?,\'\')',
+    );
+    $maxJob->execute([$uint64Max, $uint64Max]);
+    $maxRoundTrip = $pdo->query(
+        'SELECT cursor_global_seq,high_water_global_seq
+           FROM sm_search_job ORDER BY id DESC LIMIT 1',
+    )->fetch();
+    $assert(
+        ($maxRoundTrip['cursor_global_seq'] ?? null) === $uint64Max
+        && ($maxRoundTrip['high_water_global_seq'] ?? null) === $uint64Max,
+        'Search job UINT64 cursor/high-water did not round-trip as decimal strings.',
+    );
+    try {
+        $pdo->exec(
+            'INSERT INTO sm_search_job
+                (organization,job_type,status,cursor_global_seq,high_water_global_seq)
+             VALUES (101,\'rebuild\',\'pending\',2,1)',
+        );
+        throw new RuntimeException('Search job cursor/high-water CHECK accepted cursor overflow.');
+    } catch (PDOException) {
+        $assert(true, 'Search job cursor/high-water CHECK rejected cursor overflow.');
+    }
     try {
         $pdo->exec(
             'INSERT INTO sm_search_doc
@@ -441,6 +624,72 @@ try {
         'Search upgrade lifecycle audit is incomplete.',
     );
 
+    $pdo->exec(
+        'UPDATE sm_search_index
+            SET status="ready",doc_count=1,last_built_at="2026-07-20 20:00:00",
+                last_error="v0.3 state"
+          WHERE organization=101',
+    );
+    $assert(
+        (int) $pdo->query('SELECT COUNT(*) FROM sm_search_doc')->fetchColumn() > 0
+        && (int) $pdo->query('SELECT COUNT(*) FROM sm_search_job')->fetchColumn() > 0,
+        'Targeted rollback fixture did not contain destructive v0.3 state.',
+    );
+    $rollbackSearchToV2();
+    $assert(
+        $phinxVersions() === [20260716070000]
+        && !$columnExists('sender_organization')
+        && !$columnExists('source_change_seq'),
+        'Targeted v0.3 rollback did not retain exactly the historical migration.',
+    );
+    $assert(
+        (int) $pdo->query('SELECT COUNT(*) FROM sm_search_doc')->fetchColumn() === 0
+        && (int) $pdo->query('SELECT COUNT(*) FROM sm_search_job')->fetchColumn() === 0,
+        'Targeted v0.3 rollback retained incompatible documents or jobs.',
+    );
+    $rolledBackIndex = $pdo->query(
+        'SELECT status,doc_count,last_built_at,last_error
+           FROM sm_search_index WHERE organization=101',
+    )->fetch();
+    $assert(
+        ($rolledBackIndex['status'] ?? '') === 'idle'
+        && (int) ($rolledBackIndex['doc_count'] ?? -1) === 0
+        && ($rolledBackIndex['last_built_at'] ?? null) === null
+        && ($rolledBackIndex['last_error'] ?? 'x') === '',
+        'Targeted v0.3 rollback did not reset the search index state.',
+    );
+    $senderColumn = $pdo->query(
+        'SELECT COLUMN_TYPE,IS_NULLABLE,COLUMN_DEFAULT
+           FROM information_schema.COLUMNS
+          WHERE TABLE_SCHEMA=' . $pdo->quote($database) . '
+            AND TABLE_NAME="sm_search_doc" AND COLUMN_NAME="sender_user_id"',
+    )->fetch();
+    $assert(
+        strtolower((string) ($senderColumn['COLUMN_TYPE'] ?? '')) === 'varchar(64)'
+        && ($senderColumn['IS_NULLABLE'] ?? '') === 'NO'
+        && ($senderColumn['COLUMN_DEFAULT'] ?? null) === '',
+        'Targeted v0.3 rollback did not restore the exact sender_user_id default.',
+    );
+    $removedDocState = $pdo->query(
+        'SELECT
+            (SELECT COUNT(*) FROM information_schema.STATISTICS
+              WHERE TABLE_SCHEMA=' . $pdo->quote($database) . '
+                AND TABLE_NAME="sm_search_doc" AND INDEX_NAME="idx_org_sender") AS sender_index,
+            (SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS
+              WHERE CONSTRAINT_SCHEMA=' . $pdo->quote($database) . '
+                AND TABLE_NAME="sm_search_doc"
+                AND CONSTRAINT_NAME IN (
+                    "chk_search_doc_sender_organization",
+                    "chk_search_doc_sender_user_id"
+                )) AS sender_constraints',
+    )->fetch();
+    $assert(
+        (int) ($removedDocState['sender_index'] ?? -1) === 0
+        && (int) ($removedDocState['sender_constraints'] ?? -1) === 0,
+        'Targeted v0.3 rollback retained sender indexes or constraints.',
+    );
+    $assertV2JobSchema('Targeted search v0.3 rollback');
+
     $uninstalled = $currentManager->uninstall('search', false, $actor);
     $assert($uninstalled['system']['status'] === 'UNINSTALLED', 'Search did not enter UNINSTALLED.');
     $assert(
@@ -483,6 +732,7 @@ try {
         && $phinxVersions() === [20260716070000, 20260720193000],
         'Search v0.3 fresh reinstall did not restore the complete schema/history.',
     );
+    $assertV3JobSchema('Search v0.3 reinstall');
     $assert(
         (int) $pdo->query(
             'SELECT COUNT(*) FROM sm_module_lifecycle_audit

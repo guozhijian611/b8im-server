@@ -9,7 +9,6 @@ use plugin\saimulti\exception\ApiException;
 use plugin\saimulti\exception\SearchProjectionIntegrityException;
 use plugin\saimulti\service\web\MessageShardRouteValidator;
 use support\think\Db;
-use Throwable;
 
 final class SearchService
 {
@@ -65,82 +64,12 @@ final class SearchService
         return $this->formatIndex($row);
     }
 
-    /**
-     * Create a rebuild job and run a lightweight refresh of doc_count.
-     * Full IM shard scan is deferred to the ES/MQ consumer phase.
-     *
-     * @return array{job:array<string,mixed>,index:array<string,mixed>}
-     */
+    /** @return array{job:array<string,mixed>,index:array<string,mixed>} */
     public function rebuild(int $organization, int $actorId): array
     {
         $this->assertOrg($organization);
         $this->assertActor($actorId);
-        $this->indexRead($organization, true);
-        $now = date('Y-m-d H:i:s');
-        $jobId = (int) Db::table(self::JOB)->insertGetId([
-            'organization' => $organization,
-            'job_type' => 'rebuild',
-            'status' => 'running',
-            'processed' => 0,
-            'total' => 0,
-            'error_message' => '',
-            'created_by' => $actorId,
-            'updated_by' => $actorId,
-            'started_at' => $now,
-            'finished_at' => null,
-            'create_time' => $now,
-            'update_time' => $now,
-        ]);
-        Db::table(self::INDEX)->where('organization', $organization)->whereNull('delete_time')->update([
-            'status' => 'building',
-            'updated_by' => $actorId,
-            'update_time' => $now,
-            'last_error' => '',
-        ]);
-        try {
-            $count = (int) Db::table(self::DOC)
-                ->where('organization', $organization)
-                ->where('visibility', 1)
-                ->count();
-            $finish = date('Y-m-d H:i:s');
-            Db::table(self::INDEX)->where('organization', $organization)->whereNull('delete_time')->update([
-                'status' => 'ready',
-                'doc_count' => $count,
-                'last_built_at' => $finish,
-                'updated_by' => $actorId,
-                'update_time' => $finish,
-            ]);
-            Db::table(self::JOB)->where('id', $jobId)->update([
-                'status' => 'success',
-                'processed' => $count,
-                'total' => $count,
-                'finished_at' => $finish,
-                'updated_by' => $actorId,
-                'update_time' => $finish,
-            ]);
-        } catch (Throwable $e) {
-            $finish = date('Y-m-d H:i:s');
-            $msg = mb_substr($e->getMessage(), 0, 500);
-            Db::table(self::INDEX)->where('organization', $organization)->whereNull('delete_time')->update([
-                'status' => 'error',
-                'last_error' => $msg,
-                'updated_by' => $actorId,
-                'update_time' => $finish,
-            ]);
-            Db::table(self::JOB)->where('id', $jobId)->update([
-                'status' => 'failed',
-                'error_message' => $msg,
-                'finished_at' => $finish,
-                'updated_by' => $actorId,
-                'update_time' => $finish,
-            ]);
-            throw new ApiException('索引重建失败。', 500);
-        }
-
-        return [
-            'job' => $this->formatJob($this->jobRow($jobId)),
-            'index' => $this->indexRead($organization, false),
-        ];
+        throw new ApiException('真实消息分片重建 worker 尚未就绪。', 503);
     }
 
     /**
@@ -215,34 +144,54 @@ final class SearchService
                 (string) ($index['conversation_id'] ?? ''),
                 'conversation_id',
             );
-            $shardTable = (new MessageShardRouteValidator())->assertIndexRoute(
-                $index,
-                $homeOrganization,
-                $conversationId,
-            );
-            $bodyRows = Db::query(
-                'SELECT organization, conversation_id, conversation_type, message_id,
-                        message_seq, client_msg_id, sender_id, sender_organization,
-                        message_type, content, status, create_time, delete_time
-                   FROM ' . $this->quoteShard($shardTable) . '
-                  WHERE organization = ?
-                    AND BINARY conversation_id = BINARY ?
-                    AND BINARY message_id = BINARY ?
-                  FOR UPDATE',
-                [$homeOrganization, $conversationId, $messageId],
-            );
+            try {
+                $shardTable = (new MessageShardRouteValidator())->assertIndexRoute(
+                    $index,
+                    $homeOrganization,
+                    $conversationId,
+                );
+            } catch (\Throwable $exception) {
+                throw new SearchProjectionIntegrityException(
+                    'Authoritative IM message shard route is inconsistent.',
+                    previous: $exception,
+                );
+            }
+            try {
+                $bodyRows = Db::query(
+                    'SELECT organization, conversation_id, conversation_type, message_id,
+                            message_seq, client_msg_id, sender_id, sender_organization,
+                            message_type, content, status, create_time, delete_time
+                       FROM ' . $this->quoteShard($shardTable) . '
+                      WHERE organization = ?
+                        AND BINARY conversation_id = BINARY ?
+                        AND BINARY message_id = BINARY ?
+                      FOR UPDATE',
+                    [$homeOrganization, $conversationId, $messageId],
+                );
+            } catch (\Throwable $exception) {
+                throw new SearchProjectionIntegrityException(
+                    'Authoritative IM message shard body cannot be read.',
+                    previous: $exception,
+                );
+            }
             if (count($bodyRows) !== 1) {
                 throw new SearchProjectionIntegrityException(
                     'Authoritative IM message shard body is missing or ambiguous.',
                 );
             }
             $body = $bodyRows[0];
-            $this->assertIndexedBodyBinding(
+            $sentAt = $this->assertIndexedBodyBinding(
                 $index,
                 $body,
                 $homeOrganization,
                 $conversationId,
                 $messageId,
+            );
+            $sourceChangeSeq = $this->latestProjectionChangeSeq(
+                $homeOrganization,
+                $conversationId,
+                $messageId,
+                (string) $body['message_seq'],
             );
 
             $now = date('Y-m-d H:i:s');
@@ -257,10 +206,11 @@ final class SearchService
                 'sender_user_id' => (string) $body['sender_id'],
                 'message_type' => (int) $body['message_type'],
                 'message_seq' => (string) $body['message_seq'],
+                'source_change_seq' => $sourceChangeSeq,
                 'content' => (string) ($body['content'] ?? ''),
                 'visibility' => (int) $body['status'] === 1
                     && ($body['delete_time'] ?? null) === null ? 1 : 0,
-                'sent_at' => (string) $body['create_time'],
+                'sent_at' => $sentAt,
                 'update_time' => $now,
             ];
             if ($existing === null) {
@@ -312,7 +262,13 @@ final class SearchService
     {
         $this->assertOrg($organization);
         $userId = $this->accessUserId($userId);
-        $index = $this->indexRead($organization, true);
+        $indexFence = $this->searchIndexFence($organization);
+        if ($indexFence === null) {
+            throw new ApiException('搜索索引不存在。', 404);
+        }
+        if (!hash_equals('ready', $indexFence['status'])) {
+            throw new ApiException('搜索索引尚未就绪。', 503);
+        }
         $keyword = trim((string) ($filters['q'] ?? $filters['keyword'] ?? ''));
         if ($keyword === '') {
             throw new ApiException('搜索关键词必填。', 422);
@@ -328,25 +284,7 @@ final class SearchService
             throw new ApiException('单字符搜索必须指定 conversation_id。', 422);
         }
         [$page, $limit] = $this->searchPagination($filters);
-        $query = Db::table(self::DOC)
-            ->where('organization', $organization)
-            ->where('visibility', 1)
-            ->whereRaw($this->endUserMessageAccessSql(), [
-                $organization,
-                $userId,
-                $organization,
-                $userId,
-                $organization,
-                $userId,
-                $organization,
-                $userId,
-                $organization,
-                $userId,
-                $organization,
-                $userId,
-                $organization,
-                $userId,
-            ]);
+        $query = $this->endUserCandidateQuery($organization, $userId, $indexFence);
         if ($conversationId !== '') {
             $query->whereRaw(
                 'BINARY conversation_id = BINARY ?',
@@ -394,15 +332,93 @@ final class SearchService
             $like = '%' . addcslashes($keyword, '%_\\') . '%';
             $query->whereRaw('content LIKE ? ESCAPE \'\\\\\'', [$like]);
         }
-        $total = (int) (clone $query)->count();
-        $items = $query->order(['sent_at' => 'desc', 'id' => 'desc'])->page($page, $limit)->select()->toArray();
+        $candidateCount = (int) (clone $query)->count();
+        $candidates = (clone $query)
+            ->order(['sent_at' => 'desc', 'id' => 'desc'])
+            ->page($page, $limit)
+            ->select()
+            ->toArray();
+        $expectedPageCount = $this->pageCardinality($candidateCount, $page, $limit);
+        if (count($candidates) !== $expectedPageCount) {
+            throw new SearchProjectionIntegrityException(
+                'Search page changed between candidate count and selection.',
+            );
+        }
+        $facts = (new SearchMessageFactReader())->read(array_values($candidates));
 
+        // The final SQL statement is the linearization point. A non-empty page
+        // recomputes the exact ordered page and total through one window query;
+        // an empty page uses one index-anchored scalar count. Both repeat the
+        // full ACL/projection predicates and the initial exact index fence.
+        if ($candidates === []) {
+            $finalCount = $this->finalAccessibleCount(
+                $organization,
+                $userId,
+                $filters,
+                $keyword,
+                $indexFence,
+            );
+            if ($finalCount !== $candidateCount || $expectedPageCount !== 0) {
+                throw new SearchProjectionIntegrityException(
+                    'Empty search page changed during final verification.',
+                );
+            }
+
+            return [
+                'current_page' => $page,
+                'data' => [],
+                'per_page' => $limit,
+                'total' => $finalCount,
+                'backend' => $indexFence['backend'],
+            ];
+        }
+        $finalDocuments = $this->finalAccessiblePage(
+            $organization,
+            $userId,
+            $filters,
+            $keyword,
+            $page,
+            $limit,
+            $indexFence,
+        );
+        $finalCount = $this->verifiedPageTotal($finalDocuments);
+        $factByMessage = [];
+        foreach ($facts as $fact) {
+            $factByMessage[(string) $fact['message_id']] = $fact;
+        }
+        $finalByMessage = [];
+        foreach ($finalDocuments as $document) {
+            $finalByMessage[(string) $document['message_id']] = $document;
+        }
+        if ($finalCount !== $candidateCount
+            || count($facts) !== $expectedPageCount
+            || count($finalDocuments) !== $expectedPageCount) {
+            throw new SearchProjectionIntegrityException(
+                'Search visibility changed during authoritative verification.',
+                503,
+            );
+        }
+        $data = [];
+        foreach ($candidates as $candidate) {
+            $messageId = (string) $candidate['message_id'];
+            $fact = $factByMessage[$messageId] ?? null;
+            $finalDocument = $finalByMessage[$messageId] ?? null;
+            if (!is_array($fact)
+                || !is_array($finalDocument)
+                || !$this->sameSearchDocumentIdentity($finalDocument, $fact)) {
+                throw new SearchProjectionIntegrityException(
+                    'Search projection changed during authoritative verification.',
+                    503,
+                );
+            }
+            $data[] = $this->formatDoc($fact);
+        }
         return [
             'current_page' => $page,
-            'data' => array_map([$this, 'formatDoc'], array_values($items)),
+            'data' => $data,
             'per_page' => $limit,
-            'total' => $total,
-            'backend' => (string) ($index['backend'] ?? 'mysql'),
+            'total' => $finalCount,
+            'backend' => $indexFence['backend'],
         ];
     }
 
@@ -420,9 +436,38 @@ EXISTS (
        AND BINARY mi.message_id = BINARY sm_search_doc.message_id
        AND BINARY mi.conversation_id = BINARY sm_search_doc.conversation_id
        AND mi.message_seq = sm_search_doc.message_seq
-       AND mi.create_time = sm_search_doc.sent_at
+       AND mi.create_time <=> sm_search_doc.sent_at
        AND mi.sender_organization = sm_search_doc.sender_organization
        AND BINARY mi.sender_id = BINARY sm_search_doc.sender_user_id
+       AND sm_search_doc.source_change_seq = COALESCE((
+           SELECT MAX(projection_change.change_seq)
+             FROM im_message_change projection_change
+            WHERE projection_change.organization = mi.organization
+              AND BINARY projection_change.conversation_id = BINARY mi.conversation_id
+              AND BINARY projection_change.message_id = BINARY mi.message_id
+              AND projection_change.message_seq = mi.message_seq
+              AND BINARY projection_change.change_type IN (
+                  BINARY 'edit', BINARY 'recall', BINARY 'delete_both'
+              )
+       ), 0)
+       AND NOT EXISTS (
+           SELECT 1
+             FROM im_message_user_delete viewer_delete
+            WHERE viewer_delete.organization = mi.organization
+              AND BINARY viewer_delete.message_id = BINARY mi.message_id
+              AND viewer_delete.user_organization = ?
+              AND BINARY viewer_delete.user_id = BINARY ?
+       )
+       AND NOT EXISTS (
+           SELECT 1
+             FROM im_message_change hidden_mutation
+            WHERE hidden_mutation.organization = mi.organization
+              AND BINARY hidden_mutation.conversation_id = BINARY mi.conversation_id
+              AND BINARY hidden_mutation.message_id = BINARY mi.message_id
+              AND hidden_mutation.message_seq = mi.message_seq
+              AND BINARY hidden_mutation.change_type
+                  IN (BINARY 'recall', BINARY 'delete_both')
+       )
        AND c.status = 1
        AND c.delete_time IS NULL
        AND OCTET_LENGTH(mi.conversation_id) BETWEEN 1 AND 64
@@ -757,6 +802,240 @@ EXISTS (
 SQL;
     }
 
+    /** @param array{id:string,organization:string,backend:string,status:string,last_built_at:?string,update_time:?string} $indexFence */
+    private function endUserCandidateQuery(
+        int $organization,
+        string $userId,
+        array $indexFence,
+    ): mixed
+    {
+        return Db::table(self::DOC)
+            ->where('organization', $organization)
+            ->where('visibility', 1)
+            ->whereRaw(
+                'EXISTS (
+                    SELECT 1 FROM sm_search_index ready_index
+                     WHERE ready_index.organization = sm_search_doc.organization
+                       AND ' . $this->indexFenceSql('ready_index') . '
+                )',
+                $this->indexFenceBindings($indexFence),
+            )
+            ->whereRaw(
+                $this->endUserMessageAccessSql(),
+                $this->endUserMessageAccessBindings($organization, $userId),
+            );
+    }
+
+    /** @return list<int|string> */
+    private function endUserMessageAccessBindings(int $organization, string $userId): array
+    {
+        return [
+            $organization,
+            $userId,
+            $organization,
+            $userId,
+            $organization,
+            $userId,
+            $organization,
+            $userId,
+            $organization,
+            $userId,
+            $organization,
+            $userId,
+            $organization,
+            $userId,
+            $organization,
+            $userId,
+        ];
+    }
+
+    /**
+     * @param array<string,mixed> $filters
+     * @param array{id:string,organization:string,backend:string,status:string,last_built_at:?string,update_time:?string} $indexFence
+     * @return list<array<string,mixed>>
+     */
+    private function finalAccessiblePage(
+        int $organization,
+        string $userId,
+        array $filters,
+        string $keyword,
+        int $page,
+        int $limit,
+        array $indexFence,
+    ): array {
+        $query = $this->endUserCandidateQuery($organization, $userId, $indexFence);
+        $this->applySearchFilters($query, $filters, $keyword);
+
+        return array_values($query
+            ->fieldRaw('sm_search_doc.*, COUNT(*) OVER() AS __verified_total')
+            ->order(['sent_at' => 'desc', 'id' => 'desc'])
+            ->page($page, $limit)
+            ->select()
+            ->toArray());
+    }
+
+    /**
+     * @param array<string,mixed> $filters
+     * @param array{id:string,organization:string,backend:string,status:string,last_built_at:?string,update_time:?string} $indexFence
+     */
+    private function finalAccessibleCount(
+        int $organization,
+        string $userId,
+        array $filters,
+        string $keyword,
+        array $indexFence,
+    ): int {
+        [$filterSql, $filterBindings] = $this->finalCountFilterSql($filters, $keyword);
+        $rows = Db::query(
+            'SELECT CAST(COUNT(sm_search_doc.id) AS CHAR) AS __verified_total
+               FROM sm_search_index final_index
+               LEFT JOIN sm_search_doc
+                 ON sm_search_doc.organization = ?
+                AND sm_search_doc.visibility = 1
+                AND ' . $filterSql . '
+                AND ' . $this->endUserMessageAccessSql() . '
+              WHERE ' . $this->indexFenceSql('final_index') . '
+              GROUP BY final_index.id',
+            array_merge(
+                [$organization],
+                $filterBindings,
+                $this->endUserMessageAccessBindings($organization, $userId),
+                $this->indexFenceBindings($indexFence),
+            ),
+        );
+        if (count($rows) !== 1) {
+            throw new SearchProjectionIntegrityException(
+                'Search index changed before empty-page verification.',
+            );
+        }
+
+        return $this->verifiedCount($rows[0]['__verified_total'] ?? null);
+    }
+
+    /**
+     * @param array<string,mixed> $filters
+     * @return array{string,list<mixed>}
+     */
+    private function finalCountFilterSql(array $filters, string $keyword): array
+    {
+        $predicates = [];
+        $bindings = [];
+        $conversationId = (string) ($filters['conversation_id'] ?? '');
+        if ($conversationId !== '') {
+            $predicates[] = 'BINARY sm_search_doc.conversation_id = BINARY ?';
+            $bindings[] = $this->accessId($conversationId, 'conversation_id');
+        }
+        if (array_key_exists('sender_organization', $filters)) {
+            $predicates[] = 'sm_search_doc.sender_organization = ?';
+            $bindings[] = $this->intVal(
+                $filters['sender_organization'],
+                'sender_organization',
+            );
+            $predicates[] = 'BINARY sm_search_doc.sender_user_id = BINARY ?';
+            $bindings[] = $this->accessId(
+                (string) $filters['sender_user_id'],
+                'sender_user_id',
+            );
+        }
+        if (isset($filters['message_type'])
+            && $filters['message_type'] !== ''
+            && $filters['message_type'] !== null) {
+            $type = $this->intVal($filters['message_type'], 'message_type');
+            if ($type > 0) {
+                $predicates[] = 'sm_search_doc.message_type = ?';
+                $bindings[] = $type;
+            }
+        }
+        if ($this->canFulltext($keyword)) {
+            $predicates[] = 'MATCH(sm_search_doc.content) AGAINST (? IN BOOLEAN MODE)';
+            $bindings[] = $this->toBooleanQuery($keyword);
+        } else {
+            $predicates[] = 'sm_search_doc.content LIKE ? ESCAPE \'\\\\\'';
+            $bindings[] = '%' . addcslashes($keyword, '%_\\') . '%';
+        }
+
+        return [implode("\n                AND ", $predicates), $bindings];
+    }
+
+    /** @param array<string,mixed> $filters */
+    private function applySearchFilters(mixed $query, array $filters, string $keyword): void
+    {
+        $conversationId = (string) ($filters['conversation_id'] ?? '');
+        if ($conversationId !== '') {
+            $query->whereRaw(
+                'BINARY conversation_id = BINARY ?',
+                [$this->accessId($conversationId, 'conversation_id')],
+            );
+        }
+        if (array_key_exists('sender_organization', $filters)) {
+            $query->where('sender_organization', $this->intVal(
+                $filters['sender_organization'],
+                'sender_organization',
+            ));
+            $query->whereRaw(
+                'BINARY sender_user_id = BINARY ?',
+                [$this->accessId((string) $filters['sender_user_id'], 'sender_user_id')],
+            );
+        }
+        if (isset($filters['message_type'])
+            && $filters['message_type'] !== ''
+            && $filters['message_type'] !== null) {
+            $type = $this->intVal($filters['message_type'], 'message_type');
+            if ($type > 0) {
+                $query->where('message_type', $type);
+            }
+        }
+        if ($this->canFulltext($keyword)) {
+            $query->whereRaw(
+                'MATCH(content) AGAINST (? IN BOOLEAN MODE)',
+                [$this->toBooleanQuery($keyword)],
+            );
+        } else {
+            $like = '%' . addcslashes($keyword, '%_\\') . '%';
+            $query->whereRaw('content LIKE ? ESCAPE \'\\\\\'', [$like]);
+        }
+    }
+
+    /** @param array<string,mixed> $current @param array<string,mixed> $fact */
+    private function sameSearchDocumentIdentity(array $current, array $fact): bool
+    {
+        foreach ([
+            'id',
+            'organization',
+            'message_id',
+            'conversation_id',
+            'sender_organization',
+            'sender_user_id',
+            'message_type',
+            'message_seq',
+            'visibility',
+            'update_time',
+        ] as $field) {
+            if ((string) ($current[$field] ?? '') !== (string) ($fact[$field] ?? '')) {
+                return false;
+            }
+        }
+        if (!array_key_exists('sent_at', $current)
+            || !array_key_exists('sent_at', $fact)
+            || $current['sent_at'] !== $fact['sent_at']) {
+            return false;
+        }
+        if ($this->unsignedDecimal(
+            $current['source_change_seq'] ?? null,
+            'search document source_change_seq',
+        ) !== $this->unsignedDecimal(
+            $fact['source_change_seq'] ?? null,
+            'authoritative source_change_seq',
+        )) {
+            return false;
+        }
+
+        return hash_equals(
+            (string) ($current['content'] ?? ''),
+            (string) ($fact['_projection_content'] ?? ''),
+        );
+    }
+
     /** @return array<string, mixed> */
     private function createIndex(int $organization, int $actorId): array
     {
@@ -805,11 +1084,13 @@ SQL,
         int $homeOrganization,
         string $conversationId,
         string $messageId,
-    ): void {
+    ): ?string {
         $senderOrganization = (int) ($index['sender_organization'] ?? 0);
         $senderUserId = (string) ($index['sender_id'] ?? '');
         $messageType = (int) ($body['message_type'] ?? 0);
         $status = (int) ($body['status'] ?? 0);
+        $indexTime = $this->nullableMessageTime($index['index_create_time'] ?? null);
+        $bodyTime = $this->nullableMessageTime($body['create_time'] ?? null);
         if ((int) ($index['organization'] ?? 0) !== $homeOrganization
             || (int) ($body['organization'] ?? 0) !== $homeOrganization
             || !hash_equals($messageId, (string) ($index['message_id'] ?? ''))
@@ -820,10 +1101,7 @@ SQL,
                 (string) ($index['client_msg_id'] ?? ''),
                 (string) ($body['client_msg_id'] ?? ''),
             )
-            || !hash_equals(
-                (string) ($index['index_create_time'] ?? ''),
-                (string) ($body['create_time'] ?? ''),
-            )
+            || $indexTime !== $bodyTime
             || $senderOrganization <= 0
             || $senderOrganization !== (int) ($body['sender_organization'] ?? 0)
             || $senderUserId === ''
@@ -841,6 +1119,191 @@ SQL,
                 'IM message index client identity is invalid.',
             );
         }
+
+        return $bodyTime;
+    }
+
+    private function nullableMessageTime(mixed $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+        if (!is_string($value) || $value === '') {
+            throw new SearchProjectionIntegrityException(
+                'IM message index or shard body time is invalid.',
+            );
+        }
+
+        return $value;
+    }
+
+    private function latestProjectionChangeSeq(
+        int $organization,
+        string $conversationId,
+        string $messageId,
+        string $messageSeq,
+    ): string {
+        $rows = Db::query(
+            'SELECT CAST(COALESCE(MAX(change_seq), 0) AS CHAR) AS source_change_seq
+               FROM im_message_change
+              WHERE organization = ?
+                AND BINARY conversation_id = BINARY ?
+                AND BINARY message_id = BINARY ?
+                AND message_seq = ?
+                AND BINARY change_type IN (
+                    BINARY \'edit\', BINARY \'recall\', BINARY \'delete_both\'
+                )
+              FOR UPDATE',
+            [$organization, $conversationId, $messageId, $messageSeq],
+        );
+        if (count($rows) !== 1) {
+            throw new SearchProjectionIntegrityException(
+                'Authoritative IM message change version is ambiguous.',
+            );
+        }
+
+        return $this->unsignedDecimal(
+            $rows[0]['source_change_seq'] ?? null,
+            'authoritative source_change_seq',
+        );
+    }
+
+    private function unsignedDecimal(mixed $value, string $field): string
+    {
+        if (is_int($value) && $value >= 0) {
+            return (string) $value;
+        }
+        if (!is_string($value) || preg_match('/^[0-9]+$/D', $value) !== 1) {
+            throw new SearchProjectionIntegrityException($field . ' is invalid.');
+        }
+        $canonical = ltrim($value, '0');
+
+        return $canonical === '' ? '0' : $canonical;
+    }
+
+    /**
+     * @return array{id:string,organization:string,backend:string,status:string,last_built_at:?string,update_time:?string}|null
+     */
+    private function searchIndexFence(int $organization): ?array
+    {
+        $rows = Db::query(
+            'SELECT CAST(id AS CHAR) AS id, CAST(organization AS CHAR) AS organization,
+                    backend, status, last_built_at, update_time
+               FROM sm_search_index
+              WHERE organization = ? AND delete_time IS NULL',
+            [$organization],
+        );
+        if ($rows === []) {
+            return null;
+        }
+        if (count($rows) !== 1) {
+            throw new SearchProjectionIntegrityException(
+                'Search index state is ambiguous.',
+            );
+        }
+        $row = $rows[0];
+        $id = $this->unsignedDecimal($row['id'] ?? null, 'search index id');
+        $fenceOrganization = $this->unsignedDecimal(
+            $row['organization'] ?? null,
+            'search index organization',
+        );
+        if ($fenceOrganization !== (string) $organization) {
+            throw new SearchProjectionIntegrityException(
+                'Search index organization is inconsistent.',
+            );
+        }
+        $backend = (string) ($row['backend'] ?? '');
+        $status = (string) ($row['status'] ?? '');
+        $lastBuiltAt = $this->nullableMessageTime($row['last_built_at'] ?? null);
+        $updateTime = $this->nullableMessageTime($row['update_time'] ?? null);
+        if ($backend === '' || !in_array($status, self::INDEX_STATUS, true)) {
+            throw new SearchProjectionIntegrityException('Search index state is invalid.');
+        }
+
+        return [
+            'id' => $id,
+            'organization' => $fenceOrganization,
+            'backend' => $backend,
+            'status' => $status,
+            'last_built_at' => $lastBuiltAt,
+            'update_time' => $updateTime,
+        ];
+    }
+
+    private function indexFenceSql(string $alias): string
+    {
+        if (!in_array($alias, ['ready_index', 'final_index', self::INDEX], true)) {
+            throw new \LogicException('Unsupported search index fence alias.');
+        }
+
+        return 'CAST(' . $alias . '.id AS CHAR) = ?
+            AND CAST(' . $alias . '.organization AS CHAR) = ?
+            AND BINARY ' . $alias . '.backend = BINARY ?
+            AND BINARY ' . $alias . '.status = BINARY ?
+            AND ' . $alias . '.last_built_at <=> ?
+            AND ' . $alias . '.update_time <=> ?
+            AND ' . $alias . '.delete_time IS NULL';
+    }
+
+    /**
+     * @param array{id:string,organization:string,backend:string,status:string,last_built_at:?string,update_time:?string} $fence
+     * @return array{string,string,string,string,?string,?string}
+     */
+    private function indexFenceBindings(array $fence): array
+    {
+        return [
+            $fence['id'],
+            $fence['organization'],
+            $fence['backend'],
+            $fence['status'],
+            $fence['last_built_at'],
+            $fence['update_time'],
+        ];
+    }
+
+    /** @param list<array<string,mixed>> $rows */
+    private function verifiedPageTotal(array $rows): int
+    {
+        if ($rows === []) {
+            throw new SearchProjectionIntegrityException(
+                'Final search page disappeared during verification.',
+            );
+        }
+        $total = null;
+        foreach ($rows as $row) {
+            $rowTotal = $this->verifiedCount($row['__verified_total'] ?? null);
+            if ($total !== null && $rowTotal !== $total) {
+                throw new SearchProjectionIntegrityException(
+                    'Final search page contains inconsistent totals.',
+                );
+            }
+            $total = $rowTotal;
+        }
+
+        return $total ?? 0;
+    }
+
+    private function verifiedCount(mixed $value): int
+    {
+        $decimal = $this->unsignedDecimal($value, 'verified search total');
+        $count = (int) $decimal;
+        if ((string) $count !== $decimal) {
+            throw new SearchProjectionIntegrityException(
+                'Verified search total exceeds the supported range.',
+            );
+        }
+
+        return $count;
+    }
+
+    private function pageCardinality(int $total, int $page, int $limit): int
+    {
+        $remaining = $total - (($page - 1) * $limit);
+        if ($remaining <= 0) {
+            return 0;
+        }
+
+        return min($limit, $remaining);
     }
 
     private function quoteShard(string $table): string

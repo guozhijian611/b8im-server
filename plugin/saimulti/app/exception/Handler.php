@@ -11,6 +11,7 @@ use Webman\Http\Request;
 use Webman\Http\Response;
 use Webman\Exception\ExceptionHandler;
 use plugin\saimulti\exception\ApiException;
+use plugin\saimulti\exception\SearchProjectionIntegrityException;
 use plugin\saimulti\app\middleware\HttpTrace;
 use plugin\saimulti\service\trace\TraceDataPolicy;
 
@@ -46,11 +47,14 @@ class Handler extends ExceptionHandler
 
     public function render(Request $request, Throwable $exception): Response
     {
-        $debug = config('app.debug', true);
+        $debug = $this->debug;
         $code = $exception->getCode();
+        $integrityFailure = $exception instanceof SearchProjectionIntegrityException;
         $json = [
             'code' => $code ? $code : 500,
-            'message' => $code !== 500 ? $exception->getMessage() : 'Server internal error',
+            'message' => $integrityFailure
+                ? '搜索数据暂时不可用。'
+                : ($code !== 500 ? $exception->getMessage() : 'Server internal error'),
             'type' => 'failed'
         ];
         if ($debug) {
@@ -58,14 +62,16 @@ class Handler extends ExceptionHandler
             $json['timestamp'] = date('Y-m-d H:i:s');
             $json['client_ip'] = $request->getRealIp();
             $json['request_param'] = self::redact($request->all());
-            $json['exception_handle'] = get_class($exception);
-            $json['exception_info'] = [
-                'code' => $exception->getCode(),
-                'message' => $exception->getMessage(),
-                'file' => $exception->getFile(),
-                'line' => $exception->getLine(),
-                'trace' => explode("\n", $exception->getTraceAsString())
-            ];
+            if (!$integrityFailure) {
+                $json['exception_handle'] = get_class($exception);
+                $json['exception_info'] = [
+                    'code' => $exception->getCode(),
+                    'message' => $exception->getMessage(),
+                    'file' => $exception->getFile(),
+                    'line' => $exception->getLine(),
+                    'trace' => explode("\n", $exception->getTraceAsString())
+                ];
+            }
         }
         $headers = ['Content-Type' => 'application/json;charset=utf-8'];
         $traceId = $request->properties[HttpTrace::REQUEST_TRACE_ID] ?? null;
@@ -73,7 +79,12 @@ class Handler extends ExceptionHandler
             $headers['X-Trace-Id'] = $traceId;
         }
 
-        return new Response(200, $headers, json_encode($json));
+        $status = $integrityFailure
+            || ($exception instanceof ApiException && $code === 503)
+            ? 503
+            : 200;
+
+        return new Response($status, $headers, json_encode($json));
     }
 
     /** @param array<string|int, mixed> $value */
