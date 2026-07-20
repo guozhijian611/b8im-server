@@ -8,50 +8,90 @@ use support\think\Db;
 
 /**
  * Platform-level switch for cross-organization friends + single chat.
- * Default off. Backed by sm_system_config social_config.cross_organization_social_enabled.
+ * Default off. Backed by sm_system_config social_config.cross_org_social_enabled.
  */
 final class CrossOrganizationSocialPolicy
 {
     public const CONFIG_GROUP = 'social_config';
     public const CONFIG_KEY = 'cross_org_social_enabled';
-
-    private static ?array $cache = null;
+    public const SNAPSHOT_CONFIG_KEY = 'cross_org_access_snapshot_id';
 
     public static function clearCache(): void
     {
-        self::$cache = null;
+        // Reads are uncached so every webman worker observes transitions.
     }
 
     public static function isEnabled(): bool
     {
-        $cached = self::$cache;
-        if (is_array($cached) && (int) ($cached['expire_at'] ?? 0) > time()) {
-            return (bool) ($cached['enabled'] ?? false);
-        }
+        $policy = self::load();
 
+        return (bool) ($policy['enabled'] ?? false);
+    }
+
+    public static function accessSnapshotId(): string
+    {
+        $policy = self::load();
+
+        return (string) ($policy['access_snapshot_id'] ?? '0');
+    }
+
+    /** @return array{enabled: bool, access_snapshot_id: string} */
+    public static function lockSharedInsideTransaction(): array
+    {
+        return self::read(' LOCK IN SHARE MODE', false);
+    }
+
+    /** @return array{enabled: bool, access_snapshot_id: string} */
+    private static function load(): array
+    {
+        return self::read('', true);
+    }
+
+    /** @return array{enabled: bool, access_snapshot_id: string} */
+    private static function read(string $lock, bool $failClosed): array
+    {
         $enabled = false;
-        $group = Db::query(
-            'SELECT id FROM sm_system_config_group
-              WHERE code = ? AND delete_time IS NULL
-              LIMIT 1',
-            [self::CONFIG_GROUP],
-        )[0] ?? null;
-        if ($group !== null) {
-            $row = Db::query(
-                'SELECT `value` FROM sm_system_config
-                  WHERE group_id = ? AND `key` = ? AND delete_time IS NULL
-                  LIMIT 1',
-                [(int) $group['id'], self::CONFIG_KEY],
+        $snapshotId = '0';
+
+        try {
+            $group = Db::query(
+                'SELECT id FROM sm_system_config_group
+                  WHERE code = ? AND delete_time IS NULL
+                  LIMIT 1' . $lock,
+                [self::CONFIG_GROUP],
             )[0] ?? null;
-            $enabled = self::truthy($row['value'] ?? '0');
+            if ($group !== null) {
+                $rows = Db::query(
+                    'SELECT `key`, `value` FROM sm_system_config
+                      WHERE group_id = ?
+                        AND `key` IN (?, ?)
+                        AND delete_time IS NULL
+                   ORDER BY id ASC' . $lock,
+                    [(int) $group['id'], self::CONFIG_KEY, self::SNAPSHOT_CONFIG_KEY],
+                );
+                $values = [];
+                foreach ($rows as $row) {
+                    $values[(string) $row['key']] = (string) ($row['value'] ?? '');
+                }
+                $rawSnapshotId = trim((string) ($values[self::SNAPSHOT_CONFIG_KEY] ?? ''));
+                if (preg_match('/^[1-9][0-9]*$/', $rawSnapshotId) === 1 && strlen($rawSnapshotId) <= 20) {
+                    $snapshotId = $rawSnapshotId;
+                    $enabled = self::truthy($values[self::CONFIG_KEY] ?? '0');
+                }
+            }
+        } catch (\Throwable $exception) {
+            if (!$failClosed) {
+                throw $exception;
+            }
+            // Missing schema/config is an invalid policy state and must fail closed.
+            $enabled = false;
+            $snapshotId = '0';
         }
 
-        self::$cache = [
-            'expire_at' => time() + 15,
+        return [
             'enabled' => $enabled,
+            'access_snapshot_id' => $snapshotId,
         ];
-
-        return $enabled;
     }
 
     public static function truthy(mixed $value): bool

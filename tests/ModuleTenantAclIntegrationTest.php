@@ -600,7 +600,10 @@ $insertModule = static function (string $moduleKey, array $dependencies) use ($a
     ]);
 };
 $insertModule('acl_base', []);
-$insertModule('acl_feature', [['module_key' => 'acl_base', 'constraint' => '^0.1']]);
+$insertModule('acl_feature', [[
+    'module_key' => 'acl_base',
+    'constraint' => (string) $announcementManifest['version'],
+]]);
 
 foreach ([1, 2] as $organization) {
     $manager->grantLicense($organization, 'acl_base', null, '依赖基础模块', $adminActor);

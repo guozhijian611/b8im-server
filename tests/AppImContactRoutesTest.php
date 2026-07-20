@@ -13,6 +13,7 @@ use plugin\saimulti\app\middleware\AppClientRequest;
 use plugin\saimulti\app\middleware\CheckWebLogin;
 use plugin\saimulti\exception\ApiException;
 use plugin\saimulti\service\WebTokenService;
+use plugin\saimulti\service\web\WebImControlService;
 use Webman\Route;
 
 $assertions = 0;
@@ -65,6 +66,34 @@ foreach ($expectedRoutes as $routeKey => $action) {
     sort($optionsMiddleware);
     $assert($optionsMiddleware === $expectedMiddleware, $optionsKey . ' escaped the App middleware group.');
 }
+
+$parameterNames = static fn (string $method): array => array_map(
+    static fn (ReflectionParameter $parameter): string => $parameter->getName(),
+    (new ReflectionMethod(WebImControlService::class, $method))->getParameters(),
+);
+$assert(
+    $parameterNames('sendFriendRequest')
+        === ['identity', 'toOrganization', 'toUserId', 'message'],
+    'Friend request contract must require the target organization.',
+);
+$assert(
+    $parameterNames('messages')
+        === [
+            'identity',
+            'conversationId',
+            'peerOrganization',
+            'peerUserId',
+            'afterSeq',
+            'beforeSeq',
+            'limit',
+        ],
+    'Message history peer lookup must use a composite identity.',
+);
+$assert(
+    $parameterNames('updateFriendRemark')
+        === ['identity', 'friendOrganization', 'friendUserId', 'remark'],
+    'Friend remark contract must use a composite identity.',
+);
 
 $tokens = new WebTokenService(str_repeat('app-contact-route-secret-', 2), 'HS256');
 $user = ['id' => 9, 'user_id' => 'app_user_9', 'account' => 'alice'];

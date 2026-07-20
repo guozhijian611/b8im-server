@@ -120,6 +120,7 @@ final class ImController extends WebController
         return $this->success($this->control->messages(
             $this->webIdentity,
             (string) $request->get('conversation_id', ''),
+            (int) $request->get('peer_organization', 0),
             (string) $request->get('peer_user_id', ''),
             (int) $request->get('after_seq', 0),
             (int) $request->get('before_seq', 0),
@@ -161,6 +162,7 @@ final class ImController extends WebController
     {
         return $this->success($this->control->sendFriendRequest(
             $this->webIdentity,
+            (int) $request->input('to_organization', 0),
             (string) $request->input('to_user_id', ''),
             (string) $request->input('message', ''),
         ));
@@ -256,6 +258,7 @@ final class ImController extends WebController
     {
         return $this->success($this->control->updateFriendRemark(
             $this->webIdentity,
+            (int) $request->input('friend_organization', 0),
             (string) $request->input('friend_user_id', ''),
             (string) $request->input('remark', ''),
         ));

@@ -26,6 +26,14 @@
     "repositories": [
         {
             "type": "path",
+            "url": "../b8im-im-shared",
+            "options": {
+                "symlink": true,
+                "reference": "auto"
+            }
+        },
+        {
+            "type": "path",
             "url": "../b8im-module-sdk",
             "options": {
                 "symlink": true,
@@ -98,6 +106,7 @@
         }
     ],
     "require": {
+        "b8im/im-shared": "^1.0",
         "b8im/module-sdk": "dev-main",
         "guzzlehttp/guzzle": "^7.14",
         "php": ">=8.1",
@@ -182,5 +191,11 @@
         ]
     },
     "minimum-stability": "dev",
-    "prefer-stable": true
+    "prefer-stable": true,
+    "config": {
+        "allow-plugins": {
+            "php-http/discovery": true,
+            "tbachert/spi": true
+        }
+    }
 }

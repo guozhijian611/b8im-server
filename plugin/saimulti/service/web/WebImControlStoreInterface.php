@@ -32,13 +32,14 @@ interface WebImControlStoreInterface
         int $organization,
         string $userId,
         string $conversationId,
+        int $peerOrganization,
         string $peerUserId,
         int $afterSeq,
         int $beforeSeq,
         int $limit,
     ): array;
 
-    /** @return array{updated: int} */
+    /** @return array{updated: int, user_organization: int, user_id: string} */
     public function markRead(
         int $organization,
         string $userId,
@@ -60,6 +61,7 @@ interface WebImControlStoreInterface
     public function sendFriendRequest(
         int $organization,
         string $fromUserId,
+        int $toOrganization,
         string $toUserId,
         string $message,
         string $now,
@@ -146,10 +148,11 @@ interface WebImControlStoreInterface
         string $now,
     ): array;
 
-    /** @return array{friend_user_id: string, remark: string} */
+    /** @return array{friend_organization: int, friend_user_id: string, remark: string} */
     public function updateFriendRemark(
         int $organization,
         string $userId,
+        int $friendOrganization,
         string $friendUserId,
         string $remark,
         string $now,

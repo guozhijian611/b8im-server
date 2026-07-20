@@ -322,10 +322,25 @@ $login = $service->login(
     'browser',
     '203.0.113.10',
 );
-$assert(array_keys($login) === ['organization', 'deployment_id', 'token', 'user'], 'Login contract is not exact.');
+$assert(
+    array_keys($login) === [
+        'organization',
+        'deployment_id',
+        'cross_org_access_snapshot_id',
+        'token',
+        'user',
+    ],
+    'Login contract is not exact.',
+);
 $assert(!array_key_exists('im_token', $login), 'Login must not pre-issue an IM token.');
 $assert($login['organization'] === 7 && $login['deployment_id'] === 'deployment-1', 'Login trust context mismatch.');
-$assert($login['user']['user_id'] === 'user_9' && $login['user']['is_system'] === false, 'Web user model mismatch.');
+$assert($login['cross_org_access_snapshot_id'] === '0', 'Login must expose a decimal access snapshot.');
+$assert(
+    $login['user']['user_id'] === 'user_9'
+    && $login['user']['organization'] === 7
+    && $login['user']['is_system'] === false,
+    'Web user model mismatch.',
+);
 $assert(!array_key_exists('password_hash', $login['user']) && !array_key_exists('password', $login['user']), 'Password leaked.');
 $assert(count($store->audits) === 1 && $store->audits[0]['login_result'] === 'success', 'Successful login audit missing.');
 $assert($store->audits[0]['audit_scope'] === 'password' && $store->audits[0]['current_online_state'] === 2, 'Successful audit contract mismatch.');
@@ -421,6 +436,10 @@ $challenge = $service->issueImToken(
     'web-login-device',
     'gateway-client-1',
     '203.0.113.11',
+);
+$assert(
+    ($challenge['cross_org_access_snapshot_id'] ?? null) === '0',
+    'IM session credential must expose a decimal access snapshot.',
 );
 $claims = (array) JWT::decode($challenge['token'], new Key($imSecret, 'HS256'));
 try {

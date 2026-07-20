@@ -488,11 +488,13 @@ final class QaFixtureService
         foreach ([[$userA, $userB], [$userB, $userA]] as [$userId, $friendUserId]) {
             Db::execute(
                 'INSERT INTO im_friend_relation
-                    (organization, user_id, friend_user_id, add_method, added_at, status, create_time, update_time, delete_time)
-                 VALUES (?, ?, ?, ?, ?, 1, ?, ?, NULL)
-                 ON DUPLICATE KEY UPDATE add_method = VALUES(add_method), added_at = VALUES(added_at),
+                    (organization, user_id, friend_organization, friend_user_id, add_method, added_at,
+                     status, create_time, update_time, delete_time)
+                 VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)
+                 ON DUPLICATE KEY UPDATE friend_organization = VALUES(friend_organization),
+                    add_method = VALUES(add_method), added_at = VALUES(added_at),
                     status = 1, update_time = VALUES(update_time), delete_time = NULL',
-                [$organization, $userId, $friendUserId, 'auto', $now, $now, $now],
+                [$organization, $userId, $organization, $friendUserId, 'auto', $now, $now, $now],
             );
         }
     }

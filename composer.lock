@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "fbc08c6f5daeafa4f31eb18cb1d0a95c",
+    "content-hash": "0c9baf57a163a0234c5124dacd882850",
     "packages": [
         {
             "name": "aliyuncs/oss-sdk-php",
@@ -201,6 +201,40 @@
                 "source": "https://github.com/aws/aws-sdk-php/tree/3.388.3"
             },
             "time": "2026-07-09T18:07:47+00:00"
+        },
+        {
+            "name": "b8im/im-shared",
+            "version": "1.0.0",
+            "dist": {
+                "type": "path",
+                "url": "../b8im-im-shared",
+                "reference": "9c5d9d3626ce29eb079716f8ce425cd32c2f27f6"
+            },
+            "require": {
+                "php": ">=8.1"
+            },
+            "type": "library",
+            "autoload": {
+                "psr-4": {
+                    "B8im\\ImShared\\": "src/"
+                }
+            },
+            "scripts": {
+                "test": [
+                    "php tests/run.php"
+                ],
+                "lint": [
+                    "find src tests -name '*.php' -print0 | xargs -0 -n1 php -l"
+                ]
+            },
+            "license": [
+                "MIT"
+            ],
+            "description": "b8im IM 通信层公共包：消息协议、常量、工具，供 im-gateway / im-register / im-business 复用。",
+            "transport-options": {
+                "symlink": true,
+                "relative": true
+            }
         },
         {
             "name": "b8im/module-customer-service",

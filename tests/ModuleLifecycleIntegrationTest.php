@@ -426,7 +426,16 @@ $manager->grantLicense(1, 'announcement', null, '到期后重新授权', $actor)
 $manager->enableTenant(1, 'announcement', $tenantActor);
 
 $badManifestData = $originalManifest->toArray();
-$badManifestData['version'] = '0.2.0';
+$installedVersionParts = array_map('intval', explode('.', $originalManifest->version()));
+if (count($installedVersionParts) !== 3) {
+    throw new RuntimeException('announcement 测试 manifest 版本必须是三段式 SemVer。');
+}
+$badManifestData['version'] = sprintf(
+    '%d.%d.%d',
+    $installedVersionParts[0],
+    $installedVersionParts[1],
+    $installedVersionParts[2] + 1,
+);
 $badManifestData['migrations'] = [];
 $badManifestData['hooks']['upgrade']['handler'] = IntegrationAtomicUpgradeHook::class . '::upgrade';
 $badManifestData['permissions'][] = [
@@ -463,7 +472,10 @@ try {
         $badManager->upgrade('announcement', $actor);
         throw new RuntimeException('权限碰撞未使升级失败。');
     } catch (\plugin\saimulti\exception\ApiException $exception) {
-        $assert(str_contains($exception->getMessage(), 'saimulti:config:index'), '模块菜单权限碰撞未给出明确错误');
+        $assert(
+            str_contains($exception->getMessage(), 'saimulti:config:index'),
+            '模块菜单权限碰撞未给出明确错误：' . $exception->getMessage(),
+        );
     }
     $assert(
         Db::table('sm_module')->where('module_key', 'announcement')->value('status') === 'FAILED',
@@ -486,7 +498,7 @@ try {
     @rmdir($temporaryModuleRoot);
 }
 
-// Recover explicitly from FAILED using the installed 0.1.0 package; there is
+// Recover explicitly from FAILED using the installed package; there is
 // no compatibility fallback or silent continuation of the failed upgrade.
 $manager->discover('announcement', $actor);
 $manager->install('announcement', $actor);

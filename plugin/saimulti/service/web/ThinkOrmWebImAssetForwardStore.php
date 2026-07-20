@@ -30,7 +30,7 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
             $conversationId,
             $messageId,
         ): array {
-            $owned = $this->activeAsset($organization, $fileId, $userId);
+            $owned = $this->activeAsset($organization, $fileId, $userId, false);
             if ($owned !== null) {
                 return $owned;
             }
@@ -117,8 +117,12 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
     }
 
     /** @return array<string, mixed>|null */
-    private function activeAsset(int $organization, string $fileId, ?string $ownerUserId = null): ?array
-    {
+    private function activeAsset(
+        int $organization,
+        string $fileId,
+        ?string $ownerUserId,
+        bool $lock,
+    ): ?array {
         $sql = 'SELECT file_id, user_id, kind, name, url, storage_path, size_byte, mime_type, extension
                   FROM im_upload_asset
                  WHERE organization = ? AND file_id = ?
@@ -128,7 +132,10 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
             $sql .= ' AND user_id = ?';
             $params[] = $ownerUserId;
         }
-        $sql .= ' LIMIT 1 FOR UPDATE';
+        $sql .= ' LIMIT 1';
+        if ($lock) {
+            $sql .= ' FOR UPDATE';
+        }
 
         return Db::query($sql, $params)[0] ?? null;
     }
@@ -142,8 +149,30 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
         string $fileId,
         ?string $expectedKind,
     ): array {
+        CrossOrganizationSocialPolicy::lockSharedInsideTransaction();
+        $viewerMembership = Db::query(
+            'SELECT id
+               FROM im_conversation_member
+              WHERE organization = ?
+                AND conversation_id = ?
+                AND member_organization = ?
+                AND user_id = ?
+                AND status = 1
+                AND delete_time IS NULL
+              LIMIT 1',
+            [$organization, $conversationId, $organization, $userId],
+        )[0] ?? null;
+        if ($viewerMembership === null) {
+            throw new ApiException('原附件消息不存在或不可见。', 404);
+        }
+        (new WebImConversationAccessGuard())->assertAccessible(
+            $organization,
+            $userId,
+            $conversationId,
+            true,
+        );
         $source = Db::query(
-            'SELECT i.message_seq, i.shard_table
+            'SELECT i.message_seq, i.shard_table, i.sender_organization
                FROM im_message_index i
          INNER JOIN im_conversation c
                  ON c.organization = i.organization
@@ -151,8 +180,9 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
                 AND c.status = 1
                 AND c.delete_time IS NULL
          INNER JOIN im_conversation_member cm
-                 ON cm.organization = i.organization
+                ON cm.organization = i.organization
                 AND cm.conversation_id = i.conversation_id
+                AND cm.member_organization = ?
                 AND cm.user_id = ?
                 AND cm.status = 1
                 AND cm.delete_time IS NULL
@@ -164,6 +194,7 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
                       FROM im_conversation_membership_period mp
                      WHERE mp.organization = i.organization
                        AND mp.conversation_id = i.conversation_id
+                       AND mp.member_organization = ?
                        AND mp.user_id = ?
                        AND mp.status = 1
                        AND i.message_seq >= mp.visible_from_message_seq
@@ -175,18 +206,29 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
                      WHERE ud.organization = i.organization
                        AND ud.conversation_id = i.conversation_id
                        AND ud.message_id = i.message_id
+                       AND ud.user_organization = ?
                        AND ud.user_id = ?
                 )
               LIMIT 1
               FOR UPDATE',
-            [$userId, $organization, $conversationId, $messageId, $userId, $userId],
+            [
+                $organization,
+                $userId,
+                $organization,
+                $conversationId,
+                $messageId,
+                $organization,
+                $userId,
+                $organization,
+                $userId,
+            ],
         )[0] ?? null;
         if ($source === null) {
             throw new ApiException('原附件消息不存在或不可见。', 404);
         }
 
         $message = Db::query(
-            'SELECT sender_id, message_type, content, status, delete_time
+            'SELECT sender_id, sender_organization, message_type, content, status, delete_time
                FROM ' . $this->quoteShard((string) $source['shard_table']) . '
               WHERE organization = ? AND conversation_id = ? AND message_id = ?
               LIMIT 1
@@ -201,6 +243,13 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
             || ($expectedKind !== null && $kind !== $expectedKind)) {
             throw new ApiException('原附件消息不存在或不可见。', 404);
         }
+        $sourceOrganization = (int) ($source['sender_organization'] ?? 0);
+        if (
+            $sourceOrganization <= 0
+            || (int) ($message['sender_organization'] ?? 0) !== $sourceOrganization
+        ) {
+            throw new \RuntimeException('Attachment source message has inconsistent sender_organization.');
+        }
 
         $content = json_decode((string) ($message['content'] ?? ''), true);
         if (!is_array($content)
@@ -209,7 +258,7 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
             throw new ApiException('原附件消息与 file_id 不匹配。', 404);
         }
 
-        $asset = $this->activeAsset($organization, $fileId);
+        $asset = $this->activeAsset($sourceOrganization, $fileId, null, true);
         if ($asset === null || (string) $asset['kind'] !== $kind) {
             throw new ApiException('原附件不存在或已失效。', 404);
         }

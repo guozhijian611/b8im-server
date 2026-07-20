@@ -40,6 +40,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                  ON mi.organization = c.organization
                 AND mi.message_id = c.last_message_id
               WHERE cm.organization = ?
+                AND cm.member_organization = ?
                 AND cm.user_id = ?
                 AND cm.status = 1
                 AND cm.delete_time IS NULL
@@ -51,13 +52,28 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                     COALESCE(mi.id, 0) DESC,
                     c.create_time DESC,
                     c.id DESC',
-            [$organization, $userId],
+            [$organization, $organization, $userId],
         );
 
-        $items = array_map(
-            fn (array $row): array => $this->formatConversation($organization, $userId, $row),
-            $rows,
-        );
+        $items = [];
+        foreach ($rows as $row) {
+            $crossOrganization = $this->isCrossOrganizationConversation(
+                (string) $row['conversation_id'],
+            );
+            if ($crossOrganization && !CrossOrganizationSocialPolicy::isEnabled()) {
+                continue;
+            }
+            try {
+                $items[] = $this->formatConversation($organization, $userId, $row);
+            } catch (ApiException $exception) {
+                // A peer organization becoming inactive revokes only that
+                // cross-organization projection; unrelated conversations stay
+                // listable. Structural corruption still throws below.
+                if (!$crossOrganization || $exception->getCode() !== 403) {
+                    throw $exception;
+                }
+            }
+        }
         usort($items, static function (array $left, array $right): int {
             $pinned = (int) $right['is_pinned'] <=> (int) $left['is_pinned'];
             if ($pinned !== 0) {
@@ -188,10 +204,11 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                     SET message_group_id = ?, update_time = ?
                   WHERE organization = ?
                     AND conversation_id = ?
+                    AND member_organization = ?
                     AND user_id = ?
                     AND status = 1
                     AND delete_time IS NULL',
-                [$messageGroupId, $now, $organization, $conversationId, $userId],
+                [$messageGroupId, $now, $organization, $conversationId, $organization, $userId],
             );
             if ($affected > 1) {
                 throw new \RuntimeException('Conversation group update affected multiple membership rows.');
@@ -248,16 +265,25 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         int $organization,
         string $userId,
         string $conversationId,
+        int $peerOrganization,
         string $peerUserId,
         int $afterSeq,
         int $beforeSeq,
         int $limit,
     ): array {
         if ($conversationId === '' && $peerUserId !== '') {
-            if (!$this->areFriends($organization, $userId, $peerUserId)) {
+            if ($peerOrganization !== $organization && !CrossOrganizationSocialPolicy::isEnabled()) {
+                throw new ApiException('跨租户单聊未开放。', 403);
+            }
+            if (!$this->areFriends($organization, $userId, $peerOrganization, $peerUserId)) {
                 throw new ApiException('只能查看好友会话。', 403);
             }
-            $conversationId = $this->resolveSingleConversationId($organization, $userId, $peerUserId);
+            $conversationId = SingleConversationIdentity::conversationId(
+                $organization,
+                $userId,
+                $peerOrganization,
+                $peerUserId,
+            );
             if (!$this->conversationExists($organization, $conversationId)) {
                 return $this->emptyMessagePage($afterSeq, $beforeSeq);
             }
@@ -283,6 +309,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                       FROM im_conversation_membership_period mp
                      WHERE mp.organization = i.organization
                        AND mp.conversation_id = i.conversation_id
+                       AND mp.member_organization = ?
                        AND mp.user_id = ?
                        AND mp.status = 1
                        AND i.message_seq >= mp.visible_from_message_seq
@@ -293,11 +320,12 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                      WHERE ud.organization = i.organization
                        AND ud.conversation_id = i.conversation_id
                        AND ud.message_id = i.message_id
+                       AND ud.user_organization = ?
                        AND ud.user_id = ?
                 )
            ORDER BY i.message_seq ' . $direction . '
               LIMIT ' . ($limit + 1),
-            [$organization, $conversationId, $cursor, $userId, $userId],
+            [$organization, $conversationId, $cursor, $organization, $userId, $organization, $userId],
         );
         $hasMore = count($candidates) > $limit;
         $page = array_slice($candidates, 0, $limit);
@@ -334,6 +362,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         string $now,
     ): array {
         return Db::transaction(function () use ($organization, $userId, $conversationId, $all, $now): array {
+            $policy = CrossOrganizationSocialPolicy::lockSharedInsideTransaction();
             if ($all) {
                 $members = Db::query(
                     'SELECT cm.conversation_id
@@ -342,70 +371,105 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                          ON c.organization = cm.organization
                         AND c.conversation_id = cm.conversation_id
                       WHERE cm.organization = ?
+                        AND cm.member_organization = ?
                         AND cm.user_id = ?
                         AND cm.status = 1
                         AND cm.delete_time IS NULL
                         AND c.status = 1
                         AND c.delete_time IS NULL
-                      FOR UPDATE',
-                    [$organization, $userId],
+                   ORDER BY cm.conversation_id ASC',
+                    [$organization, $organization, $userId],
                 );
+                if (!$policy['enabled']) {
+                    $members = array_values(array_filter(
+                        $members,
+                        fn (array $member): bool => !$this->isCrossOrganizationConversation(
+                            (string) $member['conversation_id'],
+                        ),
+                    ));
+                }
                 $updated = 0;
                 foreach ($members as $member) {
-                    $updated += $this->markConversationRead(
-                        $organization,
-                        $userId,
-                        (string) $member['conversation_id'],
-                        $now,
-                    );
+                    $memberConversationId = (string) $member['conversation_id'];
+                    try {
+                        $updated += $this->markConversationRead(
+                            $organization,
+                            $userId,
+                            $memberConversationId,
+                            $now,
+                        );
+                    } catch (ApiException $exception) {
+                        if ($exception->getCode() !== 403
+                            || !$this->isCrossOrganizationConversation($memberConversationId)) {
+                            throw $exception;
+                        }
+                    }
                 }
 
-                return ['updated' => $updated];
+                return [
+                    'updated' => $updated,
+                    'user_organization' => $organization,
+                    'user_id' => $userId,
+                ];
             }
 
-            return ['updated' => $this->markConversationRead(
-                $organization,
-                $userId,
-                $conversationId,
-                $now,
-            )];
+            return [
+                'updated' => $this->markConversationRead(
+                    $organization,
+                    $userId,
+                    $conversationId,
+                    $now,
+                ),
+                'user_organization' => $organization,
+                'user_id' => $userId,
+            ];
         });
     }
 
     public function contacts(int $organization, string $userId, string $keyword): array
     {
-        $params = [$userId, $organization, $userId];
+        $crossOrganizationEnabled = CrossOrganizationSocialPolicy::isEnabled();
+        $params = [$userId, $organization];
         $sql = 'SELECT u.*, COALESCE(p.signature, "") AS signature,
                        COALESCE(fr.remark_name, "") AS friend_remark,
                        fr.friend_organization AS peer_organization,
                        COALESCE(org.organization_name, org.title, "") AS organization_name
                   FROM im_friend_relation fr
+            INNER JOIN sm_system_organization owner_org
+                    ON owner_org.id = fr.organization
+                   AND owner_org.status = 1
+                   AND owner_org.delete_time IS NULL
             INNER JOIN im_user u
-                    ON u.organization = IF(COALESCE(fr.friend_organization, 0) > 0, fr.friend_organization, fr.organization)
+                    ON u.organization = fr.friend_organization
                    AND u.user_id = fr.friend_user_id
              LEFT JOIN im_user_profile p
                     ON p.organization = u.organization
                    AND p.user_id = u.user_id
                    AND p.status = 1
                    AND p.delete_time IS NULL
-             LEFT JOIN sm_system_organization org
+            INNER JOIN sm_system_organization org
                     ON org.id = u.organization
+                   AND org.status = 1
                    AND org.delete_time IS NULL
                  WHERE fr.user_id = ?
                    AND fr.organization = ?
-                   AND fr.friend_user_id <> ?
+                   AND fr.friend_organization > 0
                    AND fr.status = 1
                    AND fr.delete_time IS NULL
                    AND EXISTS (
                        SELECT 1 FROM im_friend_relation reverse_fr
-                        WHERE reverse_fr.organization = IF(COALESCE(fr.friend_organization, 0) > 0, fr.friend_organization, fr.organization)
+                        WHERE reverse_fr.organization = fr.friend_organization
                           AND reverse_fr.user_id = fr.friend_user_id
+                          AND reverse_fr.friend_organization = fr.organization
                           AND reverse_fr.friend_user_id = fr.user_id
                           AND reverse_fr.status = 1
                           AND reverse_fr.delete_time IS NULL
                    )
                    AND u.status = 1
                    AND u.delete_time IS NULL';
+        if (!$crossOrganizationEnabled) {
+            $sql .= ' AND fr.friend_organization = fr.organization';
+        }
         if ($keyword !== '') {
             $pattern = $this->likePattern($keyword);
             $sql .= ' AND (u.account LIKE ? ESCAPE "\\\\"
@@ -426,6 +490,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
 
     public function searchUsers(int $organization, string $userId, string $keyword): array
     {
+        (new WebImConversationAccessGuard())->assertActiveOrganizations([$organization]);
         $pattern = $this->likePattern($keyword);
         $rows = Db::query(
             'SELECT u.*, COALESCE(p.signature, "") AS signature,
@@ -435,8 +500,9 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                     CASE
                         WHEN fr.id IS NOT NULL AND EXISTS (
                             SELECT 1 FROM im_friend_relation reverse_fr
-                             WHERE reverse_fr.organization = IF(COALESCE(fr.friend_organization, 0) > 0, fr.friend_organization, fr.organization)
+                             WHERE reverse_fr.organization = fr.friend_organization
                                AND reverse_fr.user_id = fr.friend_user_id
+                               AND reverse_fr.friend_organization = fr.organization
                                AND reverse_fr.friend_user_id = fr.user_id
                                AND reverse_fr.status = 1
                                AND reverse_fr.delete_time IS NULL
@@ -444,18 +510,20 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                         WHEN EXISTS (
                             SELECT 1 FROM im_friend_request outgoing
                              WHERE outgoing.from_user_id = ?
+                               AND outgoing.from_organization = ?
                                AND outgoing.to_user_id = u.user_id
+                               AND outgoing.to_organization = u.organization
                                AND outgoing.status = 1
                                AND outgoing.delete_time IS NULL
-                               AND (outgoing.from_organization = ? OR outgoing.organization = ?)
                         ) THEN "pending_out"
                         WHEN EXISTS (
                             SELECT 1 FROM im_friend_request incoming
                              WHERE incoming.from_user_id = u.user_id
+                               AND incoming.from_organization = u.organization
                                AND incoming.to_user_id = ?
+                               AND incoming.to_organization = ?
                                AND incoming.status = 1
                                AND incoming.delete_time IS NULL
-                               AND (incoming.to_organization = ? OR incoming.organization = ?)
                         ) THEN "pending_in"
                         ELSE "none"
                     END AS relation_status
@@ -469,13 +537,15 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                  ON ps.organization = u.organization
                 AND ps.user_id = u.user_id
           LEFT JOIN im_friend_relation fr
-                 ON fr.organization = ?
+                ON fr.organization = ?
                 AND fr.user_id = ?
+                AND fr.friend_organization = u.organization
                 AND fr.friend_user_id = u.user_id
                 AND fr.status = 1
                 AND fr.delete_time IS NULL
-          LEFT JOIN sm_system_organization org
+         INNER JOIN sm_system_organization org
                  ON org.id = u.organization
+                AND org.status = 1
                 AND org.delete_time IS NULL
               WHERE u.organization = ?
                 AND u.user_id <> ?
@@ -498,9 +568,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             [
                 $userId,
                 $organization,
-                $organization,
                 $userId,
-                $organization,
                 $organization,
                 $organization,
                 $userId,
@@ -526,8 +594,9 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                         CASE
                             WHEN fr.id IS NOT NULL AND EXISTS (
                                 SELECT 1 FROM im_friend_relation reverse_fr
-                                 WHERE reverse_fr.organization = IF(COALESCE(fr.friend_organization, 0) > 0, fr.friend_organization, fr.organization)
+                                 WHERE reverse_fr.organization = fr.friend_organization
                                    AND reverse_fr.user_id = fr.friend_user_id
+                                   AND reverse_fr.friend_organization = fr.organization
                                    AND reverse_fr.friend_user_id = fr.user_id
                                    AND reverse_fr.status = 1
                                    AND reverse_fr.delete_time IS NULL
@@ -535,14 +604,18 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                             WHEN EXISTS (
                                 SELECT 1 FROM im_friend_request outgoing
                                  WHERE outgoing.from_user_id = ?
+                                   AND outgoing.from_organization = ?
                                    AND outgoing.to_user_id = u.user_id
+                                   AND outgoing.to_organization = u.organization
                                    AND outgoing.status = 1
                                    AND outgoing.delete_time IS NULL
                             ) THEN "pending_out"
                             WHEN EXISTS (
                                 SELECT 1 FROM im_friend_request incoming
                                  WHERE incoming.from_user_id = u.user_id
+                                   AND incoming.from_organization = u.organization
                                    AND incoming.to_user_id = ?
+                                   AND incoming.to_organization = ?
                                    AND incoming.status = 1
                                    AND incoming.delete_time IS NULL
                             ) THEN "pending_in"
@@ -558,16 +631,17 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                      ON ps.organization = u.organization
                     AND ps.user_id = u.user_id
               LEFT JOIN im_friend_relation fr
-                     ON fr.organization = ?
-                    AND fr.user_id = ?
-                    AND fr.friend_user_id = u.user_id
+                ON fr.organization = ?
+                AND fr.user_id = ?
+                AND fr.friend_organization = u.organization
+                AND fr.friend_user_id = u.user_id
                     AND fr.status = 1
                     AND fr.delete_time IS NULL
-              LEFT JOIN sm_system_organization org
+             INNER JOIN sm_system_organization org
                      ON org.id = u.organization
+                    AND org.status = 1
                     AND org.delete_time IS NULL
                   WHERE u.organization <> ?
-                    AND u.user_id <> ?
                     AND u.status = 1
                     AND u.is_system = 2
                     AND u.delete_time IS NULL
@@ -583,11 +657,12 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                   LIMIT 20',
                 [
                     $userId,
-                    $userId,
                     $organization,
                     $userId,
                     $organization,
+                    $organization,
                     $userId,
+                    $organization,
                     $keyword,
                     $keyword,
                     $keyword,
@@ -600,13 +675,19 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             );
             $seen = [];
             foreach ($rows as $row) {
-                $seen[(string) $row['user_id']] = true;
+                $seen[SingleConversationIdentity::identity(
+                    (int) $row['organization'],
+                    (string) $row['user_id'],
+                )] = true;
             }
             foreach ($crossRows as $row) {
-                $uid = (string) $row['user_id'];
-                if (!isset($seen[$uid])) {
+                $identity = SingleConversationIdentity::identity(
+                    (int) $row['organization'],
+                    (string) $row['user_id'],
+                );
+                if (!isset($seen[$identity])) {
                     $rows[] = $row;
-                    $seen[$uid] = true;
+                    $seen[$identity] = true;
                 }
             }
         }
@@ -621,18 +702,33 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
 
     public function friendRequests(int $organization, string $userId): array
     {
+        $crossOrganizationEnabled = CrossOrganizationSocialPolicy::isEnabled();
+        $policySql = $crossOrganizationEnabled ? '' : ' AND from_organization = to_organization';
         $rows = Db::query(
             'SELECT * FROM im_friend_request
               WHERE delete_time IS NULL
                 AND status IN (1, 2, 3)
-                AND (
-                    (organization = ? AND (from_user_id = ? OR to_user_id = ?))
-                    OR (from_organization = ? AND from_user_id = ?)
-                    OR (to_organization = ? AND to_user_id = ?)
+                AND EXISTS (
+                    SELECT 1
+                      FROM sm_system_organization from_org
+                     WHERE from_org.id = im_friend_request.from_organization
+                       AND from_org.status = 1
+                       AND from_org.delete_time IS NULL
                 )
+                AND EXISTS (
+                    SELECT 1
+                      FROM sm_system_organization to_org
+                     WHERE to_org.id = im_friend_request.to_organization
+                       AND to_org.status = 1
+                       AND to_org.delete_time IS NULL
+                )
+                AND (
+                    (from_organization = ? AND from_user_id = ?)
+                    OR (to_organization = ? AND to_user_id = ?)
+                )' . $policySql . '
            ORDER BY id DESC
               LIMIT 100',
-            [$organization, $userId, $userId, $organization, $userId, $organization, $userId],
+            [$organization, $userId, $organization, $userId],
         );
         if ($rows === []) {
             return [];
@@ -640,29 +736,33 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
 
         $users = [];
         foreach ($rows as $row) {
-            $fromOrg = (int) ($row['from_organization'] ?: $row['organization']);
-            $toOrg = (int) ($row['to_organization'] ?: $row['organization']);
+            $fromOrg = $this->requiredOrganization($row, 'from_organization', '好友申请');
+            $toOrg = $this->requiredOrganization($row, 'to_organization', '好友申请');
             $fromUserId = (string) $row['from_user_id'];
             $toUserId = (string) $row['to_user_id'];
             $from = $this->userById($fromOrg, $fromUserId, false);
             $to = $this->userById($toOrg, $toUserId, false);
             if ($from !== null) {
-                $users[$fromUserId] = $from;
+                $users[SingleConversationIdentity::identity($fromOrg, $fromUserId)] = $from;
             }
             if ($to !== null) {
-                $users[$toUserId] = $to;
+                $users[SingleConversationIdentity::identity($toOrg, $toUserId)] = $to;
             }
         }
 
         return array_map(function (array $row) use ($userId, $users, $organization): array {
             $fromUserId = (string) $row['from_user_id'];
             $toUserId = (string) $row['to_user_id'];
-            $fromOrg = (int) ($row['from_organization'] ?: $row['organization']);
-            $toOrg = (int) ($row['to_organization'] ?: $row['organization']);
+            $fromOrg = $this->requiredOrganization($row, 'from_organization', '好友申请');
+            $toOrg = $this->requiredOrganization($row, 'to_organization', '好友申请');
+            $fromIdentity = SingleConversationIdentity::identity($fromOrg, $fromUserId);
+            $toIdentity = SingleConversationIdentity::identity($toOrg, $toUserId);
 
             return [
                 'id' => (int) $row['id'],
-                'direction' => hash_equals($toUserId, $userId) ? 'incoming' : 'outgoing',
+                'direction' => $toOrg === $organization && hash_equals($toUserId, $userId)
+                    ? 'incoming'
+                    : 'outgoing',
                 'message' => (string) ($row['message'] ?? ''),
                 'status' => (int) $row['status'],
                 'status_text' => $this->requestStatusText((int) $row['status']),
@@ -670,11 +770,11 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 'handle_time' => (string) ($row['handle_time'] ?? ''),
                 'from_organization' => $fromOrg,
                 'to_organization' => $toOrg,
-                'from_user' => isset($users[$fromUserId])
-                    ? $this->userView($users[$fromUserId], '', 'none', $organization)
+                'from_user' => isset($users[$fromIdentity])
+                    ? $this->userView($users[$fromIdentity], '', 'none', $organization)
                     : null,
-                'to_user' => isset($users[$toUserId])
-                    ? $this->userView($users[$toUserId], '', 'none', $organization)
+                'to_user' => isset($users[$toIdentity])
+                    ? $this->userView($users[$toIdentity], '', 'none', $organization)
                     : null,
             ];
         }, $rows);
@@ -683,6 +783,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
     public function sendFriendRequest(
         int $organization,
         string $fromUserId,
+        int $toOrganization,
         string $toUserId,
         string $message,
         string $now,
@@ -690,34 +791,44 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         return Db::transaction(function () use (
             $organization,
             $fromUserId,
+            $toOrganization,
             $toUserId,
             $message,
             $now,
         ): array {
-            $fromUser = $this->activeUserForUpdate($organization, $fromUserId, false);
-            $toUser = $this->findActiveUserAnyOrg($toUserId, false, true);
-            if ($toUser === null) {
-                throw new ApiException('用户不存在或已停用。', 404);
-            }
-            $toOrganization = (int) $toUser['organization'];
             $crossOrg = $toOrganization !== $organization;
-            if ($crossOrg && !CrossOrganizationSocialPolicy::isEnabled()) {
-                throw new ApiException('跨租户好友未开放。', 403);
+            $crossOrgAccessSnapshotId = null;
+            if ($crossOrg) {
+                $policy = CrossOrganizationSocialPolicy::lockSharedInsideTransaction();
+                if (!$policy['enabled']) {
+                    throw new ApiException('跨租户好友未开放。', 403);
+                }
+                $crossOrgAccessSnapshotId = $policy['access_snapshot_id'];
             }
-
-            $pendingRows = Db::query(
-                'SELECT * FROM im_friend_request
-                  WHERE status = 1
-                    AND delete_time IS NULL
-                    AND (
-                        (from_user_id = ? AND to_user_id = ?)
-                        OR (from_user_id = ? AND to_user_id = ?)
-                    )
-               ORDER BY id ASC
-                  FOR UPDATE',
-                [$fromUserId, $toUserId, $toUserId, $fromUserId],
+            (new WebImConversationAccessGuard())->assertActiveOrganizations(
+                [$organization, $toOrganization],
+                true,
             );
-            if ($this->areFriends($organization, $fromUserId, $toUserId, true)) {
+            [$fromUser, $toUser] = $this->activeUserPairForUpdate(
+                $organization,
+                $fromUserId,
+                $toOrganization,
+                $toUserId,
+            );
+
+            $pendingRows = $this->pendingFriendRequestsForUpdate(
+                $organization,
+                $fromUserId,
+                $toOrganization,
+                $toUserId,
+            );
+            if ($this->areFriends(
+                $organization,
+                $fromUserId,
+                $toOrganization,
+                $toUserId,
+                true,
+            )) {
                 return ['status' => 'accepted', 'message' => '对方已经是你的好友'];
             }
             $privacy = Db::query(
@@ -730,11 +841,17 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             if ($privacy !== null && (int) $privacy['allow_add_by_username'] !== 1) {
                 throw new ApiException('对方不允许通过用户名添加好友。', 403);
             }
+            $reversePending = null;
+            $outgoingPending = null;
             foreach ($pendingRows as $pending) {
-                if (hash_equals((string) $pending['from_user_id'], $fromUserId)) {
-                    return ['status' => 'pending', 'message' => '好友申请已发送'];
+                if ((int) $pending['from_organization'] === $organization
+                    && hash_equals((string) $pending['from_user_id'], $fromUserId)) {
+                    $outgoingPending = $pending;
+                    continue;
                 }
-                // mutual pending: accept
+                $reversePending = $pending;
+            }
+            if ($reversePending !== null) {
                 $this->createFriendPairAcross(
                     $organization,
                     $fromUserId,
@@ -747,10 +864,13 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                     'UPDATE im_friend_request
                         SET status = 2, handle_time = ?, update_time = ?
                       WHERE id = ? AND status = 1',
-                    [$now, $now, (int) $pending['id']],
+                    [$now, $now, (int) $reversePending['id']],
                 );
 
                 return ['status' => 'accepted', 'message' => '已接受对方的好友申请'];
+            }
+            if ($outgoingPending !== null) {
+                return ['status' => 'pending', 'message' => '好友申请已发送'];
             }
 
             // Store under recipient organization so they see the request in their list.
@@ -780,6 +900,9 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 'message' => '好友申请已发送',
                 '_realtime_event_organization' => $toOrganization,
                 '_realtime_event' => [
+                    ...($crossOrgAccessSnapshotId !== null ? [
+                        'cross_org_access_snapshot_id' => $crossOrgAccessSnapshotId,
+                    ] : []),
                     'request_id' => (int) $requestId,
                     'from_user_id' => $fromUserId,
                     'to_user_id' => $toUserId,
@@ -801,19 +924,92 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         string $action,
         string $now,
     ): array {
-        return Db::transaction(function () use ($organization, $userId, $requestId, $action, $now): array {
+        // Discover the participant homes before the transaction. The exact
+        // request is locked and revalidated only after the common
+        // policy -> organizations -> users prefix below.
+        $preview = Db::query(
+            'SELECT from_organization, from_user_id, to_organization
+               FROM im_friend_request
+              WHERE id = ?
+                AND to_user_id = ?
+                AND to_organization = ?
+                AND organization = to_organization
+                AND delete_time IS NULL
+              LIMIT 1',
+            [$requestId, $userId, $organization],
+        )[0] ?? null;
+        if ($preview === null) {
+            throw new ApiException('好友申请不存在。', 404);
+        }
+        $fromUserId = (string) $preview['from_user_id'];
+        $fromOrganization = $this->requiredOrganization($preview, 'from_organization', '好友申请');
+        $toOrganization = $this->requiredOrganization($preview, 'to_organization', '好友申请');
+
+        return Db::transaction(function () use (
+            $organization,
+            $userId,
+            $requestId,
+            $action,
+            $now,
+            $fromUserId,
+            $fromOrganization,
+            $toOrganization,
+        ): array {
+            $policy = CrossOrganizationSocialPolicy::lockSharedInsideTransaction();
+            $crossOrg = $fromOrganization !== $toOrganization;
+            if ($crossOrg && !$policy['enabled']) {
+                throw new ApiException('跨租户好友未开放。', 403);
+            }
+            (new WebImConversationAccessGuard())->assertActiveOrganizations(
+                [$fromOrganization, $toOrganization],
+                true,
+            );
+            if ($action === 'accept') {
+                $this->activeUserPairForUpdate(
+                    $fromOrganization,
+                    $fromUserId,
+                    $toOrganization,
+                    $userId,
+                );
+            }
             $request = Db::query(
                 'SELECT * FROM im_friend_request
                   WHERE id = ?
+                    AND from_organization = ?
+                    AND from_user_id = ?
+                    AND to_organization = ?
                     AND to_user_id = ?
+                    AND organization = ?
+                    AND organization = to_organization
                     AND delete_time IS NULL
-                    AND (organization = ? OR to_organization = ?)
                   LIMIT 1
                   FOR UPDATE',
-                [$requestId, $userId, $organization, $organization],
+                [
+                    $requestId,
+                    $fromOrganization,
+                    $fromUserId,
+                    $toOrganization,
+                    $userId,
+                    $organization,
+                ],
             )[0] ?? null;
             if ($request === null) {
                 throw new ApiException('好友申请不存在。', 404);
+            }
+            $lockedFromOrganization = $this->requiredOrganization(
+                $request,
+                'from_organization',
+                '好友申请',
+            );
+            $lockedFromUserId = (string) ($request['from_user_id'] ?? '');
+            $lockedToOrganization = $this->requiredOrganization(
+                $request,
+                'to_organization',
+                '好友申请',
+            );
+            $lockedToUserId = (string) ($request['to_user_id'] ?? '');
+            if (trim($lockedFromUserId) === '' || trim($lockedToUserId) === '') {
+                throw new \RuntimeException('好友申请参与者身份无效。');
             }
             $status = (int) $request['status'];
             if ($status !== 1) {
@@ -823,22 +1019,12 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 throw new ApiException('好友申请已被处理。', 409);
             }
 
-            $fromUserId = (string) $request['from_user_id'];
-            $fromOrganization = (int) ($request['from_organization'] ?: $request['organization']);
-            $toOrganization = (int) ($request['to_organization'] ?: $request['organization']);
-            $crossOrg = $fromOrganization !== $toOrganization;
-            if ($crossOrg && !CrossOrganizationSocialPolicy::isEnabled()) {
-                throw new ApiException('跨租户好友未开放。', 403);
-            }
-
             if ($action === 'accept') {
-                $this->activeUserForUpdate($fromOrganization, $fromUserId, false);
-                $this->activeUserForUpdate($toOrganization, $userId, false);
                 $this->createFriendPairAcross(
-                    $fromOrganization,
-                    $fromUserId,
-                    $toOrganization,
-                    $userId,
+                    $lockedFromOrganization,
+                    $lockedFromUserId,
+                    $lockedToOrganization,
+                    $lockedToUserId,
                     (string) $request['add_method'],
                     $now,
                 );
@@ -883,7 +1069,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             }
             foreach ($memberIds as $memberId) {
                 if (!hash_equals($memberId, $ownerUserId)
-                    && !$this->areFriends($organization, $ownerUserId, $memberId, true)) {
+                    && !$this->areFriends($organization, $ownerUserId, $organization, $memberId, true)) {
                     throw new ApiException('只能邀请好友加入群聊。', 403);
                 }
             }
@@ -895,6 +1081,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 'conversation_type' => self::CONVERSATION_GROUP,
                 'title' => $title,
                 'owner_user_id' => $ownerUserId,
+                'owner_organization' => $organization,
                 'status' => 1,
                 'create_time' => $now,
                 'update_time' => $now,
@@ -914,8 +1101,10 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                     'organization' => $organization,
                     'conversation_id' => $conversationId,
                     'user_id' => $memberId,
+                    'member_organization' => $organization,
                     'member_role' => hash_equals($memberId, $ownerUserId) ? 'owner' : 'member',
                     'inviter_user_id' => hash_equals($memberId, $ownerUserId) ? null : $ownerUserId,
+                    'inviter_organization' => hash_equals($memberId, $ownerUserId) ? 0 : $organization,
                     'status' => 1,
                     'mute_status' => 0,
                     'access_version' => 1,
@@ -927,6 +1116,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                     'organization' => $organization,
                     'conversation_id' => $conversationId,
                     'user_id' => $memberId,
+                    'member_organization' => $organization,
                     'period_no' => 1,
                     'visible_from_message_seq' => 1,
                     'visible_until_message_seq' => null,
@@ -976,7 +1166,13 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 throw new ApiException('群成员不存在或已停用。', 422);
             }
             foreach ($memberIds as $memberId) {
-                if (!$this->areFriends($organization, $operatorUserId, $memberId, true)) {
+                if (!$this->areFriends(
+                    $organization,
+                    $operatorUserId,
+                    $organization,
+                    $memberId,
+                    true,
+                )) {
                     throw new ApiException('只能邀请自己的好友加入群聊。', 403);
                 }
                 $this->ensureGroupMember(
@@ -1113,10 +1309,11 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                    FROM im_conversation_member
                   WHERE organization = ?
                     AND conversation_id = ?
+                    AND member_organization = ?
                     AND status = 1
                     AND delete_time IS NULL
                   FOR UPDATE',
-                [$organization, $conversationId],
+                [$organization, $conversationId, $organization],
             );
             $activeIds = [];
             foreach ($memberRows as $member) {
@@ -1133,10 +1330,11 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                     SET member_role = "member", update_time = ?
                   WHERE organization = ?
                     AND conversation_id = ?
+                    AND member_organization = ?
                     AND member_role = "admin"
                     AND status = 1
                     AND delete_time IS NULL',
-                [$now, $organization, $conversationId],
+                [$now, $organization, $conversationId, $organization],
             );
             if ($managerUserIds !== []) {
                 $placeholders = implode(',', array_fill(0, count($managerUserIds), '?'));
@@ -1145,10 +1343,11 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                         SET member_role = "admin", update_time = ?
                       WHERE organization = ?
                         AND conversation_id = ?
+                        AND member_organization = ?
                         AND user_id IN (' . $placeholders . ')
                         AND status = 1
                         AND delete_time IS NULL',
-                    array_merge([$now, $organization, $conversationId], $managerUserIds),
+                    array_merge([$now, $organization, $conversationId, $organization], $managerUserIds),
                 );
             }
         });
@@ -1186,6 +1385,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                     SET mute_status = ?, mute_until = ?, update_time = ?
                   WHERE organization = ?
                     AND conversation_id = ?
+                    AND member_organization = ?
                     AND user_id = ?
                     AND status = 1
                     AND delete_time IS NULL',
@@ -1195,6 +1395,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                     $now,
                     $organization,
                     $conversationId,
+                    $organization,
                     $memberUserId,
                 ],
             );
@@ -1248,10 +1449,19 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                     SET visible_until_message_seq = ?, leave_at = ?, update_time = ?
                   WHERE organization = ?
                     AND conversation_id = ?
+                    AND member_organization = ?
                     AND user_id = ?
                     AND status = 1
                     AND visible_until_message_seq IS NULL',
-                [$lastMessageSeq, $now, $now, $organization, $conversationId, $memberUserId],
+                [
+                    $lastMessageSeq,
+                    $now,
+                    $now,
+                    $organization,
+                    $conversationId,
+                    $organization,
+                    $memberUserId,
+                ],
             );
             Db::execute(
                 'UPDATE im_conversation_member
@@ -1263,10 +1473,11 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                         update_time = ?
                   WHERE organization = ?
                     AND conversation_id = ?
+                    AND member_organization = ?
                     AND user_id = ?
                     AND status = 1
                     AND delete_time IS NULL',
-                [$now, $organization, $conversationId, $memberUserId],
+                [$now, $organization, $conversationId, $organization, $memberUserId],
             );
         });
 
@@ -1300,14 +1511,15 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             Db::table('im_conversation_member')
                 ->where('id', (int) $member['id'])
                 ->where('organization', $organization)
+                ->where('member_organization', $organization)
                 ->where('user_id', $userId)
                 ->where('status', 1)
                 ->update($updates);
             $current = Db::query(
                 'SELECT is_pinned, is_muted FROM im_conversation_member
-                  WHERE id = ? AND organization = ? AND user_id = ? AND status = 1
+                  WHERE id = ? AND organization = ? AND member_organization = ? AND user_id = ? AND status = 1
                   LIMIT 1',
-                [(int) $member['id'], $organization, $userId],
+                [(int) $member['id'], $organization, $organization, $userId],
             )[0] ?? null;
             if ($current === null) {
                 throw new \RuntimeException('Updated conversation setting cannot be read back.');
@@ -1324,6 +1536,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
     public function updateFriendRemark(
         int $organization,
         string $userId,
+        int $friendOrganization,
         string $friendUserId,
         string $remark,
         string $now,
@@ -1331,28 +1544,41 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         return Db::transaction(function () use (
             $organization,
             $userId,
+            $friendOrganization,
             $friendUserId,
             $remark,
             $now,
         ): array {
-            if (!$this->areFriends($organization, $userId, $friendUserId, true)) {
+            if ($organization !== $friendOrganization) {
+                $policy = CrossOrganizationSocialPolicy::lockSharedInsideTransaction();
+                if (!$policy['enabled']) {
+                    throw new ApiException('跨租户好友未开放。', 403);
+                }
+            }
+            if (!$this->areFriends(
+                $organization,
+                $userId,
+                $friendOrganization,
+                $friendUserId,
+                true,
+            )) {
                 throw new ApiException('好友不存在。', 404);
             }
             $relation = Db::query(
                 'SELECT id FROM im_friend_relation
                   WHERE organization = ?
                     AND user_id = ?
+                    AND friend_organization = ?
                     AND friend_user_id = ?
                     AND status = 1
                     AND delete_time IS NULL
                   LIMIT 1
                   FOR UPDATE',
-                [$organization, $userId, $friendUserId],
+                [$organization, $userId, $friendOrganization, $friendUserId],
             )[0] ?? null;
             if ($relation === null) {
                 throw new ApiException('好友不存在。', 404);
             }
-            $this->activeUserForUpdate($organization, $friendUserId, true);
             Db::execute(
                 'UPDATE im_friend_relation
                     SET remark_name = ?, update_time = ?
@@ -1360,7 +1586,11 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 [$remark !== '' ? $remark : null, $now, (int) $relation['id'], $organization, $userId],
             );
 
-            return ['friend_user_id' => $friendUserId, 'remark' => $remark];
+            return [
+                'friend_organization' => $friendOrganization,
+                'friend_user_id' => $friendUserId,
+                'remark' => $remark,
+            ];
         });
     }
 
@@ -1383,19 +1613,27 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                     SELECT 1 FROM im_conversation_membership_period mp
                      WHERE mp.organization = i.organization
                        AND mp.conversation_id = i.conversation_id
+                       AND mp.member_organization = ?
                        AND mp.user_id = ?
                        AND mp.status = 1
                        AND i.message_seq >= mp.visible_from_message_seq
                        AND (mp.visible_until_message_seq IS NULL OR i.message_seq <= mp.visible_until_message_seq)
                 )',
-            [$organization, $conversationId, $userId],
+            [$organization, $conversationId, $organization, $userId],
         );
 
         $messages = [];
         foreach ($shards as $shard) {
             $table = $this->quoteShard((string) $shard['shard_table']);
-            $params = [$organization, $conversationId, $userId, $userId];
-            $sql = 'SELECT m.*
+            $params = [
+                $organization,
+                $conversationId,
+                $organization,
+                $userId,
+                $organization,
+                $userId,
+            ];
+            $sql = 'SELECT m.*, i.global_seq AS home_global_seq
                       FROM ' . $table . ' m
                 INNER JOIN im_message_index i
                         ON i.organization = m.organization
@@ -1408,6 +1646,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                            SELECT 1 FROM im_conversation_membership_period mp
                             WHERE mp.organization = m.organization
                               AND mp.conversation_id = m.conversation_id
+                              AND mp.member_organization = ?
                               AND mp.user_id = ?
                               AND mp.status = 1
                               AND m.message_seq >= mp.visible_from_message_seq
@@ -1418,6 +1657,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                             WHERE ud.organization = m.organization
                               AND ud.conversation_id = m.conversation_id
                               AND ud.message_id = m.message_id
+                              AND ud.user_organization = ?
                               AND ud.user_id = ?
                        )';
             if ($messageType > 0) {
@@ -1430,6 +1670,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             }
             $sql .= ' ORDER BY m.message_seq DESC LIMIT ' . $limit;
             foreach (Db::query($sql, $params) as $message) {
+                $message['global_seq'] = (string) ($message['home_global_seq'] ?? '');
                 $messages[] = $this->formatMessage($message, $organization);
             }
         }
@@ -1503,6 +1744,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             'event' => 'group_description',
             'text' => '@全体成员 ' . $text,
             'actor_user_id' => $actorUserId,
+            'actor_organization' => $organization,
             'actor_name' => $actorName !== '' ? $actorName : $actorUserId,
             'description' => $description,
             'mention_all' => true,
@@ -1513,14 +1755,15 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         Db::execute(
             'INSERT INTO ' . $this->quoteShard($shardTable) . '
                 (organization, conversation_id, conversation_type, message_id, message_seq,
-                 client_msg_id, sender_id, message_type, content, status, create_time, update_time)
-             VALUES (?, ?, 2, ?, ?, ?, "system_notification", 5, ?, 1, ?, ?)',
+                 client_msg_id, sender_id, sender_organization, message_type, content, status, create_time, update_time)
+             VALUES (?, ?, 2, ?, ?, ?, "system_notification", ?, 5, ?, 1, ?, ?)',
             [
                 $organization,
                 $conversationId,
                 $messageId,
                 $messageSeq,
                 $clientMessageId,
+                $organization,
                 json_encode($content, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR),
                 $now,
                 $now,
@@ -1533,6 +1776,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             'conversation_id' => $conversationId,
             'message_seq' => $messageSeq,
             'sender_id' => 'system_notification',
+            'sender_organization' => $organization,
             'client_msg_id' => $clientMessageId,
             'storage_node' => 'mysql-primary',
             'shard_table' => $shardTable,
@@ -1540,23 +1784,31 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         ]);
 
         $members = Db::query(
-            'SELECT user_id FROM im_conversation_member
+            'SELECT member_organization, user_id FROM im_conversation_member
               WHERE organization = ?
                 AND conversation_id = ?
+                AND member_organization = ?
                 AND status = 1
                 AND delete_time IS NULL
               FOR UPDATE',
-            [$organization, $conversationId],
+            [$organization, $conversationId, $organization],
         );
         $recipientUserIds = [];
+        $recipientIdentities = [];
         foreach ($members as $member) {
             $memberUserId = (string) $member['user_id'];
+            $memberOrganization = (int) $member['member_organization'];
             $isActor = hash_equals($memberUserId, $actorUserId);
+            $recipientIdentities[] = [
+                'organization' => $memberOrganization,
+                'user_id' => $memberUserId,
+            ];
             Db::table('im_message_receipt')->insert([
                 'organization' => $organization,
                 'conversation_id' => $conversationId,
                 'message_id' => $messageId,
                 'user_id' => $memberUserId,
+                'user_organization' => $memberOrganization,
                 'status' => $isActor ? 3 : 1,
                 'delivered_time' => $isActor ? $now : null,
                 'read_time' => $isActor ? $now : null,
@@ -1574,10 +1826,11 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                     SET unread_count = unread_count + 1, update_time = ?
                   WHERE organization = ?
                     AND conversation_id = ?
+                    AND member_organization = ?
                     AND user_id IN (' . $placeholders . ')
                     AND status = 1
                     AND delete_time IS NULL',
-                array_merge([$now, $organization, $conversationId], $recipientUserIds),
+                array_merge([$now, $organization, $conversationId, $organization], $recipientUserIds),
             );
         }
         $conversationUpdated = Db::execute(
@@ -1621,12 +1874,17 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         if ($message === null) {
             throw new \RuntimeException('Group description notice cannot be read back.');
         }
+        $message['global_seq'] = (string) $globalSeq;
         $realtimeMessage = $this->formatMessage($message);
-        $realtimeMessage['organization'] = $organization;
-        $realtimeMessage['global_seq'] = (string) $globalSeq;
         $realtimeMessage['status'] = 'normal';
         $realtimeMessage['update_time'] = (string) ($message['update_time'] ?? '');
+        $eventId = hash('sha256', implode('|', [
+            $organization,
+            'message.created',
+            $messageId,
+        ]));
         $eventPayload = [
+            'event_id' => $eventId,
             'event_type' => 'message.created',
             'organization' => $organization,
             'message_id' => $messageId,
@@ -1635,16 +1893,20 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             'conversation_id' => $conversationId,
             'conversation_type' => self::CONVERSATION_GROUP,
             'sender_id' => 'system_notification',
+            'sender_organization' => $organization,
             'actor_user_id' => $actorUserId,
+            'actor_organization' => $organization,
             'origin_user_id' => $actorUserId,
+            'origin_organization' => $organization,
             'origin_client_id' => 'web-control-' . $messageId,
-            'recipient_count' => count($recipientUserIds),
-            'recipient_user_ids' => $recipientUserIds,
+            'recipient_count' => count($recipientIdentities),
+            'recipient_identities' => $recipientIdentities,
             'message' => $realtimeMessage,
             'created_at' => $now,
         ];
         $traceHeaders = Telemetry::currentTraceHeaders();
         Db::table('im_message_outbox')->insert([
+            'event_id' => $eventId,
             'organization' => $organization,
             'event_type' => 'message.created',
             'routing_key' => 'message.created',
@@ -1674,7 +1936,20 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         string $conversationId,
         string $now,
     ): int {
-        $member = $this->assertActiveConversationMember($organization, $conversationId, $userId, true);
+        $access = (new WebImConversationAccessGuard())->assertAccessible(
+            $organization,
+            $userId,
+            $conversationId,
+            true,
+        );
+        $homes = $access['homes'];
+        $accessSnapshotId = $access['is_cross_organization']
+            ? (string) ($access['cross_org_access_snapshot_id'] ?? '')
+            : null;
+        if ($access['is_cross_organization']
+            && preg_match('/^[1-9][0-9]{0,19}$/D', $accessSnapshotId) !== 1) {
+            throw new \RuntimeException('Cross-organization read snapshot is invalid.');
+        }
         $visible = Db::query(
             'SELECT i.message_id, i.message_seq
                FROM im_message_index i
@@ -1684,6 +1959,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                     SELECT 1 FROM im_conversation_membership_period mp
                      WHERE mp.organization = i.organization
                        AND mp.conversation_id = i.conversation_id
+                       AND mp.member_organization = ?
                        AND mp.user_id = ?
                        AND mp.status = 1
                        AND i.message_seq >= mp.visible_from_message_seq
@@ -1694,37 +1970,377 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                      WHERE ud.organization = i.organization
                        AND ud.conversation_id = i.conversation_id
                        AND ud.message_id = i.message_id
+                       AND ud.user_organization = ?
                        AND ud.user_id = ?
                 )
            ORDER BY i.message_seq DESC
               LIMIT 1',
-            [$organization, $conversationId, $userId, $userId],
+            [$organization, $conversationId, $organization, $userId, $organization, $userId],
         )[0] ?? null;
-        $messageId = $visible !== null
-            ? (string) $visible['message_id']
-            : (string) ($member['last_read_message_id'] ?? '');
-        $messageSeq = $visible !== null
-            ? (int) $visible['message_seq']
-            : (int) ($member['last_read_seq'] ?? 0);
+        if ($visible === null) {
+            $currentUpdated = 0;
+            foreach ($homes as $homeOrganization) {
+                $updated = (int) Db::execute(
+                    'UPDATE im_conversation_member
+                        SET unread_count = 0, update_time = ?
+                      WHERE organization = ?
+                        AND conversation_id = ?
+                        AND member_organization = ?
+                        AND user_id = ?
+                        AND status = 1
+                        AND delete_time IS NULL',
+                    [$now, $homeOrganization, $conversationId, $organization, $userId],
+                );
+                if ($homeOrganization === $organization) {
+                    $currentUpdated = $updated;
+                }
+            }
 
-        return (int) Db::execute(
+            return $currentUpdated;
+        }
+
+        $messageId = (string) $visible['message_id'];
+        $messageSeq = (int) $visible['message_seq'];
+        if ($messageId === '' || $messageSeq <= 0) {
+            throw new \RuntimeException('Visible read cursor is invalid.');
+        }
+
+        $currentUpdated = 0;
+        foreach ($homes as $homeOrganization) {
+            $conversation = Db::query(
+                'SELECT conversation_type
+                   FROM im_conversation
+                  WHERE organization = ?
+                    AND conversation_id = ?
+                    AND status = 1
+                    AND delete_time IS NULL
+                  LIMIT 1
+                  FOR UPDATE',
+                [$homeOrganization, $conversationId],
+            )[0] ?? null;
+            $homeMessage = Db::query(
+                'SELECT message_id, message_seq
+                   FROM im_message_index
+                  WHERE organization = ?
+                    AND conversation_id = ?
+                    AND message_id = ?
+                    AND message_seq = ?
+                  LIMIT 1',
+                [$homeOrganization, $conversationId, $messageId, $messageSeq],
+            )[0] ?? null;
+            if ($conversation === null || $homeMessage === null) {
+                throw new \RuntimeException('Dual-home read projection is incomplete.');
+            }
+
+            $readState = $this->advanceConversationReadHome(
+                $homeOrganization,
+                $organization,
+                $userId,
+                $conversationId,
+                $messageId,
+                $messageSeq,
+                $now,
+            );
+            $this->markConversationReceiptsRead(
+                $homeOrganization,
+                $organization,
+                $userId,
+                $conversationId,
+                $readState['last_read_seq'],
+                $now,
+            );
+            $this->appendConversationReadOutbox(
+                $homeOrganization,
+                $organization,
+                $userId,
+                $conversationId,
+                (int) $conversation['conversation_type'],
+                $readState,
+                $accessSnapshotId,
+                $now,
+            );
+            if ($homeOrganization === $organization) {
+                $currentUpdated = $readState['updated'];
+            }
+        }
+
+        return $currentUpdated;
+    }
+
+    /**
+     * @return array{updated:int,last_read_message_id:string,last_read_seq:int,unread_count:int}
+     */
+    private function advanceConversationReadHome(
+        int $homeOrganization,
+        int $userOrganization,
+        string $userId,
+        string $conversationId,
+        string $requestedMessageId,
+        int $requestedSeq,
+        string $now,
+    ): array {
+        $member = Db::query(
+            'SELECT id, last_read_message_id, last_read_seq
+               FROM im_conversation_member
+              WHERE organization = ?
+                AND conversation_id = ?
+                AND member_organization = ?
+                AND user_id = ?
+                AND status = 1
+                AND delete_time IS NULL
+              LIMIT 1
+              FOR UPDATE',
+            [$homeOrganization, $conversationId, $userOrganization, $userId],
+        )[0] ?? null;
+        if ($member === null) {
+            throw new \RuntimeException('Dual-home reader membership is missing.');
+        }
+        $currentSeq = max(0, (int) ($member['last_read_seq'] ?? 0));
+        $effectiveSeq = max($currentSeq, $requestedSeq);
+        $effectiveMessageId = $requestedSeq > $currentSeq
+            ? $requestedMessageId
+            : trim((string) ($member['last_read_message_id'] ?? ''));
+        if ($effectiveMessageId === '') {
+            $effectiveMessageId = $requestedMessageId;
+        }
+        $cursor = Db::query(
+            'SELECT message_id
+               FROM im_message_index
+              WHERE organization = ?
+                AND conversation_id = ?
+                AND message_seq = ?
+                AND message_id = ?
+              LIMIT 1',
+            [$homeOrganization, $conversationId, $effectiveSeq, $effectiveMessageId],
+        )[0] ?? null;
+        if ($cursor === null) {
+            throw new \RuntimeException('Dual-home effective read cursor is missing.');
+        }
+
+        $unread = Db::query(
+            'SELECT COUNT(*) AS aggregate
+               FROM im_message_index i
+              WHERE i.organization = ?
+                AND i.conversation_id = ?
+                AND i.message_seq > ?
+                AND NOT (i.sender_organization = ? AND i.sender_id = ?)
+                AND EXISTS (
+                    SELECT 1 FROM im_conversation_membership_period mp
+                     WHERE mp.organization = i.organization
+                       AND mp.conversation_id = i.conversation_id
+                       AND mp.member_organization = ?
+                       AND mp.user_id = ?
+                       AND mp.status = 1
+                       AND i.message_seq >= mp.visible_from_message_seq
+                       AND (mp.visible_until_message_seq IS NULL OR i.message_seq <= mp.visible_until_message_seq)
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM im_message_user_delete ud
+                     WHERE ud.organization = i.organization
+                       AND ud.message_id = i.message_id
+                       AND ud.user_organization = ?
+                       AND ud.user_id = ?
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM im_message_change mc
+                     WHERE mc.organization = i.organization
+                       AND mc.message_id = i.message_id
+                       AND mc.change_type = "delete_both"
+                )',
+            [
+                $homeOrganization,
+                $conversationId,
+                $effectiveSeq,
+                $userOrganization,
+                $userId,
+                $userOrganization,
+                $userId,
+                $userOrganization,
+                $userId,
+            ],
+        )[0] ?? ['aggregate' => 0];
+        $unreadCount = max(0, (int) ($unread['aggregate'] ?? 0));
+        $updated = (int) Db::execute(
             'UPDATE im_conversation_member
-                SET unread_count = 0,
-                    last_read_message_id = ?,
-                    last_read_seq = GREATEST(last_read_seq, ?),
+                SET last_read_message_id = ?,
+                    last_read_seq = ?,
+                    unread_count = ?,
                     update_time = ?
               WHERE id = ?
                 AND organization = ?
+                AND member_organization = ?
                 AND user_id = ?
                 AND status = 1
                 AND delete_time IS NULL',
             [
-                $messageId !== '' ? $messageId : null,
-                $messageSeq,
+                $effectiveMessageId,
+                $effectiveSeq,
+                $unreadCount,
                 $now,
                 (int) $member['id'],
-                $organization,
+                $homeOrganization,
+                $userOrganization,
                 $userId,
+            ],
+        );
+
+        return [
+            'updated' => $updated,
+            'last_read_message_id' => $effectiveMessageId,
+            'last_read_seq' => $effectiveSeq,
+            'unread_count' => $unreadCount,
+        ];
+    }
+
+    private function markConversationReceiptsRead(
+        int $homeOrganization,
+        int $userOrganization,
+        string $userId,
+        string $conversationId,
+        int $lastReadSeq,
+        string $now,
+    ): void {
+        Db::execute(
+            'INSERT INTO im_message_receipt
+                (organization, conversation_id, message_id, user_id, user_organization,
+                 status, delivered_time, read_time, create_time, update_time)
+             SELECT ?, i.conversation_id, i.message_id, ?, ?, 3, ?, ?, ?, ?
+               FROM im_message_index i
+              WHERE i.organization = ?
+                AND i.conversation_id = ?
+                AND i.message_seq <= ?
+                AND EXISTS (
+                    SELECT 1 FROM im_conversation_membership_period mp
+                     WHERE mp.organization = i.organization
+                       AND mp.conversation_id = i.conversation_id
+                       AND mp.member_organization = ?
+                       AND mp.user_id = ?
+                       AND mp.status = 1
+                       AND i.message_seq >= mp.visible_from_message_seq
+                       AND (mp.visible_until_message_seq IS NULL OR i.message_seq <= mp.visible_until_message_seq)
+                )
+             ON DUPLICATE KEY UPDATE
+                delivered_time = COALESCE(delivered_time, VALUES(delivered_time)),
+                read_time = COALESCE(read_time, VALUES(read_time)),
+                update_time = VALUES(update_time)',
+            [
+                $homeOrganization,
+                $userId,
+                $userOrganization,
+                $now,
+                $now,
+                $now,
+                $now,
+                $homeOrganization,
+                $conversationId,
+                $lastReadSeq,
+                $userOrganization,
+                $userId,
+            ],
+        );
+    }
+
+    /**
+     * @param array{updated:int,last_read_message_id:string,last_read_seq:int,unread_count:int} $readState
+     */
+    private function appendConversationReadOutbox(
+        int $homeOrganization,
+        int $userOrganization,
+        string $userId,
+        string $conversationId,
+        int $conversationType,
+        array $readState,
+        ?string $accessSnapshotId,
+        string $now,
+    ): void {
+        if ($accessSnapshotId !== null
+            && preg_match('/^[1-9][0-9]{0,19}$/D', $accessSnapshotId) !== 1) {
+            throw new \InvalidArgumentException('conversation.read access snapshot is invalid');
+        }
+        $members = Db::query(
+            'SELECT member_organization, user_id
+               FROM im_conversation_member
+              WHERE organization = ?
+                AND conversation_id = ?
+                AND member_organization = ?
+                AND status = 1
+                AND delete_time IS NULL
+           ORDER BY user_id ASC',
+            [$homeOrganization, $conversationId, $homeOrganization],
+        );
+        $recipientIdentities = array_values(array_map(
+            static fn (array $member): array => [
+                'organization' => (int) $member['member_organization'],
+                'user_id' => (string) $member['user_id'],
+            ],
+            $members,
+        ));
+        $eventId = hash('sha256', implode('|', [
+            $homeOrganization,
+            'conversation.read',
+            $conversationId,
+            $userOrganization,
+            $userId,
+            $readState['last_read_seq'],
+        ]));
+        $clientId = 'web-http-read-' . substr(hash(
+            'sha256',
+            $userOrganization . '|' . $userId . '|' . $conversationId . '|' . $readState['last_read_seq'],
+        ), 0, 32);
+        $projectedReadState = [
+            'conversation_id' => $conversationId,
+            'last_read_message_id' => $readState['last_read_message_id'],
+            'last_read_seq' => $readState['last_read_seq'],
+            'unread_count' => $readState['unread_count'],
+            'user_organization' => $userOrganization,
+            'user_id' => $userId,
+            'time' => $now,
+        ];
+        $payload = [
+            'event_id' => $eventId,
+            'event_type' => 'conversation.read',
+            'organization' => $homeOrganization,
+            'conversation_id' => $conversationId,
+            'conversation_type' => $conversationType,
+            'message_id' => $readState['last_read_message_id'],
+            'message_seq' => $readState['last_read_seq'],
+            'change_seq' => 0,
+            'user_organization' => $userOrganization,
+            'user_id' => $userId,
+            'actor_organization' => $userOrganization,
+            'actor_user_id' => $userId,
+            'origin_organization' => $userOrganization,
+            'origin_user_id' => $userId,
+            'origin_client_id' => $clientId,
+            'recipient_count' => count($recipientIdentities),
+            'recipient_identities' => $recipientIdentities,
+            'read_state' => $projectedReadState,
+            'created_at' => $now,
+            ...($accessSnapshotId === null
+                ? []
+                : ['cross_org_access_snapshot_id' => $accessSnapshotId]),
+        ];
+        $traceHeaders = Telemetry::currentTraceHeaders();
+        Db::execute(
+            'INSERT INTO im_message_outbox
+                (event_id, organization, event_type, routing_key, message_id, change_seq,
+                 conversation_id, conversation_type, payload_json, traceparent, tracestate,
+                 status, retry_count, next_retry_at, create_time, update_time)
+             VALUES (?, ?, "conversation.read", "conversation.read", ?, 0, ?, ?, ?, ?, ?,
+                     1, 0, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE event_id = VALUES(event_id)',
+            [
+                $eventId,
+                $homeOrganization,
+                $readState['last_read_message_id'],
+                $conversationId,
+                $conversationType,
+                json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR),
+                $traceHeaders['traceparent'] ?? null,
+                $traceHeaders['tracestate'] ?? null,
+                $now,
+                $now,
+                $now,
             ],
         );
     }
@@ -1756,6 +2372,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                  ON mi.organization = c.organization
                 AND mi.message_id = c.last_message_id
               WHERE cm.organization = ?
+                AND cm.member_organization = ?
                 AND cm.user_id = ?
                 AND cm.conversation_id = ?
                 AND cm.status = 1
@@ -1763,7 +2380,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 AND c.status = 1
                 AND c.delete_time IS NULL
               LIMIT 1',
-            [$organization, $userId, $conversationId],
+            [$organization, $organization, $userId, $conversationId],
         )[0] ?? null;
     }
 
@@ -1771,48 +2388,67 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
     private function formatConversation(int $organization, string $userId, array $row): array
     {
         $type = (int) $row['conversation_type'];
+        $access = (new WebImConversationAccessGuard())->assertAccessible(
+            $organization,
+            $userId,
+            (string) $row['conversation_id'],
+        );
+        if ($access['conversation_type'] !== $type) {
+            throw new \RuntimeException('Conversation projection type does not match persisted topology.');
+        }
         $peer = null;
         $friendRemark = '';
         if ($type === self::CONVERSATION_SINGLE) {
+            $peerIdentity = $access['peer_identity'];
+            if (!is_array($peerIdentity)) {
+                throw new \RuntimeException('Single conversation peer identity is missing.');
+            }
             $peerRow = Db::query(
                 'SELECT u.*, COALESCE(p.signature, "") AS signature,
-                        fr.friend_organization AS peer_organization,
+                        u.organization AS peer_organization,
                         COALESCE(org.organization_name, org.title, "") AS organization_name,
                         COALESCE(fr.remark_name, "") AS friend_remark
-                   FROM im_conversation_member cm
+                   FROM im_user u
               LEFT JOIN im_friend_relation fr
                      ON fr.organization = ?
                     AND fr.user_id = ?
-                    AND fr.friend_user_id = cm.user_id
+                    AND fr.friend_organization = u.organization
+                    AND fr.friend_user_id = u.user_id
                     AND fr.status = 1
                     AND fr.delete_time IS NULL
-             INNER JOIN im_user u
-                     ON u.user_id = cm.user_id
-                    AND u.organization = IF(COALESCE(fr.friend_organization, 0) > 0, fr.friend_organization, cm.organization)
-                    AND u.delete_time IS NULL
               LEFT JOIN im_user_profile p
                      ON p.organization = u.organization
                     AND p.user_id = u.user_id
                     AND p.status = 1
                     AND p.delete_time IS NULL
-              LEFT JOIN sm_system_organization org
+             INNER JOIN sm_system_organization org
                      ON org.id = u.organization
+                    AND org.status = 1
                     AND org.delete_time IS NULL
-                  WHERE cm.organization = ?
-                    AND cm.conversation_id = ?
-                    AND cm.user_id <> ?
-                    AND cm.status = 1
-                    AND cm.delete_time IS NULL
+                  WHERE u.organization = ?
+                    AND u.user_id = ?
+                    AND u.delete_time IS NULL
                   LIMIT 1',
-                [$organization, $userId, $organization, (string) $row['conversation_id'], $userId],
+                [
+                    $organization,
+                    $userId,
+                    $peerIdentity['organization'],
+                    $peerIdentity['user_id'],
+                ],
             )[0] ?? null;
-            if ($peerRow !== null) {
-                $friendRemark = (string) ($peerRow['friend_remark'] ?? '');
-                $relationStatus = $this->areFriends($organization, $userId, (string) $peerRow['user_id'])
-                    ? 'friend'
-                    : 'none';
-                $peer = $this->userView($peerRow, $friendRemark, $relationStatus, $organization);
+            if ($peerRow === null) {
+                throw new \RuntimeException('Single conversation peer identity does not resolve to a user.');
             }
+            $friendRemark = (string) ($peerRow['friend_remark'] ?? '');
+            $relationStatus = $this->areFriends(
+                $organization,
+                $userId,
+                $peerIdentity['organization'],
+                $peerIdentity['user_id'],
+            )
+                ? 'friend'
+                : 'none';
+            $peer = $this->userView($peerRow, $friendRemark, $relationStatus, $organization);
         }
         $conversationRemark = (string) ($row['conversation_remark'] ?? '');
         $title = $type === self::CONVERSATION_SINGLE
@@ -1828,6 +2464,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         );
 
         return [
+            'organization' => $organization,
             'conversation_id' => (string) $row['conversation_id'],
             'conversation_sort_id' => (int) $row['id'],
             'conversation_type' => $type,
@@ -1870,6 +2507,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                     SELECT 1 FROM im_conversation_membership_period mp
                      WHERE mp.organization = i.organization
                        AND mp.conversation_id = i.conversation_id
+                       AND mp.member_organization = ?
                        AND mp.user_id = ?
                        AND mp.status = 1
                        AND i.message_seq >= mp.visible_from_message_seq
@@ -1880,11 +2518,12 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                      WHERE ud.organization = i.organization
                        AND ud.conversation_id = i.conversation_id
                        AND ud.message_id = i.message_id
+                       AND ud.user_organization = ?
                        AND ud.user_id = ?
                 )
            ORDER BY i.message_seq DESC
               LIMIT 50',
-            [$organization, $conversationId, $userId, $userId],
+            [$organization, $conversationId, $organization, $userId, $organization, $userId],
         );
         foreach ($candidates as $candidate) {
             $message = Db::query(
@@ -1947,7 +2586,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             'SELECT u.*, COALESCE(p.signature, "") AS signature
                FROM im_conversation_member cm
          INNER JOIN im_user u
-                 ON u.organization = cm.organization
+                 ON u.organization = cm.member_organization
                 AND u.user_id = cm.user_id
           LEFT JOIN im_user_profile p
                  ON p.organization = u.organization
@@ -1975,7 +2614,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                     u.*, COALESCE(p.signature, "") AS signature
                FROM im_conversation_member cm
          INNER JOIN im_user u
-                 ON u.organization = cm.organization
+                 ON u.organization = cm.member_organization
                 AND u.user_id = cm.user_id
           LEFT JOIN im_user_profile p
                  ON p.organization = u.organization
@@ -2016,7 +2655,11 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         ?int $viewerOrganization = null,
     ): array {
         $status = (int) ($row['status'] ?? 0);
-        $peerOrganization = (int) ($row['peer_organization'] ?? $row['organization'] ?? 0);
+        $peerOrganization = $this->requiredOrganization($row, 'organization', '用户投影');
+        if (array_key_exists('peer_organization', $row)
+            && (int) $row['peer_organization'] !== $peerOrganization) {
+            throw new \RuntimeException('用户投影机构身份不一致。');
+        }
         $companyName = trim((string) ($row['organization_name'] ?? ''));
         if ($companyName === '' && $peerOrganization > 0) {
             $org = Db::query(
@@ -2113,12 +2756,14 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             if (($body['delete_time'] ?? null) !== null || (int) ($body['status'] ?? 0) === 3) {
                 continue;
             }
+            $body['global_seq'] = (string) ($candidate['global_seq'] ?? '');
             $messages[] = $this->formatMessage($body, $organization);
         }
 
         $outgoingMessageIds = [];
         foreach ($messages as $message) {
-            if (hash_equals((string) $message['sender_id'], $viewerUserId)) {
+            if ((int) $message['sender_organization'] === $organization
+                && hash_equals((string) $message['sender_id'], $viewerUserId)) {
                 $outgoingMessageIds[] = (string) $message['message_id'];
             }
         }
@@ -2129,7 +2774,8 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         );
         foreach ($messages as &$message) {
             $messageId = (string) $message['message_id'];
-            $message['delivery_status'] = hash_equals((string) $message['sender_id'], $viewerUserId)
+            $message['delivery_status'] = (int) $message['sender_organization'] === $organization
+                && hash_equals((string) $message['sender_id'], $viewerUserId)
                 ? ($deliveryStatuses[$messageId] ?? 'sent')
                 : '';
         }
@@ -2155,11 +2801,14 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                       FROM im_message_receipt r
                      WHERE r.organization = ?
                        AND r.message_id IN (' . $placeholders . ')
-                       AND r.user_id <> ?
-                  GROUP BY r.message_id, r.user_id
+                       AND (
+                           r.user_organization <> ?
+                           OR r.user_id <> ?
+                       )
+                  GROUP BY r.message_id, r.user_organization, r.user_id
                ) recipient
            GROUP BY recipient.message_id',
-            array_merge([$organization], $messageIds, [$senderUserId]),
+            array_merge([$organization], $messageIds, [$organization, $senderUserId]),
         );
 
         $result = [];
@@ -2183,19 +2832,30 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         $status = (int) ($message['status'] ?? 0);
         $content = json_decode((string) ($message['content'] ?? '{}'), true);
         $senderId = (string) ($message['sender_id'] ?? '');
-        $messageOrganization = (int) ($message['organization'] ?? 0);
+        $senderOrganization = (int) ($message['sender_organization'] ?? 0);
+        if ($senderOrganization <= 0) {
+            throw new \RuntimeException('IM message is missing sender_organization.');
+        }
+        $messageOrganization = $this->requiredOrganization($message, 'organization', '消息投影');
+        $globalSeq = trim((string) ($message['global_seq'] ?? ''));
+        if (preg_match('/^[1-9][0-9]*$/', $globalSeq) !== 1) {
+            throw new \RuntimeException('IM message is missing a valid home global_seq.');
+        }
         $viewerOrg = $viewerOrganization !== null && $viewerOrganization > 0
             ? $viewerOrganization
             : $messageOrganization;
-        $sender = $this->resolveMessageSender($senderId, $messageOrganization);
+        $sender = $this->resolveMessageSender($senderOrganization, $senderId);
 
         return [
             'id' => (int) $message['id'],
+            'organization' => $messageOrganization,
             'conversation_id' => (string) $message['conversation_id'],
             'conversation_type' => (int) $message['conversation_type'],
             'message_id' => (string) $message['message_id'],
             'message_seq' => (int) $message['message_seq'],
+            'global_seq' => $globalSeq,
             'client_msg_id' => (string) $message['client_msg_id'],
+            'sender_organization' => $senderOrganization,
             'sender_id' => $senderId,
             'sender_user' => $sender !== null
                 ? $this->userView($sender, '', 'none', $viewerOrg)
@@ -2210,45 +2870,18 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
     }
 
     /**
-     * Resolve message sender for same-org and dual-home cross-org rows.
-     * Prefer the message organization, then any home org for the user_id.
-     *
      * @return array<string, mixed>|null
      */
-    private function resolveMessageSender(string $senderId, int $messageOrganization): ?array
+    private function resolveMessageSender(int $senderOrganization, string $senderId): ?array
     {
         if ($senderId === '') {
             return null;
         }
-        if ($messageOrganization > 0) {
-            $sameOrg = $this->userById($messageOrganization, $senderId, false);
-            if ($sameOrg !== null) {
-                return $sameOrg;
-            }
+        if ($senderOrganization <= 0) {
+            throw new \RuntimeException('IM message sender_organization is invalid.');
         }
 
-        // Dual-home cross-org: body may live in recipient org while sender_id is peer home user.
-        $row = Db::query(
-            'SELECT u.*, COALESCE(p.signature, "") AS signature
-               FROM im_user u
-          LEFT JOIN im_user_profile p
-                 ON p.organization = u.organization
-                AND p.user_id = u.user_id
-                AND p.status = 1
-                AND p.delete_time IS NULL
-              WHERE u.user_id = ?
-                AND u.delete_time IS NULL
-           ORDER BY CASE
-                        WHEN u.organization = ? THEN 0
-                        WHEN u.organization = 0 THEN 2
-                        ELSE 1
-                    END,
-                    u.id ASC
-              LIMIT 1',
-            [$senderId, $messageOrganization],
-        )[0] ?? null;
-
-        return is_array($row) ? $row : null;
+        return $this->userById($senderOrganization, $senderId, false);
     }
 
     /** @return array<string, mixed> */
@@ -2258,25 +2891,33 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         string $userId,
         bool $lock = false,
     ): array {
-        $sql = 'SELECT cm.*
-                  FROM im_conversation_member cm
-            INNER JOIN im_conversation c
-                    ON c.organization = cm.organization
-                   AND c.conversation_id = cm.conversation_id
-                 WHERE cm.organization = ?
-                   AND cm.conversation_id = ?
-                   AND cm.user_id = ?
-                   AND cm.status = 1
-                   AND cm.delete_time IS NULL
-                   AND c.status = 1
-                   AND c.delete_time IS NULL
-                 LIMIT 1' . ($lock ? ' FOR UPDATE' : '');
-        $member = Db::query($sql, [$organization, $conversationId, $userId])[0] ?? null;
-        if ($member === null) {
-            throw new ApiException('没有该会话的访问权限。', 403);
-        }
+        return (new WebImConversationAccessGuard())->assertAccessible(
+            $organization,
+            $userId,
+            $conversationId,
+            $lock,
+        )['member'];
+    }
 
-        return $member;
+    private function isCrossOrganizationConversation(string $conversationId): bool
+    {
+        return (Db::query(
+            'SELECT 1 AS present
+               FROM im_cross_organization_conversation
+              WHERE conversation_id = ?
+              LIMIT 1',
+            [$conversationId],
+        )[0] ?? null) !== null
+            || (Db::query(
+                'SELECT 1 AS present
+                   FROM im_conversation_member
+                  WHERE conversation_id = ?
+                    AND member_organization <> organization
+                    AND status = 1
+                    AND delete_time IS NULL
+                  LIMIT 1',
+                [$conversationId],
+            )[0] ?? null) !== null;
     }
 
     private function assertMembershipPeriod(int $organization, string $conversationId, string $userId): void
@@ -2285,10 +2926,11 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             'SELECT id FROM im_conversation_membership_period
               WHERE organization = ?
                 AND conversation_id = ?
+                AND member_organization = ?
                 AND user_id = ?
                 AND status = 1
               LIMIT 1',
-            [$organization, $conversationId, $userId],
+            [$organization, $conversationId, $organization, $userId],
         )[0] ?? null;
         if ($period === null) {
             throw new ApiException('该会话没有可见周期。', 403);
@@ -2303,6 +2945,15 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         array $roles,
         bool $lock = false,
     ): array {
+        $access = (new WebImConversationAccessGuard())->assertAccessible(
+            $organization,
+            $userId,
+            $conversationId,
+            $lock,
+        );
+        if ($access['conversation_type'] !== self::CONVERSATION_GROUP) {
+            throw new ApiException('群聊不存在或无访问权限。', 403);
+        }
         $sql = 'SELECT cm.*, gp.owner_user_id, gp.history_visibility,
                        gp.description AS group_description,
                        c.next_message_seq, c.last_message_seq
@@ -2320,11 +2971,12 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                    AND gp.delete_time IS NULL
                  WHERE cm.organization = ?
                    AND cm.conversation_id = ?
+                   AND cm.member_organization = ?
                    AND cm.user_id = ?
                    AND cm.status = 1
                    AND cm.delete_time IS NULL
                  LIMIT 1' . ($lock ? ' FOR UPDATE' : '');
-        $member = Db::query($sql, [$organization, $conversationId, $userId])[0] ?? null;
+        $member = Db::query($sql, [$organization, $conversationId, $organization, $userId])[0] ?? null;
         if ($member === null) {
             throw new ApiException('群聊不存在或无访问权限。', 403);
         }
@@ -2371,10 +3023,10 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         bool $lock = true,
     ): ?array {
         $sql = 'SELECT * FROM im_conversation_member
-                 WHERE organization = ? AND conversation_id = ? AND user_id = ?
+                 WHERE organization = ? AND conversation_id = ? AND member_organization = ? AND user_id = ?
                  LIMIT 1' . ($lock ? ' FOR UPDATE' : '');
 
-        return Db::query($sql, [$organization, $conversationId, $userId])[0] ?? null;
+        return Db::query($sql, [$organization, $conversationId, $organization, $userId])[0] ?? null;
     }
 
     private function ensureGroupMember(
@@ -2390,8 +3042,10 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 'organization' => $organization,
                 'conversation_id' => $conversationId,
                 'user_id' => $userId,
+                'member_organization' => $organization,
                 'member_role' => 'member',
                 'inviter_user_id' => $inviterUserId,
+                'inviter_organization' => $organization,
                 'status' => 1,
                 'mute_status' => 0,
                 'access_version' => 1,
@@ -2413,6 +3067,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             'UPDATE im_conversation_member
                 SET member_role = "member",
                     inviter_user_id = ?,
+                    inviter_organization = ?,
                     status = 1,
                     mute_status = 0,
                     mute_until = NULL,
@@ -2420,8 +3075,19 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                     join_at = ?,
                     delete_time = NULL,
                     update_time = ?
-              WHERE id = ? AND organization = ? AND conversation_id = ? AND user_id = ?',
-            [$inviterUserId, $now, $now, (int) $member['id'], $organization, $conversationId, $userId],
+              WHERE id = ? AND organization = ? AND conversation_id = ?
+                AND member_organization = ? AND user_id = ?',
+            [
+                $inviterUserId,
+                $organization,
+                $now,
+                $now,
+                (int) $member['id'],
+                $organization,
+                $conversationId,
+                $organization,
+                $userId,
+            ],
         );
         $this->openMembershipPeriod($organization, $conversationId, $userId, $now);
     }
@@ -2432,12 +3098,13 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             'SELECT id FROM im_conversation_membership_period
               WHERE organization = ?
                 AND conversation_id = ?
+                AND member_organization = ?
                 AND user_id = ?
                 AND status = 1
                 AND visible_until_message_seq IS NULL
               LIMIT 1
               FOR UPDATE',
-            [$organization, $conversationId, $userId],
+            [$organization, $conversationId, $organization, $userId],
         )[0] ?? null;
         if ($open !== null) {
             return;
@@ -2461,8 +3128,8 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         $period = Db::query(
             'SELECT COALESCE(MAX(period_no), 0) + 1 AS period_no
                FROM im_conversation_membership_period
-              WHERE organization = ? AND conversation_id = ? AND user_id = ?',
-            [$organization, $conversationId, $userId],
+              WHERE organization = ? AND conversation_id = ? AND member_organization = ? AND user_id = ?',
+            [$organization, $conversationId, $organization, $userId],
         )[0]['period_no'] ?? 1;
         $visibleFrom = (string) $conversation['history_visibility'] === 'all'
             ? 1
@@ -2471,6 +3138,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             'organization' => $organization,
             'conversation_id' => $conversationId,
             'user_id' => $userId,
+            'member_organization' => $organization,
             'period_no' => max((int) $period, 1),
             'visible_from_message_seq' => $visibleFrom,
             'visible_until_message_seq' => null,
@@ -2482,15 +3150,73 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         ]);
     }
 
+    /** @return array{0: array<string, mixed>, 1: array<string, mixed>} */
+    private function activeUserPairForUpdate(
+        int $leftOrganization,
+        string $leftUserId,
+        int $rightOrganization,
+        string $rightUserId,
+    ): array {
+        $leftIdentity = SingleConversationIdentity::identity(
+            $leftOrganization,
+            $leftUserId,
+        );
+        $rightIdentity = SingleConversationIdentity::identity(
+            $rightOrganization,
+            $rightUserId,
+        );
+        if (hash_equals($leftIdentity, $rightIdentity)) {
+            $user = $this->activeUserForUpdate(
+                $leftOrganization,
+                $leftUserId,
+                false,
+            );
+
+            return [$user, $user];
+        }
+
+        $users = [
+            [
+                'identity' => $leftIdentity,
+                'organization' => $leftOrganization,
+                'user_id' => $leftUserId,
+            ],
+            [
+                'identity' => $rightIdentity,
+                'organization' => $rightOrganization,
+                'user_id' => $rightUserId,
+            ],
+        ];
+        usort(
+            $users,
+            static fn (array $left, array $right): int => strcmp(
+                $left['identity'],
+                $right['identity'],
+            ),
+        );
+
+        $locked = [];
+        foreach ($users as $user) {
+            $locked[$user['identity']] = $this->activeUserForUpdate(
+                $user['organization'],
+                $user['user_id'],
+                false,
+            );
+        }
+
+        return [$locked[$leftIdentity], $locked[$rightIdentity]];
+    }
+
     /** @return array<string, mixed> */
     private function activeUserForUpdate(int $organization, string $userId, bool $allowSystem): array
     {
-        $sql = 'SELECT * FROM im_user
-                 WHERE organization = ?
-                   AND user_id = ?
-                   AND status = 1
-                   AND delete_time IS NULL'
-            . ($allowSystem ? '' : ' AND is_system = 2')
+        $sql = 'SELECT u.*
+                  FROM im_user u
+                 WHERE u.organization = ?
+                   AND u.user_id = ?
+                   AND u.status = 1
+                   AND u.delete_time IS NULL'
+            . ($allowSystem ? '' : ' AND u.is_system = 2')
             . ' LIMIT 1 FOR UPDATE';
         $user = Db::query($sql, [$organization, $userId])[0] ?? null;
         if ($user === null) {
@@ -2507,12 +3233,17 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             return [];
         }
         $placeholders = implode(',', array_fill(0, count($userIds), '?'));
-        $sql = 'SELECT * FROM im_user
-                 WHERE organization = ?
-                   AND user_id IN (' . $placeholders . ')
-                   AND status = 1
-                   AND delete_time IS NULL'
-            . ($allowSystem ? '' : ' AND is_system = 2')
+        $sql = 'SELECT u.*
+                  FROM im_user u
+            INNER JOIN sm_system_organization org
+                    ON org.id = u.organization
+                   AND org.status = 1
+                   AND org.delete_time IS NULL
+                 WHERE u.organization = ?
+                   AND u.user_id IN (' . $placeholders . ')
+                   AND u.status = 1
+                   AND u.delete_time IS NULL'
+            . ($allowSystem ? '' : ' AND u.is_system = 2')
             . ' FOR UPDATE';
         $rows = Db::query($sql, array_merge([$organization], $userIds));
         $result = [];
@@ -2523,38 +3254,59 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         return $result;
     }
 
-    private function areFriends(int $organization, string $userId, string $friendUserId, bool $lock = false): bool
-    {
+    private function areFriends(
+        int $organization,
+        string $userId,
+        int $friendOrganization,
+        string $friendUserId,
+        bool $lock = false,
+    ): bool {
+        if ($lock || $organization !== $friendOrganization) {
+            (new WebImConversationAccessGuard())->assertActiveOrganizations(
+                [$organization, $friendOrganization],
+                $lock,
+            );
+        }
+        if ($lock) {
+            $this->activeUserPairForUpdate(
+                $organization,
+                $userId,
+                $friendOrganization,
+                $friendUserId,
+            );
+        }
         $lockSql = $lock ? ' FOR UPDATE' : '';
-        $forward = Db::query(
-            'SELECT friend_organization FROM im_friend_relation
-              WHERE organization = ?
-                AND user_id = ?
-                AND friend_user_id = ?
-                AND status = 1
-                AND delete_time IS NULL
-              LIMIT 1' . $lockSql,
-            [$organization, $userId, $friendUserId],
-        )[0] ?? null;
-        if ($forward === null) {
-            return false;
+        $friends = true;
+        foreach (self::canonicalFriendDirections(
+            $organization,
+            $userId,
+            $friendOrganization,
+            $friendUserId,
+        ) as $direction) {
+            $relation = Db::query(
+                'SELECT id, organization, user_id, friend_organization, friend_user_id
+                   FROM im_friend_relation
+                  WHERE organization = ?
+                    AND user_id = ?
+                    AND friend_organization = ?
+                    AND friend_user_id = ?
+                    AND status = 1
+                    AND delete_time IS NULL
+                  LIMIT 1' . $lockSql,
+                [
+                    $direction['organization'],
+                    $direction['user_id'],
+                    $direction['friend_organization'],
+                    $direction['friend_user_id'],
+                ],
+            )[0] ?? null;
+            // Do not short-circuit: a locking read must acquire both exact
+            // directional rows or gaps in canonical order even when one is
+            // absent.
+            $friends = $friends && $relation !== null;
         }
-        $peerOrg = (int) ($forward['friend_organization'] ?? 0);
-        if ($peerOrg <= 0) {
-            $peerOrg = $organization;
-        }
-        $reverse = Db::query(
-            'SELECT id FROM im_friend_relation
-              WHERE organization = ?
-                AND user_id = ?
-                AND friend_user_id = ?
-                AND status = 1
-                AND delete_time IS NULL
-              LIMIT 1' . $lockSql,
-            [$peerOrg, $friendUserId, $userId],
-        )[0] ?? null;
 
-        return $reverse !== null;
+        return $friends;
     }
 
     private function createFriendPair(
@@ -2575,8 +3327,108 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         string $addMethod,
         string $now,
     ): void {
-        $this->upsertFriend($leftOrganization, $leftUserId, $rightUserId, $rightOrganization, $addMethod, $now);
-        $this->upsertFriend($rightOrganization, $rightUserId, $leftUserId, $leftOrganization, $addMethod, $now);
+        foreach (self::canonicalFriendDirections(
+            $leftOrganization,
+            $leftUserId,
+            $rightOrganization,
+            $rightUserId,
+        ) as $direction) {
+            $this->upsertFriend(
+                $direction['organization'],
+                $direction['user_id'],
+                $direction['friend_user_id'],
+                $direction['friend_organization'],
+                $addMethod,
+                $now,
+            );
+        }
+    }
+
+    /**
+     * @return list<array{
+     *   organization:int,
+     *   user_id:string,
+     *   friend_organization:int,
+     *   friend_user_id:string
+     * }>
+     */
+    private static function canonicalFriendDirections(
+        int $leftOrganization,
+        string $leftUserId,
+        int $rightOrganization,
+        string $rightUserId,
+    ): array {
+        $identities = [
+            [
+                'identity' => SingleConversationIdentity::identity($leftOrganization, $leftUserId),
+                'organization' => $leftOrganization,
+                'user_id' => $leftUserId,
+            ],
+            [
+                'identity' => SingleConversationIdentity::identity($rightOrganization, $rightUserId),
+                'organization' => $rightOrganization,
+                'user_id' => $rightUserId,
+            ],
+        ];
+        usort(
+            $identities,
+            static fn (array $left, array $right): int => strcmp(
+                $left['identity'],
+                $right['identity'],
+            ),
+        );
+
+        return [
+            [
+                'organization' => $identities[0]['organization'],
+                'user_id' => $identities[0]['user_id'],
+                'friend_organization' => $identities[1]['organization'],
+                'friend_user_id' => $identities[1]['user_id'],
+            ],
+            [
+                'organization' => $identities[1]['organization'],
+                'user_id' => $identities[1]['user_id'],
+                'friend_organization' => $identities[0]['organization'],
+                'friend_user_id' => $identities[0]['user_id'],
+            ],
+        ];
+    }
+
+    /** @return list<array<string, mixed>> */
+    private function pendingFriendRequestsForUpdate(
+        int $leftOrganization,
+        string $leftUserId,
+        int $rightOrganization,
+        string $rightUserId,
+    ): array {
+        $pending = [];
+        foreach (self::canonicalFriendDirections(
+            $leftOrganization,
+            $leftUserId,
+            $rightOrganization,
+            $rightUserId,
+        ) as $direction) {
+            $rows = Db::query(
+                'SELECT * FROM im_friend_request
+                  WHERE from_organization = ?
+                    AND from_user_id = ?
+                    AND to_organization = ?
+                    AND to_user_id = ?
+                    AND status = 1
+                    AND delete_time IS NULL
+               ORDER BY id ASC
+                  FOR UPDATE',
+                [
+                    $direction['organization'],
+                    $direction['user_id'],
+                    $direction['friend_organization'],
+                    $direction['friend_user_id'],
+                ],
+            );
+            array_push($pending, ...$rows);
+        }
+
+        return $pending;
     }
 
     private function upsertFriend(
@@ -2588,7 +3440,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         string $now,
     ): void {
         if ($friendOrganization <= 0) {
-            $friendOrganization = $organization;
+            throw new \InvalidArgumentException('friend_organization must be explicit.');
         }
         Db::execute(
             'INSERT INTO im_friend_relation
@@ -2605,21 +3457,6 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         );
     }
 
-    /** @return array<string, mixed>|null */
-    private function findActiveUserAnyOrg(string $userId, bool $allowSystem, bool $lock): ?array
-    {
-        $sql = 'SELECT * FROM im_user
-                 WHERE user_id = ?
-                   AND status = 1
-                   AND delete_time IS NULL'
-            . ($allowSystem ? '' : ' AND is_system = 2')
-            . ' LIMIT 1'
-            . ($lock ? ' FOR UPDATE' : '');
-        $row = Db::query($sql, [$userId])[0] ?? null;
-
-        return is_array($row) ? $row : null;
-    }
-
     /** @param list<string> $userIds @return array<string, array<string, mixed>> */
     private function usersByIds(int $organization, array $userIds, bool $activeOnly): array
     {
@@ -2629,6 +3466,10 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         $placeholders = implode(',', array_fill(0, count($userIds), '?'));
         $sql = 'SELECT u.*, COALESCE(p.signature, "") AS signature
                   FROM im_user u
+            INNER JOIN sm_system_organization org
+                    ON org.id = u.organization
+                   AND org.status = 1
+                   AND org.delete_time IS NULL
              LEFT JOIN im_user_profile p
                     ON p.organization = u.organization
                    AND p.user_id = u.user_id
@@ -2681,38 +3522,15 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         ];
     }
 
-    private function singleConversationId(int $organization, string $left, string $right): string
+    /** @param array<string, mixed> $row */
+    private function requiredOrganization(array $row, string $key, string $context): int
     {
-        $pair = [$left, $right];
-        sort($pair, SORT_STRING);
-
-        return 'single_' . substr(sha1($organization . ':' . implode(':', $pair)), 0, 40);
-    }
-
-    /**
-     * Same-org uses legacy org-scoped id; cross-org friends use org-independent single_x_ id.
-     */
-    private function resolveSingleConversationId(int $organization, string $left, string $right): string
-    {
-        $forward = Db::query(
-            'SELECT friend_organization FROM im_friend_relation
-              WHERE organization = ?
-                AND user_id = ?
-                AND friend_user_id = ?
-                AND status = 1
-                AND delete_time IS NULL
-              LIMIT 1',
-            [$organization, $left, $right],
-        )[0] ?? null;
-        $peerOrg = (int) ($forward['friend_organization'] ?? 0);
-        if ($peerOrg > 0 && $peerOrg !== $organization) {
-            $pair = [$left, $right];
-            sort($pair, SORT_STRING);
-
-            return 'single_x_' . substr(sha1(implode(':', $pair)), 0, 40);
+        $organization = (int) ($row[$key] ?? 0);
+        if ($organization <= 0) {
+            throw new \RuntimeException($context . '缺少必需机构字段 ' . $key . '。');
         }
 
-        return $this->singleConversationId($organization, $left, $right);
+        return $organization;
     }
 
     private function quoteShard(string $table): string

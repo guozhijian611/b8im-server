@@ -47,6 +47,7 @@ jobs:
       REDIS_HOST: 127.0.0.1
       REDIS_PORT: 6379
       CACHE_STORE: redis
+      IM_TOKEN_SECRET: b8im-ci-im-token-signing-secret-2026
 
     steps:
       - name: Checkout backend
@@ -59,6 +60,71 @@ jobs:
         with:
           repository: guozhijian611/b8im-module-sdk
           path: b8im-module-sdk
+
+      - name: Verify private module checkout credential
+        env:
+          B8IM_CI_READ_TOKEN: ${{ secrets.B8IM_CI_READ_TOKEN }}
+        run: |
+          if [ -z "$B8IM_CI_READ_TOKEN" ]; then
+            echo "::error::B8IM_CI_READ_TOKEN is required to read private Composer path dependencies."
+            exit 1
+          fi
+
+      - name: Checkout i18n module path dependency
+        uses: actions/checkout@v4
+        with:
+          repository: guozhijian611/b8im-module-i18n
+          path: b8im-module-i18n
+          token: ${{ secrets.B8IM_CI_READ_TOKEN }}
+
+      - name: Checkout favorite module path dependency
+        uses: actions/checkout@v4
+        with:
+          repository: guozhijian611/b8im-module-favorite
+          path: b8im-module-favorite
+          token: ${{ secrets.B8IM_CI_READ_TOKEN }}
+
+      - name: Checkout sticker module path dependency
+        uses: actions/checkout@v4
+        with:
+          repository: guozhijian611/b8im-module-sticker
+          path: b8im-module-sticker
+          token: ${{ secrets.B8IM_CI_READ_TOKEN }}
+
+      - name: Checkout customer service module path dependency
+        uses: actions/checkout@v4
+        with:
+          repository: guozhijian611/b8im-module-customer-service
+          path: b8im-module-customer-service
+          token: ${{ secrets.B8IM_CI_READ_TOKEN }}
+
+      - name: Checkout single robot module path dependency
+        uses: actions/checkout@v4
+        with:
+          repository: guozhijian611/b8im-module-robot-single
+          path: b8im-module-robot-single
+          token: ${{ secrets.B8IM_CI_READ_TOKEN }}
+
+      - name: Checkout file media module path dependency
+        uses: actions/checkout@v4
+        with:
+          repository: guozhijian611/b8im-module-file-media
+          path: b8im-module-file-media
+          token: ${{ secrets.B8IM_CI_READ_TOKEN }}
+
+      - name: Checkout search module path dependency
+        uses: actions/checkout@v4
+        with:
+          repository: guozhijian611/b8im-module-search
+          path: b8im-module-search
+          token: ${{ secrets.B8IM_CI_READ_TOKEN }}
+
+      - name: Checkout moments module path dependency
+        uses: actions/checkout@v4
+        with:
+          repository: guozhijian611/b8im-module-moments
+          path: b8im-module-moments
+          token: ${{ secrets.B8IM_CI_READ_TOKEN }}
 
       - name: Checkout IM migration dependency
         uses: actions/checkout@v4

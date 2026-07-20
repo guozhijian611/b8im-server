@@ -170,6 +170,15 @@ $expectApiCode = static function (int $code, callable $callback) use ($assert): 
     }
     throw new RuntimeException('Expected ApiException was not thrown.');
 };
+$expectRuntime = static function (callable $callback, string $message) use ($assert): void {
+    try {
+        $callback();
+    } catch (RuntimeException) {
+        $assert(true, $message);
+        return;
+    }
+    throw new RuntimeException('Expected RuntimeException was not thrown: ' . $message);
+};
 
 final class RecordingWebImRealtimePublisher implements WebImRealtimePublisherInterface
 {
@@ -261,8 +270,9 @@ foreach ($users as [$organization, $userId, $shortNo, $account, $nickname, $mobi
 
 $insertFriend = $pdo->prepare(
     'INSERT INTO im_friend_relation
-        (organization, user_id, friend_user_id, add_method, added_at, status, create_time, update_time)
-     VALUES (901, ?, ?, "username", ?, 1, ?, ?)',
+        (organization, user_id, friend_organization, friend_user_id, add_method, added_at,
+         status, create_time, update_time)
+     VALUES (901, ?, 901, ?, "username", ?, 1, ?, ?)',
 );
 foreach ([
     ['user_a', 'user_b'],
@@ -284,6 +294,28 @@ $service = new WebImControlService(
         static fn (): int => strtotime('2026-07-10 12:00:00'),
         300,
     ),
+);
+$friendDirectionMethod = (new ReflectionClass(ThinkOrmWebImControlStore::class))
+    ->getMethod('canonicalFriendDirections');
+$friendDirectionMethod->setAccessible(true);
+$friendDirectionsForward = $friendDirectionMethod->invoke(
+    null,
+    901,
+    'user_d',
+    901,
+    'user_a',
+);
+$friendDirectionsReverse = $friendDirectionMethod->invoke(
+    null,
+    901,
+    'user_a',
+    901,
+    'user_d',
+);
+$assert(
+    $friendDirectionsForward === $friendDirectionsReverse
+    && array_column($friendDirectionsForward, 'user_id') === ['user_a', 'user_d'],
+    'Friend relation/request lock and upsert directions are observable and caller-independent.',
 );
 $alice = ['organization' => 901, 'user_id' => 'user_a', 'client_family' => 'web'];
 $bob = ['organization' => 901, 'user_id' => 'user_b'];
@@ -338,13 +370,13 @@ Db::table('im_user_privacy_setting')
     ->where('organization', 901)
     ->where('user_id', 'user_d')
     ->update(['allow_add_by_username' => 2]);
-$expectApiCode(403, static fn () => $service->sendFriendRequest($alice, 'user_d', 'blocked'));
+$expectApiCode(403, static fn () => $service->sendFriendRequest($alice, 901, 'user_d', 'blocked'));
 Db::table('im_user_privacy_setting')
     ->where('organization', 901)
     ->where('user_id', 'user_d')
     ->update(['allow_add_by_username' => 1]);
-$sent = $service->sendFriendRequest($alice, 'user_d', 'hello');
-$resent = $service->sendFriendRequest($alice, 'user_d', 'hello again');
+$sent = $service->sendFriendRequest($alice, 901, 'user_d', 'hello');
+$resent = $service->sendFriendRequest($alice, 901, 'user_d', 'hello again');
 $assert($sent['status'] === 'pending' && $resent['status'] === 'pending', 'Friend request idempotency failed.');
 $assert(
     count($realtime->friendEvents) === 1
@@ -378,7 +410,7 @@ $assert(
     count($bobSearchDan) === 1 && $bobSearchDan[0]['relation_status'] === 'none',
     'A unilateral relation was projected as a friend.',
 );
-$expectApiCode(403, static fn () => $service->messages($bob, '', 'user_d', 0, 0, 50));
+$expectApiCode(403, static fn () => $service->messages($bob, '', 901, 'user_d', 0, 0, 50));
 
 $messageConfig = $service->messageConfig($alice);
 $assert(
@@ -399,7 +431,7 @@ $group = $service->createGroup($alice, 'Project Group', ['user_b', 'user_c']);
 $conversationId = (string) $group['conversation_id'];
 $assert(
     array_keys($group) === [
-        'conversation_id', 'conversation_sort_id', 'conversation_type', 'title',
+        'organization', 'conversation_id', 'conversation_sort_id', 'conversation_type', 'title',
         'description', 'avatar_members', 'peer_user', 'last_message_id', 'last_message_seq',
         'last_message_index_id', 'last_message_summary', 'last_message_time', 'sort_time',
         'unread_count', 'is_pinned', 'is_muted', 'message_group_id', 'message_group_name',
@@ -521,8 +553,8 @@ $insertMessage = static function (int $seq, string $text) use (
     $body = $pdo->prepare(
         'INSERT INTO `' . $messageTable . '`
             (organization, conversation_id, conversation_type, message_id, message_seq,
-             client_msg_id, sender_id, message_type, content, status, create_time, update_time)
-         VALUES (901, ?, 2, ?, ?, ?, "user_a", 1, ?, 1, ?, ?)',
+             client_msg_id, sender_id, sender_organization, message_type, content, status, create_time, update_time)
+         VALUES (901, ?, 2, ?, ?, ?, "user_a", 901, 1, ?, 1, ?, ?)',
     );
     $body->execute([
         $conversationId,
@@ -536,8 +568,8 @@ $insertMessage = static function (int $seq, string $text) use (
     $index = $pdo->prepare(
         'INSERT INTO im_message_index
             (organization, global_seq, message_id, conversation_id, message_seq, sender_id,
-             client_msg_id, storage_node, shard_table, create_time)
-         VALUES (901, ?, ?, ?, ?, "user_a", ?, "mysql-primary", ?, ?)',
+             sender_organization, client_msg_id, storage_node, shard_table, create_time)
+         VALUES (901, ?, ?, ?, ?, "user_a", 901, ?, "mysql-primary", ?, ?)',
     );
     $index->execute([
         $seq,
@@ -567,7 +599,8 @@ $service->removeGroupMember($bob, $conversationId, 'user_c');
 $service->removeGroupMember($bob, $conversationId, 'user_c');
 $closedPeriod = $pdo->prepare(
     'SELECT visible_until_message_seq FROM im_conversation_membership_period
-      WHERE organization = 901 AND conversation_id = ? AND user_id = "user_c" AND period_no = 1',
+      WHERE organization = 901 AND conversation_id = ?
+        AND member_organization = 901 AND user_id = "user_c" AND period_no = 1',
 );
 $closedPeriod->execute([$conversationId]);
 $assert((int) $closedPeriod->fetchColumn() === 1, 'Removing a member did not close the visibility period.');
@@ -577,6 +610,7 @@ $newPeriod = Db::query(
     'SELECT period_no, visible_from_message_seq, visible_until_message_seq
        FROM im_conversation_membership_period
       WHERE organization = 901 AND conversation_id = ? AND user_id = "user_c"
+        AND member_organization = 901
    ORDER BY period_no DESC LIMIT 1',
     [$conversationId],
 )[0];
@@ -598,14 +632,15 @@ $assert(
 );
 $insertMessage(3, 'visible after rejoin');
 
-$messagePage = $service->messages($carol, $conversationId, '', 0, 0, 50);
+$messagePage = $service->messages($carol, $conversationId, 0, '', 0, 0, 50);
 $sequences = array_column($messagePage['messages'], 'message_seq');
 $assert($sequences === [1, 3], 'Message history ignored membership visibility periods.');
 $assert(
     array_keys($messagePage['messages'][0]) === [
-        'id', 'conversation_id', 'conversation_type', 'message_id', 'message_seq',
-        'client_msg_id', 'sender_id', 'sender_user', 'message_type', 'content',
-        'status', 'edit_time', 'edit_count', 'create_time', 'delivery_status',
+        'id', 'organization', 'conversation_id', 'conversation_type', 'message_id', 'message_seq',
+        'global_seq', 'client_msg_id', 'sender_organization', 'sender_id', 'sender_user',
+        'message_type', 'content', 'status', 'edit_time', 'edit_count', 'create_time',
+        'delivery_status',
     ],
     'Message response contract is not exact.',
 );
@@ -615,14 +650,14 @@ $assert(
 );
 $pdo->prepare(
     'INSERT INTO im_message_receipt
-        (organization, conversation_id, message_id, user_id, status,
+        (organization, conversation_id, message_id, user_id, user_organization, status,
          delivered_time, read_time, create_time, update_time)
      VALUES
-        (901, ?, "web-test-message-3", "user_b", 1, NULL, NULL, ?, ?),
-        (901, ?, "web-test-message-3", "user_b", 2, ?, NULL, ?, ?),
-        (901, ?, "web-test-message-3", "user_c", 1, NULL, NULL, ?, ?),
-        (901, ?, "web-test-message-3", "user_c", 2, ?, NULL, ?, ?),
-        (901, ?, "web-test-message-3", "user_c", 3, ?, ?, ?, ?)',
+        (901, ?, "web-test-message-3", "user_b", 901, 1, NULL, NULL, ?, ?),
+        (901, ?, "web-test-message-3", "user_b", 901, 2, ?, NULL, ?, ?),
+        (901, ?, "web-test-message-3", "user_c", 901, 1, NULL, NULL, ?, ?),
+        (901, ?, "web-test-message-3", "user_c", 901, 2, ?, NULL, ?, ?),
+        (901, ?, "web-test-message-3", "user_c", 901, 3, ?, ?, ?, ?)',
 )->execute([
     $conversationId, $now, $now,
     $conversationId, $now, $now, $now,
@@ -630,7 +665,7 @@ $pdo->prepare(
     $conversationId, $now, $now, $now,
     $conversationId, $now, $now, $now, $now,
 ]);
-$aliceMessagePage = $service->messages($alice, $conversationId, '', 0, 0, 50);
+$aliceMessagePage = $service->messages($alice, $conversationId, 0, '', 0, 0, 50);
 $aliceMessage3 = array_values(array_filter(
     $aliceMessagePage['messages'],
     static fn (array $message): bool => $message['message_id'] === 'web-test-message-3',
@@ -648,10 +683,10 @@ $assert(array_column($visibleSearch, 'message_seq') === [3, 1], 'Visible message
 
 $pdo->prepare(
     'INSERT INTO im_message_user_delete
-        (organization, conversation_id, message_id, user_id, delete_time, create_time)
-     VALUES (901, ?, "web-test-message-1", "user_c", ?, ?)',
+        (organization, conversation_id, message_id, user_id, user_organization, delete_time, create_time)
+     VALUES (901, ?, "web-test-message-1", "user_c", 901, ?, ?)',
 )->execute([$conversationId, $now, $now]);
-$messagePage = $service->messages($carol, $conversationId, '', 0, 0, 50);
+$messagePage = $service->messages($carol, $conversationId, 0, '', 0, 0, 50);
 $assert(array_column($messagePage['messages'], 'message_seq') === [3], 'Per-user deleted message was not filtered.');
 
 $pdo->prepare(
@@ -659,7 +694,28 @@ $pdo->prepare(
       WHERE organization = 901 AND conversation_id = ? AND user_id = "user_c"',
 )->execute([$conversationId]);
 $read = $service->markRead($carol, $conversationId, false);
-$assert($read['updated'] === 1, 'markRead did not update the active member row.');
+$assert(
+    $read['updated'] === 1
+    && $read['user_organization'] === 901
+    && $read['user_id'] === 'user_c',
+    'markRead did not return the explicit reader identity.',
+);
+$sameOrgReadOutbox = Db::query(
+    'SELECT payload_json FROM im_message_outbox
+      WHERE organization = 901 AND conversation_id = ?
+        AND event_type = "conversation.read" LIMIT 1',
+    [$conversationId],
+)[0] ?? null;
+$sameOrgReadPayload = json_decode(
+    (string) ($sameOrgReadOutbox['payload_json'] ?? ''),
+    true,
+    512,
+    JSON_THROW_ON_ERROR,
+);
+$assert(
+    !array_key_exists('cross_org_access_snapshot_id', $sameOrgReadPayload),
+    'same-organization conversation.read must not carry a cross-org epoch',
+);
 $readState = Db::query(
     'SELECT unread_count, last_read_seq FROM im_conversation_member
       WHERE organization = 901 AND conversation_id = ? AND user_id = "user_c"',
@@ -687,11 +743,12 @@ $notice = $broadcastGroup['notice_message'];
 $assert(
     is_array($notice)
     && $notice['message_type'] === 5
+    && preg_match('/^[1-9][0-9]*$/', (string) ($notice['global_seq'] ?? '')) === 1
     && ($notice['content']['mention_all'] ?? false) === true,
     'notify_all did not return the committed notice to its HTTP origin.',
 );
 $outbox = $pdo->prepare(
-    'SELECT message_id, payload_json, traceparent, tracestate,
+    'SELECT event_id, message_id, payload_json, traceparent, tracestate,
             next_retry_at, locked_until, worker_id, claim_token, published_at
        FROM im_message_outbox
       WHERE organization = 901 AND event_type = "message.created"
@@ -705,6 +762,7 @@ $outboxPayload = $outboxRow === false
 $assert(
     $outboxRow !== false
     && is_array($outboxPayload)
+    && preg_match('/^[0-9a-f]{64}$/', (string) $outboxRow['event_id']) === 1
     && preg_match('/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/', (string) $outboxRow['traceparent']) === 1
     && $outboxRow['tracestate'] === null
     && $outboxRow['next_retry_at'] === $now
@@ -716,12 +774,31 @@ $assert(
 );
 $assert(
     is_array($outboxPayload)
+    && ($outboxPayload['event_id'] ?? null) === ($outboxRow['event_id'] ?? null)
     && ($outboxPayload['event_type'] ?? null) === 'message.created'
     && ($outboxPayload['actor_user_id'] ?? null) === 'user_a'
     && ($outboxPayload['origin_user_id'] ?? null) === 'user_a'
     && str_starts_with((string) ($outboxPayload['origin_client_id'] ?? ''), 'web-control-n')
     && ($outboxPayload['sender_id'] ?? null) === 'system_notification'
-    && ($outboxPayload['recipient_count'] ?? -1) === count($outboxPayload['recipient_user_ids'] ?? [])
+    && ($outboxPayload['sender_organization'] ?? null) === 901
+    && ($outboxPayload['actor_organization'] ?? null) === 901
+    && ($outboxPayload['origin_organization'] ?? null) === 901
+    && ($outboxPayload['recipient_count'] ?? -1) === count($outboxPayload['recipient_identities'] ?? [])
+    && in_array(
+        ['organization' => 901, 'user_id' => 'user_a'],
+        $outboxPayload['recipient_identities'] ?? [],
+        true,
+    )
+    && in_array(
+        ['organization' => 901, 'user_id' => 'user_b'],
+        $outboxPayload['recipient_identities'] ?? [],
+        true,
+    )
+    && in_array(
+        ['organization' => 901, 'user_id' => 'user_c'],
+        $outboxPayload['recipient_identities'] ?? [],
+        true,
+    )
     && ($outboxPayload['message']['organization'] ?? null) === 901
     && ($outboxPayload['message']['message_id'] ?? null) === ($outboxRow['message_id'] ?? null)
     && ($outboxPayload['message']['message_id'] ?? null) === ($notice['message_id'] ?? null)
@@ -750,8 +827,15 @@ $assert(
     'Retrying an unchanged notify_all update created a duplicate group notice.',
 );
 
-$remark = $service->updateFriendRemark($alice, 'user_d', 'D colleague');
-$assert($remark === ['friend_user_id' => 'user_d', 'remark' => 'D colleague'], 'Friend remark response mismatch.');
+$remark = $service->updateFriendRemark($alice, 901, 'user_d', 'D colleague');
+$assert(
+    $remark === [
+        'friend_organization' => 901,
+        'friend_user_id' => 'user_d',
+        'remark' => 'D colleague',
+    ],
+    'Friend remark response mismatch.',
+);
 $danContact = $service->contacts($alice, 'D colleague');
 $assert(count($danContact) === 1 && $danContact[0]['remark'] === 'D colleague', 'Friend remark was not projected.');
 $expectApiCode(403, static fn () => $service->groupMembers($outsider, $conversationId));
@@ -779,8 +863,8 @@ $assetContent = [
 $pdo->prepare(
     'INSERT INTO `' . $messageTable . '`
         (organization, conversation_id, conversation_type, message_id, message_seq,
-         client_msg_id, sender_id, message_type, content, status, create_time, update_time)
-     VALUES (901, ?, 2, ?, 100, "web-test-asset-client", "user_a", 2, ?, 1, ?, ?)',
+         client_msg_id, sender_id, sender_organization, message_type, content, status, create_time, update_time)
+     VALUES (901, ?, 2, ?, 100, "web-test-asset-client", "user_a", 901, 2, ?, 1, ?, ?)',
 )->execute([
     $conversationId,
     $assetMessageId,
@@ -791,8 +875,8 @@ $pdo->prepare(
 $pdo->prepare(
     'INSERT INTO im_message_index
         (organization, global_seq, message_id, conversation_id, message_seq, sender_id,
-         client_msg_id, storage_node, shard_table, create_time)
-     VALUES (901, 100, ?, ?, 100, "user_a", "web-test-asset-client", "mysql-primary", ?, ?)',
+         sender_organization, client_msg_id, storage_node, shard_table, create_time)
+     VALUES (901, 100, ?, ?, 100, "user_a", 901, "web-test-asset-client", "mysql-primary", ?, ?)',
 )->execute([$assetMessageId, $conversationId, $messageTable, $now]);
 
 $assetStore = new ThinkOrmWebImAssetForwardStore();
@@ -841,6 +925,525 @@ $derivedCount = (int) Db::query(
     [$derived['file_id']],
 )[0]['aggregate'];
 $assert($derivedCount === 1, 'Repeated derivation inserted duplicate asset rows.');
+
+// A recipient-home message must resolve the original file from the sender/source organization.
+$pdo->exec('INSERT INTO sm_system_config_group (id, code) VALUES (2, "social_config")');
+$pdo->exec(
+    'INSERT INTO sm_system_config (group_id, `key`, `value`) VALUES
+        (2, "cross_org_social_enabled", "1"),
+        (2, "cross_org_access_snapshot_id", "1")',
+);
+$crossAssetConversationId = \plugin\saimulti\service\web\SingleConversationIdentity::conversationId(
+    901,
+    'user_a',
+    902,
+    'outsider',
+);
+$pdo->prepare(
+    'INSERT INTO im_cross_organization_conversation
+        (conversation_id, left_organization, left_user_id, right_organization, right_user_id,
+         next_message_seq, status, create_time, update_time)
+     VALUES (?, 901, "user_a", 902, "outsider", 2, 1, ?, ?)',
+)->execute([$crossAssetConversationId, $now, $now]);
+$crossAssetMessageId = 'web-cross-asset-message';
+foreach ([901, 902] as $homeOrganization) {
+    $pdo->prepare(
+        'INSERT INTO im_conversation
+            (organization, conversation_id, conversation_type, title, owner_user_id, owner_organization,
+             next_message_seq, last_message_seq, last_message_id, last_message_time,
+             last_message_summary, status, create_time, update_time)
+         VALUES (?, ?, 1, "", "user_a", 901, 2, 1, ?, ?, "cross asset", 1, ?, ?)',
+    )->execute([
+        $homeOrganization,
+        $crossAssetConversationId,
+        $crossAssetMessageId,
+        $now,
+        $now,
+        $now,
+    ]);
+    foreach ([[901, 'user_a'], [902, 'outsider']] as [$memberOrganization, $memberUserId]) {
+        $pdo->prepare(
+            'INSERT INTO im_conversation_member
+                (organization, conversation_id, user_id, member_organization, member_role, status,
+                 join_at, create_time, update_time)
+             VALUES (?, ?, ?, ?, "member", 1, ?, ?, ?)',
+        )->execute([
+            $homeOrganization,
+            $crossAssetConversationId,
+            $memberUserId,
+            $memberOrganization,
+            $now,
+            $now,
+            $now,
+        ]);
+        $pdo->prepare(
+            'INSERT INTO im_conversation_membership_period
+                (organization, conversation_id, user_id, member_organization, period_no,
+                 visible_from_message_seq, status, join_at, create_time, update_time)
+             VALUES (?, ?, ?, ?, 1, 1, 1, ?, ?, ?)',
+        )->execute([
+            $homeOrganization,
+            $crossAssetConversationId,
+            $memberUserId,
+            $memberOrganization,
+            $now,
+            $now,
+            $now,
+        ]);
+    }
+    $pdo->prepare(
+        'INSERT INTO `' . $messageTable . '`
+            (organization, conversation_id, conversation_type, message_id, message_seq,
+             client_msg_id, sender_id, sender_organization, message_type, content, status,
+             create_time, update_time)
+         VALUES (?, ?, 1, ?, 1, "web-cross-asset-client", "user_a", 901, 2, ?, 1, ?, ?)',
+    )->execute([
+        $homeOrganization,
+        $crossAssetConversationId,
+        $crossAssetMessageId,
+        json_encode($assetContent, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
+        $now,
+        $now,
+    ]);
+    $pdo->prepare(
+        'INSERT INTO im_message_index
+            (organization, global_seq, message_id, conversation_id, message_seq, sender_id,
+             sender_organization, client_msg_id, storage_node, shard_table, create_time)
+         VALUES (?, ?, ?, ?, 1, "user_a", 901, "web-cross-asset-client",
+                 "mysql-primary", ?, ?)',
+    )->execute([
+        $homeOrganization,
+        $homeOrganization === 901 ? 101 : 1,
+        $crossAssetMessageId,
+        $crossAssetConversationId,
+        $messageTable,
+        $now,
+    ]);
+}
+$pdo->prepare(
+    'UPDATE im_user SET avatar = ? WHERE organization = 901 AND user_id = "user_a"',
+)->execute([$sourceFileId]);
+
+$crossConversation = $service->conversations($outsider)[0] ?? null;
+$assert(
+    is_array($crossConversation)
+    && (int) ($crossConversation['peer_user']['organization'] ?? 0) === 901
+    && str_contains((string) ($crossConversation['peer_user']['avatar_url'] ?? ''), '/avatar/901?')
+    && str_contains((string) ($crossConversation['avatar_url'] ?? ''), '/avatar/901?'),
+    'Cross-org peer and single-conversation avatars were not signed in the peer organization.',
+);
+if (function_exists('proc_open')) {
+    $assetLockDsn = sprintf(
+        'mysql:host=%s;port=%d;dbname=%s;charset=%s',
+        $host,
+        $port,
+        $database,
+        $charset,
+    );
+    $assetLockDerivedFileId = substr(hash(
+        'sha256',
+        'asset-lock-order|' . $crossAssetConversationId,
+    ), 0, 40);
+    $assetLockPrefix = sys_get_temp_dir() . '/b8im-asset-lock-' . bin2hex(random_bytes(8));
+    $assetLockInsertBarrier = $assetLockPrefix . '-insert';
+    $assetLockBlockerState = $assetLockPrefix . '-blocker-state.json';
+    $assetLockBlockerResult = $assetLockPrefix . '-blocker-result.json';
+    $assetLockReaderResult = $assetLockPrefix . '-reader-result.json';
+    $assetLockBlockerCode = <<<'PHP'
+$dsn = $argv[1];
+$username = $argv[2];
+$password = $argv[3];
+$conversationId = $argv[4];
+$derivedFileId = $argv[5];
+$storagePath = $argv[6];
+$now = $argv[7];
+$statePath = $argv[8];
+$insertBarrier = $argv[9];
+$resultPath = $argv[10];
+$pdo = new PDO($dsn, $username, $password, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+try {
+    $pdo->beginTransaction();
+    $canonical = $pdo->prepare(
+        'SELECT conversation_id
+           FROM im_cross_organization_conversation
+          WHERE conversation_id = ?
+          LIMIT 1
+          FOR UPDATE',
+    );
+    $canonical->execute([$conversationId]);
+    if ($canonical->fetchColumn() !== $conversationId) {
+        throw new RuntimeException('Unable to lock the cross-organization canonical row.');
+    }
+    file_put_contents($statePath, json_encode([
+        'connection_id' => (int) $pdo->query('SELECT CONNECTION_ID()')->fetchColumn(),
+        'canonical_locked' => true,
+    ], JSON_THROW_ON_ERROR));
+
+    $deadline = microtime(true) + 10;
+    while (!is_file($insertBarrier)) {
+        if (microtime(true) >= $deadline) {
+            throw new RuntimeException('Asset insert barrier timeout.');
+        }
+        usleep(1000);
+    }
+    $insert = $pdo->prepare(
+        'INSERT INTO im_upload_asset
+            (organization, file_id, user_id, kind, name, url, storage_path, size_byte,
+             mime_type, extension, status, create_time, update_time)
+         VALUES (902, ?, "outsider", "image", "forward.webp", "", ?, 4321,
+                 "image/webp", "webp", 1, ?, ?)',
+    );
+    $insert->execute([$derivedFileId, $storagePath, $now, $now]);
+    $inserted = $insert->rowCount();
+    $pdo->commit();
+    file_put_contents($resultPath, json_encode([
+        'status' => 'inserted',
+        'row_count' => $inserted,
+    ], JSON_THROW_ON_ERROR));
+} catch (Throwable $exception) {
+    if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+    }
+    file_put_contents($resultPath, json_encode([
+        'error' => get_class($exception) . ': ' . $exception->getMessage(),
+        'driver_code' => $exception instanceof PDOException
+            ? (int) ($exception->errorInfo[1] ?? 0)
+            : 0,
+    ], JSON_THROW_ON_ERROR));
+    exit(1);
+}
+PHP;
+    $assetLockBlocker = proc_open(
+        [
+            PHP_BINARY,
+            '-r',
+            $assetLockBlockerCode,
+            $assetLockDsn,
+            $username,
+            $password,
+            $crossAssetConversationId,
+            $assetLockDerivedFileId,
+            $sourceStoragePath,
+            $now,
+            $assetLockBlockerState,
+            $assetLockInsertBarrier,
+            $assetLockBlockerResult,
+        ],
+        [
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ],
+        $assetLockBlockerPipes,
+    );
+    if (!is_resource($assetLockBlocker)) {
+        throw new RuntimeException('Unable to start the canonical-lock asset worker.');
+    }
+
+    $assetLockState = null;
+    $assetLockDeadline = microtime(true) + 10;
+    while (microtime(true) < $assetLockDeadline) {
+        if (is_file($assetLockBlockerState)) {
+            $candidate = json_decode((string) file_get_contents($assetLockBlockerState), true);
+            if (($candidate['canonical_locked'] ?? false) === true
+                && (int) ($candidate['connection_id'] ?? 0) > 0) {
+                $assetLockState = $candidate;
+                break;
+            }
+        }
+        $processState = proc_get_status($assetLockBlocker);
+        if (($processState['running'] ?? false) !== true) {
+            break;
+        }
+        usleep(1000);
+    }
+    $assetLockBlockerConnectionId = (int) ($assetLockState['connection_id'] ?? 0);
+    if ($assetLockBlockerConnectionId <= 0) {
+        touch($assetLockInsertBarrier);
+        $blockerOutput = stream_get_contents($assetLockBlockerPipes[1]);
+        $blockerError = stream_get_contents($assetLockBlockerPipes[2]);
+        fclose($assetLockBlockerPipes[1]);
+        fclose($assetLockBlockerPipes[2]);
+        $blockerExit = proc_close($assetLockBlocker);
+        throw new RuntimeException(sprintf(
+            'Canonical-lock asset worker did not become ready: exit=%d stdout=%s stderr=%s',
+            $blockerExit,
+            $blockerOutput,
+            $blockerError,
+        ));
+    }
+
+    $assetLockBlockerProbe = $pdo->prepare(
+        'SELECT trx_state
+           FROM information_schema.innodb_trx
+          WHERE trx_mysql_thread_id = ?',
+    );
+    $assetLockBlockerActive = false;
+    $assetLockBlockerDeadline = microtime(true) + 2;
+    while (microtime(true) < $assetLockBlockerDeadline) {
+        $assetLockBlockerProbe->execute([$assetLockBlockerConnectionId]);
+        if (($assetLockBlockerProbe->fetchColumn() ?: '') === 'RUNNING') {
+            $assetLockBlockerActive = true;
+            break;
+        }
+        usleep(1000);
+    }
+    if (!$assetLockBlockerActive) {
+        touch($assetLockInsertBarrier);
+        throw new RuntimeException('Canonical-lock asset worker transaction is not active.');
+    }
+
+    $assetLockReaderCode = <<<'PHP'
+$root = $argv[1];
+$database = $argv[2];
+$sourceFileId = $argv[3];
+$conversationId = $argv[4];
+$messageId = $argv[5];
+$resultPath = $argv[6];
+foreach (['DB_NAME' => $database, 'IM_MESSAGE_SHARD_BUCKETS' => '1'] as $key => $value) {
+    $_ENV[$key] = $value;
+    $_SERVER[$key] = $value;
+    putenv($key . '=' . $value);
+}
+require $root . '/vendor/autoload.php';
+require $root . '/support/bootstrap.php';
+try {
+    $asset = (new \plugin\saimulti\service\web\ThinkOrmWebImAssetForwardStore())
+        ->accessibleAsset(
+            902,
+            'outsider',
+            $sourceFileId,
+            $conversationId,
+            $messageId,
+        );
+    file_put_contents($resultPath, json_encode([
+        'status' => 'accessible',
+        'asset' => $asset,
+    ], JSON_THROW_ON_ERROR));
+} catch (Throwable $exception) {
+    file_put_contents($resultPath, json_encode([
+        'error' => get_class($exception) . ': ' . $exception->getMessage(),
+    ], JSON_THROW_ON_ERROR));
+    exit(1);
+}
+PHP;
+    $assetLockReader = proc_open(
+        [
+            PHP_BINARY,
+            '-r',
+            $assetLockReaderCode,
+            dirname(__DIR__),
+            $database,
+            $sourceFileId,
+            $crossAssetConversationId,
+            $crossAssetMessageId,
+            $assetLockReaderResult,
+        ],
+        [
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ],
+        $assetLockReaderPipes,
+    );
+    if (!is_resource($assetLockReader)) {
+        touch($assetLockInsertBarrier);
+        throw new RuntimeException('Unable to start the visible-asset reader worker.');
+    }
+
+    $assetLockWaitProbe = $pdo->prepare(
+        'SELECT id, state, info
+           FROM information_schema.processlist
+          WHERE db = ?
+            AND id <> ?
+            AND id <> CONNECTION_ID()
+            AND command IN ("Query", "Execute")
+            AND info LIKE "%FROM im_cross_organization_conversation%"
+            AND info LIKE "%FOR UPDATE%"
+            AND info LIKE ?',
+    );
+    $assetLockReaderWaiting = false;
+    $assetLockDeadline = microtime(true) + 10;
+    while (microtime(true) < $assetLockDeadline) {
+        $assetLockWaitProbe->execute([
+            $database,
+            $assetLockBlockerConnectionId,
+            '%' . $crossAssetConversationId . '%',
+        ]);
+        if (is_array($assetLockWaitProbe->fetch(PDO::FETCH_ASSOC))) {
+            $assetLockReaderWaiting = true;
+            break;
+        }
+        usleep(1000);
+    }
+    touch($assetLockInsertBarrier);
+
+    $assetLockBlockerOutput = stream_get_contents($assetLockBlockerPipes[1]);
+    $assetLockBlockerError = stream_get_contents($assetLockBlockerPipes[2]);
+    fclose($assetLockBlockerPipes[1]);
+    fclose($assetLockBlockerPipes[2]);
+    $assetLockBlockerExit = proc_close($assetLockBlocker);
+    $assetLockReaderOutput = stream_get_contents($assetLockReaderPipes[1]);
+    $assetLockReaderError = stream_get_contents($assetLockReaderPipes[2]);
+    fclose($assetLockReaderPipes[1]);
+    fclose($assetLockReaderPipes[2]);
+    $assetLockReaderExit = proc_close($assetLockReader);
+    $assetLockBlockerPayload = is_file($assetLockBlockerResult)
+        ? json_decode(
+            (string) file_get_contents($assetLockBlockerResult),
+            true,
+            512,
+            JSON_THROW_ON_ERROR,
+        )
+        : ['error' => 'missing blocker result'];
+    $assetLockReaderPayload = is_file($assetLockReaderResult)
+        ? json_decode(
+            (string) file_get_contents($assetLockReaderResult),
+            true,
+            512,
+            JSON_THROW_ON_ERROR,
+        )
+        : ['error' => 'missing reader result'];
+    foreach ([
+        $assetLockInsertBarrier,
+        $assetLockBlockerState,
+        $assetLockBlockerResult,
+        $assetLockReaderResult,
+    ] as $assetLockPath) {
+        @unlink($assetLockPath);
+    }
+
+    $assetLockDerivedRows = $pdo->prepare(
+        'SELECT user_id, storage_path
+           FROM im_upload_asset
+          WHERE organization = 902
+            AND file_id = ?',
+    );
+    $assetLockDerivedRows->execute([$assetLockDerivedFileId]);
+    $assetLockDerivedRows = $assetLockDerivedRows->fetchAll(PDO::FETCH_ASSOC);
+    $assetLockProbePassed = $assetLockReaderWaiting
+        && $assetLockBlockerExit === 0
+        && $assetLockReaderExit === 0
+        && ($assetLockBlockerPayload['status'] ?? '') === 'inserted'
+        && (int) ($assetLockBlockerPayload['row_count'] ?? 0) === 1
+        && ($assetLockReaderPayload['status'] ?? '') === 'accessible'
+        && ($assetLockReaderPayload['asset']['file_id'] ?? '') === $sourceFileId
+        && ($assetLockReaderPayload['asset']['user_id'] ?? '') === 'user_a'
+        && count($assetLockDerivedRows) === 1
+        && ($assetLockDerivedRows[0]['user_id'] ?? '') === 'outsider'
+        && ($assetLockDerivedRows[0]['storage_path'] ?? '') === $sourceStoragePath;
+    $assert(
+        $assetLockProbePassed,
+        'Visible asset lookup waits on canonical before a target-home derived insert without deadlock: '
+        . ($assetLockProbePassed ? 'ok' : json_encode([
+            'reader_waiting' => $assetLockReaderWaiting,
+            'blocker_exit' => $assetLockBlockerExit,
+            'reader_exit' => $assetLockReaderExit,
+            'blocker_output' => $assetLockBlockerOutput,
+            'blocker_error' => $assetLockBlockerError,
+            'reader_output' => $assetLockReaderOutput,
+            'reader_error' => $assetLockReaderError,
+            'blocker_payload' => $assetLockBlockerPayload,
+            'reader_payload' => $assetLockReaderPayload,
+            'derived_rows' => $assetLockDerivedRows,
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)),
+    );
+} else {
+    echo "SKIP proc_open visible-asset lock-order regression\n";
+}
+$crossDerived = $forwardService->derive(
+    $outsider,
+    $crossAssetConversationId,
+    $crossAssetMessageId,
+    $sourceFileId,
+    'image',
+);
+$crossDerivedRow = Db::query(
+    'SELECT organization, user_id, storage_path
+       FROM im_upload_asset
+      WHERE organization = 902 AND file_id = ?',
+    [$crossDerived['file_id']],
+)[0] ?? null;
+$assert(
+    is_array($crossDerivedRow)
+    && $crossDerivedRow['user_id'] === 'outsider'
+    && $crossDerivedRow['storage_path'] === $sourceStoragePath,
+    'Cross-org attachment forwarding did not use the sender organization source asset.',
+);
+$pdo->prepare(
+    'UPDATE im_cross_organization_conversation SET status = 2 WHERE conversation_id = ?',
+)->execute([$crossAssetConversationId]);
+$expectRuntime(
+    static fn () => $forwardService->derive(
+        $outsider,
+        $crossAssetConversationId,
+        $crossAssetMessageId,
+        $sourceFileId,
+        'image',
+    ),
+    'Cross-org attachment rejects an inactive canonical row.',
+);
+$pdo->prepare(
+    'UPDATE im_cross_organization_conversation SET status = 1 WHERE conversation_id = ?',
+)->execute([$crossAssetConversationId]);
+$pdo->prepare(
+    'UPDATE im_conversation SET status = 2 WHERE organization = 901 AND conversation_id = ?',
+)->execute([$crossAssetConversationId]);
+$expectRuntime(
+    static fn () => $forwardService->derive(
+        $outsider,
+        $crossAssetConversationId,
+        $crossAssetMessageId,
+        $sourceFileId,
+        'image',
+    ),
+    'Cross-org attachment rejects a missing peer-home projection.',
+);
+$pdo->prepare(
+    'UPDATE im_conversation SET status = 1 WHERE organization = 901 AND conversation_id = ?',
+)->execute([$crossAssetConversationId]);
+$pdo->exec('UPDATE sm_system_organization SET status = 2 WHERE id = 901');
+$expectApiCode(403, static fn () => $forwardService->derive(
+    $outsider,
+    $crossAssetConversationId,
+    $crossAssetMessageId,
+    $sourceFileId,
+    'image',
+));
+$pdo->exec('UPDATE sm_system_organization SET status = 1 WHERE id = 901');
+
+$pdo->prepare(
+    'INSERT INTO im_conversation_member
+        (organization, conversation_id, user_id, member_organization, member_role, status,
+         join_at, create_time, update_time)
+     VALUES (901, ?, "outsider", 902, "member", 1, ?, ?, ?)',
+)->execute([$conversationId, $now, $now, $now]);
+$expectRuntime(
+    static fn () => $service->conversations($carol),
+    'Group conversation rejects an active member outside its home organization.',
+);
+$pdo->prepare(
+    'DELETE FROM im_conversation_member
+      WHERE organization = 901 AND conversation_id = ?
+        AND member_organization = 902 AND user_id = "outsider"',
+)->execute([$conversationId]);
+
+$pdo->exec(
+    'UPDATE sm_system_config
+        SET `value` = CASE `key`
+            WHEN "cross_org_social_enabled" THEN "0"
+            WHEN "cross_org_access_snapshot_id" THEN "2"
+            ELSE `value`
+        END
+      WHERE group_id = 2',
+);
+\plugin\saimulti\service\web\CrossOrganizationSocialPolicy::clearCache();
+$expectApiCode(403, static fn () => $forwardService->derive(
+    $outsider,
+    $crossAssetConversationId,
+    $crossAssetMessageId,
+    $sourceFileId,
+    'image',
+));
+
 $expectApiCode(404, static fn () => $forwardService->derive(
     $carol,
     $conversationId,
@@ -953,8 +1556,8 @@ $expectApiCode(404, static fn () => $assetUrlService->resolve($outsider, $source
 $expectApiCode(404, static fn () => $assetUrlService->resolve($carol, $hiddenFileId, $conversationId, 'web-test-message-2'));
 $pdo->prepare(
     'INSERT INTO im_message_user_delete
-        (organization, conversation_id, message_id, user_id, delete_time, create_time)
-     VALUES (901, ?, ?, "user_c", ?, ?)',
+        (organization, conversation_id, message_id, user_id, user_organization, delete_time, create_time)
+     VALUES (901, ?, ?, "user_c", 901, ?, ?)',
 )->execute([$conversationId, $assetMessageId, $now, $now]);
 $expectApiCode(404, static fn () => $assetUrlService->resolve($carol, $sourceFileId, $conversationId, $assetMessageId));
 $persistedAsset = Db::query(
