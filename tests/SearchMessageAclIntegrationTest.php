@@ -209,7 +209,7 @@ SQL);
     $member->execute([101,$activeGroup,101,'shared',1,'active']);
     $period->execute([101,$activeGroup,101,'shared',1,2,null,1]);
     $addDoc(101,$activeGroup,1,'active-before');
-    $activeFirst = $addDoc(101,$activeGroup,2,'active-first 中');
+    $activeFirst = $addDoc(101,$activeGroup,2,'active-first 中 短词');
     $activeLater = $addDoc(101,$activeGroup,5,'active-later');
     $addDoc(101,$activeGroup,6,'active-hidden',0);
     $addDoc(101,'GROUP_ACTIVE',2,'case-collision-conversation');
@@ -243,7 +243,7 @@ SQL);
     $conversation->execute([101,$absentGroup,2,1]);
     $member->execute([101,$absentGroup,101,'someone_else',1,'active']);
     $period->execute([101,$absentGroup,101,'someone_else',1,1,null,1]);
-    $addDoc(101,$absentGroup,2,'absent');
+    $addDoc(101,$absentGroup,2,'absent 短词');
 
     $sameSingle = $singleId(101,'shared',101,'peer');
     $conversation->execute([101,$sameSingle,1,1]);
@@ -321,6 +321,12 @@ SQL);
     $assert(
         $service->searchMessages(101,'shared',['q'=>'中','conversation_id'=>$activeGroup])['total'] === 1,
         'Conversation-scoped one-character CJK LIKE search was rejected or broadened.',
+    );
+    $twoCharacter = $service->searchMessages(101,'shared',['q'=>'短词']);
+    $assert(
+        $twoCharacter['total'] === 1
+            && $twoCharacter['data'][0]['message_id'] === $activeFirst,
+        'Two-character search missed an authorized document or leaked a denied conversation.',
     );
     foreach ([
         ['甲', 'Forged search conversation detached from the authoritative message index.'],

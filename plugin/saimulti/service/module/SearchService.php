@@ -718,9 +718,17 @@ SQL;
 
     private function canFulltext(string $keyword): bool
     {
-        // MySQL InnoDB ft_min_token_size is often 3; short CJK may still work with ngram if configured.
-        // Use FULLTEXT when keyword has a token of length >= 2.
-        return mb_strlen(preg_replace('/\s+/u', '', $keyword) ?? '') >= 2;
+        $tokens = $this->normalizedQueryTokens($keyword);
+        if ($tokens === []) {
+            return false;
+        }
+        foreach ($tokens as $token) {
+            if (mb_strlen($token) < 3) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private function toBooleanQuery(string $keyword): string
@@ -744,6 +752,17 @@ SQL;
         }
 
         return implode(' ', $tokens);
+    }
+
+    /** @return list<string> */
+    private function normalizedQueryTokens(string $keyword): array
+    {
+        $count = preg_match_all('/[\p{L}\p{N}_]+/u', $keyword, $matches);
+        if ($count === false || $count === 0) {
+            return [];
+        }
+
+        return array_values($matches[0]);
     }
 
     /** @return array<string, mixed> */
