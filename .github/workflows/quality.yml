@@ -53,36 +53,129 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: b8im-server
+          persist-credentials: false
+
+      - name: Require private module checkout token
+        shell: bash
+        env:
+          B8IM_CI_READ_TOKEN: ${{ secrets.B8IM_CI_READ_TOKEN }}
+        run: |
+          if [[ -z "${B8IM_CI_READ_TOKEN}" ]]; then
+            echo "::error::Missing B8IM_CI_READ_TOKEN Actions secret with Contents: read access to the private b8im module repositories."
+            exit 1
+          fi
 
       - name: Checkout module SDK path dependency
         uses: actions/checkout@v4
         with:
           repository: guozhijian611/b8im-module-sdk
           path: b8im-module-sdk
+          ref: bd4633c477503bc48f648526aca649c2f29c4b03
+          persist-credentials: false
+
+      - name: Checkout i18n module path dependency
+        uses: actions/checkout@v4
+        with:
+          repository: guozhijian611/b8im-module-i18n
+          path: b8im-module-i18n
+          ref: b048f30913ea02f68c648c22d915eb975c1b04c1
+          token: ${{ secrets.B8IM_CI_READ_TOKEN }}
+          persist-credentials: false
+
+      - name: Checkout favorite module path dependency
+        uses: actions/checkout@v4
+        with:
+          repository: guozhijian611/b8im-module-favorite
+          path: b8im-module-favorite
+          ref: 2585abcea94fad6ad76bed064e3c72c6be4ee714
+          token: ${{ secrets.B8IM_CI_READ_TOKEN }}
+          persist-credentials: false
+
+      - name: Checkout sticker module path dependency
+        uses: actions/checkout@v4
+        with:
+          repository: guozhijian611/b8im-module-sticker
+          path: b8im-module-sticker
+          ref: 4dcb1624c2761f3341d575436bab475fd8ebefbc
+          token: ${{ secrets.B8IM_CI_READ_TOKEN }}
+          persist-credentials: false
+
+      - name: Checkout customer service module path dependency
+        uses: actions/checkout@v4
+        with:
+          repository: guozhijian611/b8im-module-customer-service
+          path: b8im-module-customer-service
+          ref: d7b6d70ec42af5da91379a6884727e2a983fda93
+          token: ${{ secrets.B8IM_CI_READ_TOKEN }}
+          persist-credentials: false
+
+      - name: Checkout single robot module path dependency
+        uses: actions/checkout@v4
+        with:
+          repository: guozhijian611/b8im-module-robot-single
+          path: b8im-module-robot-single
+          ref: dacd660d59117b219eb3ae986af86abc4da3f7b6
+          token: ${{ secrets.B8IM_CI_READ_TOKEN }}
+          persist-credentials: false
+
+      - name: Checkout file media module path dependency
+        uses: actions/checkout@v4
+        with:
+          repository: guozhijian611/b8im-module-file-media
+          path: b8im-module-file-media
+          ref: 1d42cba62d84d7c48c4973523203d81331ff1acb
+          token: ${{ secrets.B8IM_CI_READ_TOKEN }}
+          persist-credentials: false
+
+      - name: Checkout search module path dependency
+        uses: actions/checkout@v4
+        with:
+          repository: guozhijian611/b8im-module-search
+          path: b8im-module-search
+          ref: 6aea3050febf496e0938105ca58498c56c9c8370
+          token: ${{ secrets.B8IM_CI_READ_TOKEN }}
+          persist-credentials: false
+
+      - name: Checkout moments module path dependency
+        uses: actions/checkout@v4
+        with:
+          repository: guozhijian611/b8im-module-moments
+          path: b8im-module-moments
+          ref: 49d42d2fd233b81f9b1d9db908992461af75bcde
+          token: ${{ secrets.B8IM_CI_READ_TOKEN }}
+          persist-credentials: false
 
       - name: Checkout IM migration dependency
         uses: actions/checkout@v4
         with:
           repository: guozhijian611/b8im-im
           path: b8im-im
+          ref: 4b1cb120362515a37b399950743659792461e8a3
+          persist-credentials: false
 
       - name: Checkout IM shared path dependency
         uses: actions/checkout@v4
         with:
           repository: guozhijian611/b8im-im-shared
           path: b8im-im-shared
+          ref: d456cafe721ec30df5db358a16adf84ba2a44210
+          persist-credentials: false
 
       - name: Checkout admin generator target
         uses: actions/checkout@v4
         with:
           repository: guozhijian611/b8im-admin-vue
           path: b8im-admin-vue
+          ref: 781eac074f00af620f1855e6237caed0178a7ea6
+          persist-credentials: false
 
       - name: Checkout tenant generator target
         uses: actions/checkout@v4
         with:
           repository: guozhijian611/b8im-tenant-vue
           path: b8im-tenant-vue
+          ref: 0d49b99dc6914c0e4bbcf32eb1c2c341d3618043
+          persist-credentials: false
 
       - name: Set up PHP
         uses: shivammathur/setup-php@v2
