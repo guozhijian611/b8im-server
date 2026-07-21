@@ -211,4 +211,9 @@ jobs:
       - name: Cleanup isolated databases
         if: always()
         working-directory: b8im-server
-        run: composer test:cleanup
+        run: |
+          if [[ -f vendor/autoload.php ]]; then
+            composer test:cleanup
+          else
+            echo "Skipping test database cleanup because Composer dependencies were not installed."
+          fi
