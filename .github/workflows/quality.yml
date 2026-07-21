@@ -57,86 +57,32 @@ jobs:
         with:
           path: b8im-server
 
-      - name: Checkout module SDK path dependency
-        uses: actions/checkout@v4
-        with:
-          repository: guozhijian611/b8im-module-sdk
-          path: b8im-module-sdk
-
-      - name: Verify private module checkout credential
+      - name: Verify private Composer credential
         env:
           B8IM_CI_READ_TOKEN: ${{ secrets.B8IM_CI_READ_TOKEN }}
         run: |
           if [ -z "$B8IM_CI_READ_TOKEN" ]; then
-            echo "::error::B8IM_CI_READ_TOKEN is required to read private Composer path dependencies."
+            echo "::error::B8IM_CI_READ_TOKEN is required to read private Composer VCS dependencies."
             exit 1
           fi
 
-      - name: Checkout i18n module path dependency
-        uses: actions/checkout@v4
-        with:
-          repository: guozhijian611/b8im-module-i18n
-          path: b8im-module-i18n
-          token: ${{ secrets.B8IM_CI_READ_TOKEN }}
-
-      - name: Checkout favorite module path dependency
-        uses: actions/checkout@v4
-        with:
-          repository: guozhijian611/b8im-module-favorite
-          path: b8im-module-favorite
-          token: ${{ secrets.B8IM_CI_READ_TOKEN }}
-
-      - name: Checkout sticker module path dependency
-        uses: actions/checkout@v4
-        with:
-          repository: guozhijian611/b8im-module-sticker
-          path: b8im-module-sticker
-          token: ${{ secrets.B8IM_CI_READ_TOKEN }}
-
-      - name: Checkout customer service module path dependency
-        uses: actions/checkout@v4
-        with:
-          repository: guozhijian611/b8im-module-customer-service
-          path: b8im-module-customer-service
-          token: ${{ secrets.B8IM_CI_READ_TOKEN }}
-
-      - name: Checkout single robot module path dependency
-        uses: actions/checkout@v4
-        with:
-          repository: guozhijian611/b8im-module-robot-single
-          path: b8im-module-robot-single
-          token: ${{ secrets.B8IM_CI_READ_TOKEN }}
-
-      - name: Checkout file media module path dependency
-        uses: actions/checkout@v4
-        with:
-          repository: guozhijian611/b8im-module-file-media
-          path: b8im-module-file-media
-          token: ${{ secrets.B8IM_CI_READ_TOKEN }}
-
-      - name: Checkout search module path dependency
+      - name: Checkout Search migration fixture
         uses: actions/checkout@v4
         with:
           repository: guozhijian611/b8im-module-search
           path: b8im-module-search
-          ref: 57010797b91c03d684a9e76e46c7d7e7e2c7fa2e
+          ref: 9c4ad85fc7c32f9c5dabd23ebc82ab9d2a7e1769
           token: ${{ secrets.B8IM_CI_READ_TOKEN }}
+          persist-credentials: false
 
-      - name: Checkout moments module path dependency
-        uses: actions/checkout@v4
-        with:
-          repository: guozhijian611/b8im-module-moments
-          path: b8im-module-moments
-          token: ${{ secrets.B8IM_CI_READ_TOKEN }}
-
-      - name: Checkout IM migration dependency
+      - name: Checkout IM migration fixture
         uses: actions/checkout@v4
         with:
           repository: guozhijian611/b8im-im
           path: b8im-im
           ref: 918bdddf03102884f7b55037d67e03e497f8616e
 
-      - name: Checkout IM shared path dependency
+      - name: Checkout IM Shared fixture
         uses: actions/checkout@v4
         with:
           repository: guozhijian611/b8im-im-shared
@@ -164,7 +110,10 @@ jobs:
 
       - name: Install dependencies
         working-directory: b8im-server
-        run: composer install --no-interaction --prefer-dist
+        env:
+          COMPOSER_AUTH: >-
+            {"github-oauth":{"github.com":"${{ secrets.B8IM_CI_READ_TOKEN }}"}}
+        run: composer install --no-interaction --prefer-dist --no-scripts
 
       - name: Install IM migration dependencies
         working-directory: b8im-im/im-business
