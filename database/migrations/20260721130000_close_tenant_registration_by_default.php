@@ -111,7 +111,7 @@ final class CloseTenantRegistrationByDefault extends AbstractMigration
     private function assertTableShape(): void
     {
         $rows = $this->fetchAll(
-            "SELECT ENGINE,TABLE_COLLATION,ROW_FORMAT,HEX(TABLE_COMMENT) AS comment_hex"
+            "SELECT ENGINE,TABLE_COLLATION,ROW_FORMAT,CREATE_OPTIONS,HEX(TABLE_COMMENT) AS comment_hex"
             . " FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE()"
             . " AND TABLE_NAME='" . self::TABLE . "'",
         );
@@ -119,8 +119,18 @@ final class CloseTenantRegistrationByDefault extends AbstractMigration
         if (count($rows) !== 1 || strtoupper((string) ($row['ENGINE'] ?? '')) !== 'INNODB'
             || strtolower((string) ($row['TABLE_COLLATION'] ?? '')) !== 'utf8mb4_general_ci'
             || strtoupper((string) ($row['ROW_FORMAT'] ?? '')) !== 'DYNAMIC'
+            || strtolower(trim((string) ($row['CREATE_OPTIONS'] ?? ''))) !== 'row_format=dynamic'
             || strtolower((string) ($row['comment_hex'] ?? '')) !== 'e7a79fe688b7e8b4a6e58fb7e58786e585a5e7ad96e795a5') {
             throw new RuntimeException('Policy table shape drift detected.');
+        }
+        $partitions = $this->fetchAll(
+            "SELECT PARTITION_NAME,SUBPARTITION_NAME,TABLESPACE_NAME FROM information_schema.PARTITIONS"
+            . " WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='" . self::TABLE . "'",
+        );
+        if (count($partitions) !== 1 || $partitions[0]['PARTITION_NAME'] !== null
+            || $partitions[0]['SUBPARTITION_NAME'] !== null
+            || $partitions[0]['TABLESPACE_NAME'] !== null) {
+            throw new RuntimeException('Policy table partition or tablespace drift detected.');
         }
     }
 
@@ -172,23 +182,27 @@ final class CloseTenantRegistrationByDefault extends AbstractMigration
     private function assertIndexShape(): void
     {
         $rows = $this->fetchAll(
-            "SELECT INDEX_NAME,NON_UNIQUE,INDEX_TYPE,GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) AS cols"
+            "SELECT INDEX_NAME,NON_UNIQUE,INDEX_TYPE,SEQ_IN_INDEX,COLUMN_NAME,SUB_PART,"
+            . "COLLATION,IS_VISIBLE,EXPRESSION"
             . " FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE()"
-            . " AND TABLE_NAME='" . self::TABLE . "' GROUP BY INDEX_NAME,NON_UNIQUE,INDEX_TYPE ORDER BY INDEX_NAME",
+            . " AND TABLE_NAME='" . self::TABLE . "' ORDER BY INDEX_NAME,SEQ_IN_INDEX",
         );
         $actual = [];
         foreach ($rows as $row) {
-            $actual[(string) $row['INDEX_NAME']] = implode('|', [
-                $row['NON_UNIQUE'], $row['INDEX_TYPE'], $row['cols'],
+            $actual[] = implode('|', [
+                $row['INDEX_NAME'], $row['NON_UNIQUE'], $row['INDEX_TYPE'],
+                $row['SEQ_IN_INDEX'], $row['COLUMN_NAME'] ?? '<NULL>',
+                $row['SUB_PART'] ?? '<NULL>', $row['COLLATION'] ?? '<NULL>',
+                $row['IS_VISIBLE'], $row['EXPRESSION'] ?? '<NULL>',
             ]);
         }
         $expected = [
-            'PRIMARY' => '0|BTREE|id',
-            'idx_tenant_account_policy_status' => '1|BTREE|status',
-            'uk_tenant_account_policy_organization' => '0|BTREE|organization',
+            'PRIMARY|0|BTREE|1|id|<NULL>|A|YES|<NULL>',
+            'idx_tenant_account_policy_status|1|BTREE|1|status|<NULL>|A|YES|<NULL>',
+            'uk_tenant_account_policy_organization|0|BTREE|1|organization|<NULL>|A|YES|<NULL>',
         ];
-        ksort($actual);
-        ksort($expected);
+        sort($actual);
+        sort($expected);
         if ($actual !== $expected) {
             throw new RuntimeException('Policy index shape drift detected.');
         }

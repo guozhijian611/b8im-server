@@ -108,13 +108,19 @@ $inactiveGroupId = (int) Db::table('sm_tenant_group')->insertGetId([
     'create_time' => date('Y-m-d H:i:s'), 'update_time' => date('Y-m-d H:i:s'),
 ]);
 Db::table('sm_tenant_group_menu')->insert(['group_id' => $inactiveGroupId, 'menu_id' => $menuIds[0]]);
+$inactiveMappingCount = static fn (): int => (int) Db::table('sm_tenant_group_menu')
+    ->where('group_id', $inactiveGroupId)->where('menu_id', $menuIds[0])->count();
+$assert($inactiveMappingCount() === 1, 'inactive group fixture was not created exactly once');
 $permissionMigration->up();
 $assert((int) Db::table('sm_tenant_menu')->whereIn('id', $menuIds)->count() === 3, 'permission replay duplicated or removed menus');
+$assert($inactiveMappingCount() === 1, 'permission replay changed an inactive group mapping');
 Db::table('sm_tenant_group_menu')->where('group_id', $inactiveGroupId)->delete();
 Db::table('sm_tenant_group')->where('id', $inactiveGroupId)->delete();
 $activeGroupId = (int) Db::table('sm_tenant_group')->where('status', 1)->whereNull('delete_time')->value('id');
 Db::table('sm_tenant_group_menu')->insert(['group_id' => $activeGroupId, 'menu_id' => $menuIds[0]]);
 Db::table('sm_tenant_menu')->where('id', $menuIds[0])->update(['name' => 'Rollback Fixture']);
+$rollbackMenusBefore = Db::table('sm_tenant_menu')->whereIn('id', $menuIds)->order('id')->select()->toArray();
+$rollbackMappingsBefore = Db::table('sm_tenant_group_menu')->whereIn('menu_id', $menuIds)->order('id')->select()->toArray();
 $seedRollbackFailure = null;
 try {
     $permissionMigration->up();
@@ -123,12 +129,63 @@ try {
 }
 $assert($seedRollbackFailure instanceof Throwable, 'duplicate active group mapping was accepted');
 $assert((string) Db::table('sm_tenant_menu')->where('id', $menuIds[0])->value('name') === 'Rollback Fixture', 'failed seed did not roll back menu writes');
+$assert(Db::table('sm_tenant_menu')->whereIn('id', $menuIds)->order('id')->select()->toArray() === $rollbackMenusBefore,
+    'failed seed did not roll back every owned menu write');
+$assert(Db::table('sm_tenant_group_menu')->whereIn('menu_id', $menuIds)
+    ->order('id')->select()->toArray() === $rollbackMappingsBefore,
+    'failed seed did not roll back every group mapping write');
 Db::table('sm_tenant_group_menu')->where('group_id', $activeGroupId)->where('menu_id', $menuIds[0])->order('id', 'desc')->limit(1)->delete();
 $permissionMigration->up();
+$unownedMenuId = (int) Db::table('sm_tenant_menu')->insertGetId([
+    'organization' => 0, 'parent_id' => (int) $page['parent_id'],
+    'name' => 'Unowned Account Policy Fixture', 'code' => 'system/unowned-account-policy-fixture',
+    'type' => 2, 'path' => 'unowned-account-policy-fixture', 'sort' => 999,
+    'is_hidden' => 2, 'status' => 1,
+    'create_time' => date('Y-m-d H:i:s'), 'update_time' => date('Y-m-d H:i:s'),
+]);
+Db::table('sm_tenant_group_menu')->insert(['group_id' => $activeGroupId, 'menu_id' => $unownedMenuId]);
 $permissionMigration->down();
 $assert((int) Db::table('sm_tenant_menu')->whereIn('id', $menuIds)->count() === 0, 'permission down retained owned menus');
 $assert((int) Db::table('sm_tenant_group_menu')->whereIn('menu_id', $menuIds)->count() === 0, 'permission down retained mappings');
+$assert((int) Db::table('sm_tenant_menu')->where('id', $unownedMenuId)->count() === 1, 'permission down removed an unowned menu');
+$assert((int) Db::table('sm_tenant_group_menu')->where('menu_id', $unownedMenuId)->count() === 1, 'permission down removed an unowned mapping');
+Db::table('sm_tenant_group_menu')->where('menu_id', $unownedMenuId)->delete();
+Db::table('sm_tenant_menu')->where('id', $unownedMenuId)->delete();
 $permissionMigration->up();
+$hostilePage = Db::table('sm_tenant_menu')->where('organization', 0)
+    ->where('code', 'system/account-policy')->whereNull('delete_time')->find();
+$hostileButtons = Db::table('sm_tenant_menu')->where('organization', 0)
+    ->whereIn('slug', ['saimulti:tenant:account:policy:read', 'saimulti:tenant:account:policy:update'])
+    ->whereNull('delete_time')->select()->toArray();
+$assert(is_array($hostilePage) && count($hostileButtons) === 2, 'hostile menu fixtures were unavailable');
+$menuDrift = [
+    'parent_id' => 0, 'name' => 'Hostile Menu', 'module_key' => 'hostile',
+    'type' => 1, 'path' => 'hostile', 'component' => 'hostile', 'method' => 'POST',
+    'icon' => 'hostile', 'sort' => 999, 'link_url' => 'https://hostile.invalid',
+    'is_iframe' => 1, 'is_keep_alive' => 1, 'is_hidden' => 1,
+    'is_fixed_tab' => 1, 'is_full_page' => 1, 'generate_id' => 999,
+    'generate_key' => 'hostile', 'status' => 2, 'remark' => 'hostile',
+];
+Db::table('sm_tenant_menu')->where('id', (int) $hostilePage['id'])
+    ->update(array_replace($menuDrift, ['slug' => 'hostile-page-slug']));
+foreach ($hostileButtons as $hostileButton) {
+    Db::table('sm_tenant_menu')->where('id', (int) $hostileButton['id'])
+        ->update(array_replace($menuDrift, ['code' => 'hostile-button-code']));
+}
+$permissionMigration->up();
+$repairedPage = Db::table('sm_tenant_menu')->where('id', (int) $hostilePage['id'])->find();
+$assert((string) $repairedPage['name'] === '账号注册策略'
+    && (int) $repairedPage['parent_id'] === (int) $page['parent_id']
+    && $repairedPage['slug'] === null && $repairedPage['module_key'] === null
+    && $repairedPage['method'] === null && $repairedPage['link_url'] === null
+    && (int) $repairedPage['is_keep_alive'] === 2
+    && (int) $repairedPage['generate_id'] === 0
+    && $repairedPage['generate_key'] === null && $repairedPage['remark'] === null,
+    'permission replay did not reset the complete page contract');
+$permissionMigration->up();
+$assert((int) Db::table('sm_tenant_menu')->where('organization', 0)
+    ->whereIn('slug', ['saimulti:tenant:account:policy:read', 'saimulti:tenant:account:policy:update'])
+    ->whereNull('delete_time')->count() === 2, 'permission replay duplicated hostile buttons');
 Db::execute("ALTER TABLE `sm_tenant_account_policy` MODIFY COLUMN `register_enabled` tinyint(3) UNSIGNED NOT NULL DEFAULT 1 COMMENT '是否开放注册'");
 Db::execute('ALTER TABLE `sm_tenant_account_policy` DROP COLUMN `version`');
 $shapeFailure = null;
@@ -182,6 +239,21 @@ $expectShapeFailure(
     'missing policy index',
 );
 $expectShapeFailure(
+    'ALTER TABLE sm_tenant_account_policy DROP INDEX idx_tenant_account_policy_status, ADD INDEX idx_tenant_account_policy_status (status(1)) USING BTREE',
+    'ALTER TABLE sm_tenant_account_policy DROP INDEX idx_tenant_account_policy_status, ADD INDEX idx_tenant_account_policy_status (status) USING BTREE',
+    'prefix policy index',
+);
+$expectShapeFailure(
+    'ALTER TABLE sm_tenant_account_policy DROP INDEX idx_tenant_account_policy_status, ADD INDEX idx_tenant_account_policy_status (status DESC) USING BTREE INVISIBLE',
+    'ALTER TABLE sm_tenant_account_policy DROP INDEX idx_tenant_account_policy_status, ADD INDEX idx_tenant_account_policy_status (status) USING BTREE VISIBLE',
+    'descending invisible policy index',
+);
+$expectShapeFailure(
+    'ALTER TABLE sm_tenant_account_policy STATS_PERSISTENT=1',
+    'ALTER TABLE sm_tenant_account_policy STATS_PERSISTENT=DEFAULT',
+    'unexpected policy table option',
+);
+$expectShapeFailure(
     "ALTER TABLE sm_tenant_account_policy COMMENT='drift'",
     "ALTER TABLE sm_tenant_account_policy COMMENT='租户账号准入策略'",
     'wrong table shape',
@@ -196,6 +268,24 @@ $expectShapeFailure(
     'ALTER TABLE sm_tenant_account_policy DROP CHECK chk_account_policy_hostile',
     'unexpected policy check constraint',
 );
+$expectShapeFailure(
+    'ALTER TABLE sm_tenant_account_policy ADD CONSTRAINT fk_account_policy_hostile FOREIGN KEY (organization) REFERENCES sm_system_organization(id)',
+    'ALTER TABLE sm_tenant_account_policy DROP FOREIGN KEY fk_account_policy_hostile',
+    'unexpected policy foreign key',
+);
+Db::execute('UPDATE sm_tenant_account_policy SET id=9223372036854775808 WHERE organization=1');
+$oversizedIdDefault = $columnDefault();
+$oversizedIdFailure = null;
+try {
+    $registrationCloseMigration->up();
+} catch (Throwable $throwable) {
+    $oversizedIdFailure = $throwable;
+} finally {
+    Db::execute('UPDATE sm_tenant_account_policy SET id=1 WHERE id=9223372036854775808');
+    Db::execute('ALTER TABLE sm_tenant_account_policy AUTO_INCREMENT=2');
+}
+$assert($oversizedIdFailure instanceof Throwable, 'PHP-integer-unsafe policy id was accepted');
+$assert($columnDefault() === $oversizedIdDefault, 'PHP-integer-unsafe policy id mutated the default before failing');
 $expectDataFailure = static function (int $enabled, string $version, string $message) use (
     $registrationCloseMigration, $columnDefault, $assert,
 ): void {

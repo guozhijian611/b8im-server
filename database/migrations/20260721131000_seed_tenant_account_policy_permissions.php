@@ -126,8 +126,11 @@ final class SeedTenantAccountPolicyPermissions extends AbstractMigration
             'slug' => null, 'module_key' => null, 'type' => 2,
             'path' => 'account-policy',
             'component' => '/system/account-policy/index',
-            'icon' => 'ri:user-settings-line', 'sort' => 70,
-            'is_hidden' => 2, 'status' => 1,
+            'method' => null, 'icon' => 'ri:user-settings-line', 'sort' => 70,
+            'link_url' => null, 'is_iframe' => 2, 'is_keep_alive' => 2,
+            'is_hidden' => 2, 'is_fixed_tab' => 2, 'is_full_page' => 2,
+            'generate_id' => 0, 'generate_key' => null,
+            'status' => 1, 'remark' => null, 'delete_time' => null,
         ];
         return $this->saveMenu($rows, $payload);
     }
@@ -141,8 +144,12 @@ final class SeedTenantAccountPolicyPermissions extends AbstractMigration
         return $this->saveMenu($rows, [
             'parent_id' => $pageId, 'name' => $name,
             'code' => null, 'slug' => $slug, 'module_key' => null,
-            'type' => 3, 'path' => null, 'component' => null,
-            'icon' => null, 'sort' => 0, 'is_hidden' => 1, 'status' => 1,
+            'type' => 3, 'path' => null, 'component' => null, 'method' => null,
+            'icon' => null, 'sort' => 0, 'link_url' => null,
+            'is_iframe' => 2, 'is_keep_alive' => 2, 'is_hidden' => 1,
+            'is_fixed_tab' => 2, 'is_full_page' => 2,
+            'generate_id' => 0, 'generate_key' => null,
+            'status' => 1, 'remark' => null, 'delete_time' => null,
         ]);
     }
 
@@ -182,17 +189,50 @@ final class SeedTenantAccountPolicyPermissions extends AbstractMigration
             || (int) $page['is_hidden'] !== 2 || (int) $page['status'] !== 1) {
             throw new RuntimeException('Account policy page postcondition failed.');
         }
+        $root = $this->fetchRow(
+            "SELECT id FROM sm_tenant_menu WHERE organization=0 AND code='system'"
+            . ' AND type=1 AND status=1 AND delete_time IS NULL',
+        );
+        if (!$root) {
+            throw new RuntimeException('Account policy root postcondition failed.');
+        }
+        $this->assertMenuFields($page, [
+            'organization' => 0, 'parent_id' => (int) $root['id'],
+            'name' => hex2bin('e8b4a6e58fb7e6b3a8e5868ce7ad96e795a5'),
+            'code' => self::PAGE_CODE, 'slug' => null, 'module_key' => null,
+            'type' => 2, 'path' => 'account-policy',
+            'component' => '/system/account-policy/index', 'method' => null,
+            'icon' => 'ri:user-settings-line', 'sort' => 70, 'link_url' => null,
+            'is_iframe' => 2, 'is_keep_alive' => 2, 'is_hidden' => 2,
+            'is_fixed_tab' => 2, 'is_full_page' => 2,
+            'generate_id' => 0, 'generate_key' => null, 'status' => 1,
+            'remark' => null, 'delete_time' => null,
+        ], 'Account policy page');
         $groupCount = (int) $this->fetchRow(
             'SELECT COUNT(*) AS c FROM sm_tenant_group WHERE status=1 AND delete_time IS NULL',
         )['c'];
         $this->assertGroupMappings($pageId, $groupCount);
-        foreach ([self::READ_SLUG, self::UPDATE_SLUG] as $slug) {
+        $permissions = [
+            self::READ_SLUG => hex2bin('e8afbbe58f96e8b4a6e58fb7e6b3a8e5868ce7ad96e795a5'),
+            self::UPDATE_SLUG => hex2bin('e69bb4e696b0e8b4a6e58fb7e6b3a8e5868ce7ad96e795a5'),
+        ];
+        foreach ($permissions as $slug => $name) {
             $rows = $this->activeRows('slug', $slug);
             if (count($rows) !== 1 || (int) $rows[0]['parent_id'] !== $pageId
                 || (int) $rows[0]['type'] !== 3 || (int) $rows[0]['is_hidden'] !== 1
                 || (int) $rows[0]['status'] !== 1) {
                 throw new RuntimeException("Permission {$slug} postcondition failed.");
             }
+            $this->assertMenuFields($rows[0], [
+                'organization' => 0, 'parent_id' => $pageId, 'name' => $name,
+                'code' => null, 'slug' => $slug, 'module_key' => null,
+                'type' => 3, 'path' => null, 'component' => null, 'method' => null,
+                'icon' => null, 'sort' => 0, 'link_url' => null,
+                'is_iframe' => 2, 'is_keep_alive' => 2, 'is_hidden' => 1,
+                'is_fixed_tab' => 2, 'is_full_page' => 2,
+                'generate_id' => 0, 'generate_key' => null, 'status' => 1,
+                'remark' => null, 'delete_time' => null,
+            ], "Permission {$slug}");
             $this->assertGroupMappings((int) $rows[0]['id'], $groupCount);
         }
     }
@@ -206,6 +246,20 @@ final class SeedTenantAccountPolicyPermissions extends AbstractMigration
         );
         if ((int) ($row['c'] ?? -1) !== $expected || (int) ($row['distinct_c'] ?? -1) !== $expected) {
             throw new RuntimeException("Menu {$menuId} group mapping postcondition failed.");
+        }
+    }
+
+    /** @param array<string,mixed> $row @param array<string,mixed> $expected */
+    private function assertMenuFields(array $row, array $expected, string $label): void
+    {
+        foreach ($expected as $field => $value) {
+            $actual = $row[$field] ?? null;
+            if (is_int($value)) {
+                $actual = (int) $actual;
+            }
+            if ($actual !== $value) {
+                throw new RuntimeException("{$label} field {$field} postcondition failed.");
+            }
         }
     }
 
