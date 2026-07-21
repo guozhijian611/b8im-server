@@ -21,6 +21,7 @@ interface SearchConsumerTransportInterface
         string $body,
         string $routingKey,
         array $headers,
+        string $messageId,
         int $retryTier,
     ): void;
 

@@ -25,8 +25,8 @@ final class ModuleAuditWriter
         ?int $organization = null,
         ?string $errorMessage = null,
         array $context = [],
-    ): void {
-        Db::table('sm_module_lifecycle_audit')->insert([
+    ): string {
+        return (string) Db::table('sm_module_lifecycle_audit')->insertGetId([
             'module_key' => $moduleKey,
             'organization' => $organization,
             'operation' => $operation,

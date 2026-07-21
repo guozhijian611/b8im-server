@@ -8,6 +8,7 @@ use B8im\Module\Search\Consumer\AccessDecider;
 use B8im\Module\Search\Consumer\AccessDecision;
 use B8im\Module\Search\Consumer\MessageEventHandler;
 use B8im\Module\Search\Consumer\ProjectionWriter;
+use B8im\ImShared\Protocol\Dto\SearchProjectionEvent;
 use B8im\ModuleSdk\State\SystemModuleStatus;
 use B8im\ModuleSdk\State\TenantModuleStatus;
 use plugin\saimulti\process\SearchConsumerProcess;
@@ -23,6 +24,7 @@ use plugin\saimulti\service\searchConsumer\SearchAmqpConnectionFactoryInterface;
 use plugin\saimulti\service\searchConsumer\SearchAmqpConnectionInterface;
 use plugin\saimulti\service\searchConsumer\SearchConsumerConfig;
 use plugin\saimulti\service\searchConsumer\SearchConsumerDelivery;
+use plugin\saimulti\service\searchConsumer\SearchConsumerGateInterface;
 use plugin\saimulti\service\searchConsumer\SearchConsumerHeartbeatKey;
 use plugin\saimulti\service\searchConsumer\SearchConsumerHeartbeatStoreInterface;
 use plugin\saimulti\service\searchConsumer\SearchConsumerReadinessReader;
@@ -120,6 +122,22 @@ final class SearchConsumerFakeHeartbeat implements SearchConsumerHeartbeatStoreI
     }
 }
 
+final class SearchConsumerFakeGate implements SearchConsumerGateInterface
+{
+    public int $checks = 0;
+
+    public function __construct(public bool $allowed = true)
+    {
+    }
+
+    public function canFetch(): bool
+    {
+        ++$this->checks;
+
+        return $this->allowed;
+    }
+}
+
 final class SearchConsumerFakeTransport implements SearchConsumerTransportInterface
 {
     /** @var list<SearchConsumerDelivery> */
@@ -128,7 +146,7 @@ final class SearchConsumerFakeTransport implements SearchConsumerTransportInterf
     /** @var list<string> */
     public array $events = [];
 
-    /** @var list<array{body:string,routing_key:string,headers:array<string,mixed>,tier:int,delay_ms:int}> */
+    /** @var list<array{body:string,routing_key:string,headers:array<string,mixed>,message_id:string,tier:int,delay_ms:int}> */
     public array $published = [];
 
     public ?SearchConsumerTopology $topology = null;
@@ -181,13 +199,20 @@ final class SearchConsumerFakeTransport implements SearchConsumerTransportInterf
         $this->events[] = 'nack-requeue:' . $delivery->token;
     }
 
-    public function publishRetry(string $body, string $routingKey, array $headers, int $retryTier): void
+    public function publishRetry(
+        string $body,
+        string $routingKey,
+        array $headers,
+        string $messageId,
+        int $retryTier,
+    ): void
     {
         $this->events[] = 'publish-confirm:' . $deliveryToken = ($headers[SearchConsumerRuntime::RETRY_COUNT_HEADER] ?? 'missing');
         $this->published[] = [
             'body' => $body,
             'routing_key' => $routingKey,
             'headers' => $headers,
+            'message_id' => $messageId,
             'tier' => $retryTier,
             'delay_ms' => $this->topology?->retryTier($retryTier)['delay_ms'] ?? -1,
         ];
@@ -230,14 +255,25 @@ final class SearchConsumerFakeWriter implements ProjectionWriter
 
     public bool $fail = false;
 
+    /** @var list<array{int,string}> */
+    public array $denials = [];
+
     public ?Closure $onWrite = null;
 
-    public function write(int $organization, string $messageId): void
+    public function write(SearchProjectionEvent $event): void
     {
-        $this->writes[] = [$organization, $messageId];
+        $this->writes[] = [$event->organization, $event->messageId];
         if ($this->onWrite !== null) {
             ($this->onWrite)();
         }
+        if ($this->fail) {
+            throw new RuntimeException('database transient failure');
+        }
+    }
+
+    public function deny(SearchProjectionEvent $event): void
+    {
+        $this->denials[] = [$event->organization, $event->messageId];
         if ($this->fail) {
             throw new RuntimeException('database transient failure');
         }
@@ -259,7 +295,7 @@ final class SearchConsumerAccessStore implements ModuleAccessStoreInterface
         $this->snapshot = [
             'module_key' => 'search',
             'module_status' => SystemModuleStatus::ENABLED->value,
-            'module_version' => '0.3.0',
+            'module_version' => '0.4.0',
             'module_lock_version' => 1,
             'platforms' => ['server'],
             'capabilities' => ['server' => ['search.index.write']],
@@ -328,6 +364,11 @@ final class SearchConsumerProjectionService implements SearchDocumentProjectionS
     public array $writes = [];
 
     public function upsertMessageDocument(int $homeOrganization, string $messageId): array
+    {
+        return $this->projectMessageDocumentLocked($homeOrganization, $messageId);
+    }
+
+    public function projectMessageDocumentLocked(int $homeOrganization, string $messageId): array
     {
         $this->writes[] = [$homeOrganization, $messageId];
 
@@ -436,6 +477,7 @@ final class SearchConsumerFakeAmqpChannel implements SearchAmqpChannelInterface
     public function publish(
         string $body,
         array $headers,
+        string $messageId,
         string $exchange,
         string $routingKey,
         bool $mandatory,
@@ -444,6 +486,7 @@ final class SearchConsumerFakeAmqpChannel implements SearchAmqpChannelInterface
         $this->events[] = [
             'publish' => $body,
             'headers' => $headers,
+            'message_id' => $messageId,
             'exchange' => $exchange,
             'routing_key' => $routingKey,
             'mandatory' => $mandatory,
@@ -553,20 +596,35 @@ $configValues = static fn (): array => [
     'heartbeat_ttl_seconds' => 15,
 ];
 $eventBody = static fn (string $messageId = 'message-1'): string => json_encode([
+    'event_contract' => SearchProjectionEvent::CONTRACT,
     'event_id' => str_repeat('a', 64),
-    'event_type' => 'message.created',
     'organization' => 9,
+    'event_type' => 'message.created',
+    'source_event_seq' => '1',
     'message_id' => $messageId,
-    'content' => 'untrusted MQ body',
-    'sender_id' => 'untrusted-sender',
-    'conversation_id' => 'untrusted-conversation',
 ], JSON_THROW_ON_ERROR);
-$delivery = static fn (
+$delivery = static function (
     int $token,
     string $body,
     array $headers = [],
     string $routingKey = 'message.created',
-): SearchConsumerDelivery => new SearchConsumerDelivery($token, $body, $routingKey, $headers);
+    ?string $brokerMessageId = null,
+): SearchConsumerDelivery {
+    $payload = json_decode($body, true);
+    if (is_array($payload) && !array_is_list($payload)) {
+        $identityHeaders = array_intersect_key($payload, array_flip(SearchProjectionEvent::FIELDS));
+        $headers = array_replace($identityHeaders, $headers);
+        $brokerMessageId ??= is_string($payload['event_id'] ?? null) ? $payload['event_id'] : null;
+    }
+
+    return new SearchConsumerDelivery(
+        $token,
+        $body,
+        $routingKey,
+        $headers,
+        $brokerMessageId,
+    );
+};
 $build = static function (
     ?SearchConsumerFakeTransport $transport = null,
     ?SearchConsumerFakeHeartbeat $heartbeat = null,
@@ -574,6 +632,7 @@ $build = static function (
     ?SearchConsumerFakeAccess $access = null,
     ?SearchConsumerFakeWriter $writer = null,
     ?array $values = null,
+    ?SearchConsumerFakeGate $gate = null,
 ) use ($configValues): array {
     $config = SearchConsumerConfig::fromArray($values ?? $configValues());
     $transport ??= new SearchConsumerFakeTransport();
@@ -587,6 +646,7 @@ $build = static function (
         $heartbeat,
         $clock,
         new MessageEventHandler($access, $writer),
+        $gate,
     );
 
     return [$runtime, $config, $transport, $heartbeat, $clock, $access, $writer];
@@ -653,17 +713,31 @@ $protocolTransport = new PhpAmqpLibSearchConsumerTransport(
 );
 $protocolTransport->open($config->topology, 1);
 $assert(in_array('confirm-select', $protocolChannel->events, true), 'transport open 未启用 publisher confirm_select');
-$protocolTransport->publishRetry('protocol-body', 'message.created', ['traceparent' => 'trace'], 2);
+$protocolMessageId = str_repeat('b', 64);
+$protocolTransport->publishRetry(
+    'protocol-body',
+    'message.created',
+    ['traceparent' => 'trace'],
+    $protocolMessageId,
+    2,
+);
 $protocolPublish = array_values(array_filter($protocolChannel->events, static fn (mixed $event): bool => is_array($event) && array_key_exists('publish', $event)))[0];
 $assert($protocolPublish['mandatory'] === true, 'retry publish 未使用 mandatory=true');
 $assert($protocolPublish['persistent'] === true, 'retry publish 未使用 persistent delivery mode');
 $assert($protocolPublish['exchange'] === $retryTiers[1]['exchange'], 'retry publish 未选择对应 tier exchange');
+$assert($protocolPublish['message_id'] === $protocolMessageId, 'retry publish 未保留 broker message_id');
 $assert(!array_key_exists('expiration', $protocolPublish), 'retry publish 仍使用 per-message expiration');
 $assertEvents($protocolChannel->events, ['wait-confirm:2', 'publisher-ack'], 'retry publish 未等待 broker confirm');
 foreach (['nack', 'return', 'timeout'] as $confirmOutcome) {
     $protocolChannel->confirmOutcome = $confirmOutcome;
     try {
-        $protocolTransport->publishRetry('failure-' . $confirmOutcome, 'message.created', [], 1);
+        $protocolTransport->publishRetry(
+            'failure-' . $confirmOutcome,
+            'message.created',
+            [],
+            $protocolMessageId,
+            1,
+        );
         throw new RuntimeException($confirmOutcome . ' 未令 publisher 抛错');
     } catch (RuntimeException $exception) {
         $assert($exception->getMessage() !== $confirmOutcome . ' 未令 publisher 抛错', $confirmOutcome . ' 未令 publisher 抛错');
@@ -751,7 +825,8 @@ $transport->deliveries[] = $delivery(2, $eventBody('message-denied'));
 $runtime->start();
 $runtime->tick();
 $assert($writer->writes === [], 'DENIED 仍写搜索投影');
-$assertEvents($transport->events, ['next', 'ack:2'], 'DENIED 未直接 ACK');
+$assert($writer->denials === [[9, 'message-denied']], 'DENIED 未持久化 rebuild-required fence');
+$assertEvents($transport->events, ['next', 'ack:2'], 'DENIED fence 成功后未 ACK');
 
 $unavailableAccess = new SearchConsumerFakeAccess(AccessDecision::UNAVAILABLE);
 [$runtime, , $transport] = $build(access: $unavailableAccess);
@@ -761,7 +836,11 @@ $runtime->start();
 $runtime->tick();
 $assertEvents($transport->events, ['next', 'publish-confirm:1', 'ack:3'], 'UNAVAILABLE 未在 confirm 后 ACK');
 $assert($transport->published[0]['body'] === $body && $transport->published[0]['routing_key'] === 'message.created', 'retry 未保留原 body/routing key');
-$assert($transport->published[0]['headers'] === ['traceparent' => 'trace-value', SearchConsumerRuntime::RETRY_COUNT_HEADER => 1], 'retry header 未严格自增或未保留已有 header');
+$expectedRetryHeaders = json_decode($body, true, flags: JSON_THROW_ON_ERROR);
+$expectedRetryHeaders['traceparent'] = 'trace-value';
+$expectedRetryHeaders[SearchConsumerRuntime::RETRY_COUNT_HEADER] = 1;
+$assert($transport->published[0]['headers'] === $expectedRetryHeaders, 'retry header 未严格自增或未保留已有 header');
+$assert($transport->published[0]['message_id'] === str_repeat('a', 64), 'retry 未保留 broker message_id');
 $assert($transport->published[0]['tier'] === 1 && $transport->published[0]['delay_ms'] === 1000, '首次 retry tier/延迟错误');
 
 $failingWriter = new SearchConsumerFakeWriter();
@@ -786,6 +865,45 @@ $transport->deliveries[] = $delivery(6, '{not-json');
 $runtime->start();
 $runtime->tick();
 $assertEvents($transport->events, ['next', 'reject:6'], 'poison JSON 未 reject(no requeue)');
+
+$strictPayload = json_decode($eventBody('strict-extra-field'), true, flags: JSON_THROW_ON_ERROR);
+$strictPayload['content'] = 'must not cross the authoritative event contract';
+[$runtime, , $transport] = $build();
+$transport->deliveries[] = $delivery(63, json_encode($strictPayload, JSON_THROW_ON_ERROR));
+$runtime->start();
+$runtime->tick();
+$assert(in_array('reject:63', $transport->events, true), '额外 body 字段未按 poison 进入 DLQ');
+
+[$runtime, , $transport] = $build();
+$transport->deliveries[] = $delivery(
+    64,
+    $eventBody('strict-header-mismatch'),
+    ['event_id' => str_repeat('b', 64)],
+);
+$runtime->start();
+$runtime->tick();
+$assert(in_array('reject:64', $transport->events, true), 'header/body identity 不一致未进入 DLQ');
+
+[$runtime, , $transport] = $build();
+$transport->deliveries[] = $delivery(
+    65,
+    $eventBody('strict-property-mismatch'),
+    brokerMessageId: str_repeat('b', 64),
+);
+$runtime->start();
+$runtime->tick();
+$assert(in_array('reject:65', $transport->events, true), 'broker message_id/event_id 不一致未进入 DLQ');
+
+$deniedFailWriter = new SearchConsumerFakeWriter();
+$deniedFailWriter->fail = true;
+[$runtime, , $transport] = $build(
+    access: new SearchConsumerFakeAccess(AccessDecision::DENIED),
+    writer: $deniedFailWriter,
+);
+$transport->deliveries[] = $delivery(66, $eventBody('denied-fence-failure'));
+$runtime->start();
+$runtime->tick();
+$assertEvents($transport->events, ['next', 'publish-confirm:1', 'ack:66'], 'DENIED fence 失败未进入 retry');
 
 $poisonFenceHeartbeat = new SearchConsumerFakeHeartbeat();
 [$poisonOwnerRuntime, $poisonOwnerConfig, $poisonOwnerTransport] = $build(heartbeat: $poisonFenceHeartbeat);
@@ -952,6 +1070,45 @@ unset($heartbeat->values[$heartbeatConfig->heartbeatRedisKey]);
 $runtime->tick();
 $assert(in_array('ack:23', $transport->events, true), 'heartbeat TTL 消失后失主实例未以 NX 重新 claim 并继续消费');
 
+$gatedHeartbeat = new SearchConsumerFakeHeartbeat();
+$gatedClock = new SearchConsumerFakeClock();
+$gatedTransport = new SearchConsumerFakeTransport();
+$closedGate = new SearchConsumerFakeGate(false);
+[$gatedRuntime, $gatedConfig] = $build(
+    transport: $gatedTransport,
+    heartbeat: $gatedHeartbeat,
+    clock: $gatedClock,
+    gate: $closedGate,
+);
+$gatedRuntime->start();
+$gatedClock->timestamp += $gatedConfig->heartbeatTtlSeconds + 1;
+$gatedClock->monotonicTimeMs += ($gatedConfig->heartbeatTtlSeconds + 1) * 1000;
+$gatedRuntime->tick();
+$firstGatedHeartbeat = json_decode(
+    (string) ($gatedHeartbeat->values[$gatedConfig->heartbeatRedisKey] ?? ''),
+    true,
+    flags: JSON_THROW_ON_ERROR,
+);
+$gatedClock->timestamp += $gatedConfig->heartbeatTtlSeconds + 1;
+$gatedClock->monotonicTimeMs += ($gatedConfig->heartbeatTtlSeconds + 1) * 1000;
+$gatedRuntime->tick();
+$secondGatedHeartbeat = json_decode(
+    (string) ($gatedHeartbeat->values[$gatedConfig->heartbeatRedisKey] ?? ''),
+    true,
+    flags: JSON_THROW_ON_ERROR,
+);
+$assert(
+    $gatedTransport->nextCount === 0
+    && $closedGate->checks === 2
+    && ($firstGatedHeartbeat['updated_at'] ?? null) === 1_016
+    && ($secondGatedHeartbeat['updated_at'] ?? null) === 1_032,
+    'lifecycle gate 关闭超过 heartbeat TTL 时 consumer 未续约 readiness 或错误 fetch',
+);
+$closedGate->allowed = true;
+$gatedTransport->deliveries[] = $delivery(72, $eventBody('gated-enable-resume'));
+$gatedRuntime->tick();
+$assert(in_array('ack:72', $gatedTransport->events, true), 'gate 重开后 heartbeat owner 未恢复 fetch');
+
 $heartbeatKey = $heartbeatConfig->heartbeatRedisKey;
 $newWorkerValue = '{"instance":"new-worker"}';
 $heartbeat->values[$heartbeatKey] = $newWorkerValue;
@@ -1093,8 +1250,7 @@ $assert($serverAccess->decide(9) === AccessDecision::UNAVAILABLE, 'Server search
 
 $projectionService = new SearchConsumerProjectionService();
 $serverWriter = new ServerSearchProjectionWriter($projectionService);
-$serverWriter->write(9, 'identity-only-message');
-$assert($projectionService->writes === [[9, 'identity-only-message']], 'Server projection adapter 未仅传 organization + message_id');
+$assert($serverWriter instanceof ProjectionWriter, 'Server projection writer 未实现模块原生契约');
 
 $rawRedis = new SearchConsumerRawRedis();
 $redisHeartbeat = new RedisSearchConsumerHeartbeatStore($rawRedis);

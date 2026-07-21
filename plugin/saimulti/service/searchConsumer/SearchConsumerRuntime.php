@@ -8,6 +8,7 @@ use B8im\Module\Search\Consumer\ConsumeOutcome;
 use B8im\Module\Search\Consumer\MessageEvent;
 use B8im\Module\Search\Consumer\MessageEventHandler;
 use B8im\Module\Search\Consumer\PoisonMessageException;
+use B8im\ImShared\Protocol\Dto\SearchProjectionEvent;
 use JsonException;
 use RuntimeException;
 use Throwable;
@@ -30,6 +31,7 @@ final class SearchConsumerRuntime
         private readonly SearchConsumerHeartbeatStoreInterface $heartbeat,
         private readonly ClockInterface $clock,
         private readonly MessageEventHandler $handler,
+        private readonly ?SearchConsumerGateInterface $gate = null,
     ) {
     }
 
@@ -54,13 +56,24 @@ final class SearchConsumerRuntime
             if (!$this->ensureTransport()) {
                 return;
             }
+            if (!$this->refreshHeartbeat()) {
+                return;
+            }
+            if ($this->gate !== null && !$this->gate->canFetch()) {
+                return;
+            }
             $deadlineMs = $this->clock->monotonicMilliseconds() + $this->config->maxTickDurationMs;
             for ($processed = 0; $processed < $this->config->maxMessagesPerTick; $processed++) {
                 if ($this->clock->monotonicMilliseconds() >= $deadlineMs) {
                     return;
                 }
-                if (!$this->refreshHeartbeat()) {
-                    return;
+                if ($processed > 0) {
+                    if (!$this->refreshHeartbeat()) {
+                        return;
+                    }
+                    if ($this->gate !== null && !$this->gate->canFetch()) {
+                        return;
+                    }
                 }
                 $delivery = $this->transport->next();
                 if ($delivery === null) {
@@ -103,6 +116,7 @@ final class SearchConsumerRuntime
         try {
             $retryCount = $this->retryCount($delivery->headers);
             $event = MessageEvent::fromJson($delivery->routingKey, $delivery->body);
+            $this->assertDeliveryIdentity($delivery, $event);
             $outcome = $this->handler->handle($event);
         } catch (PoisonMessageException) {
             return $this->rejectWhenHeartbeatHealthy($delivery);
@@ -128,6 +142,7 @@ final class SearchConsumerRuntime
                 $delivery->body,
                 $delivery->routingKey,
                 $headers,
+                $this->requiredBrokerMessageId($delivery),
                 $retryCount + 1,
             );
             return $this->ackWhenHeartbeatHealthy($delivery);
@@ -171,6 +186,44 @@ final class SearchConsumerRuntime
         }
 
         return $value;
+    }
+
+    private function assertDeliveryIdentity(
+        SearchConsumerDelivery $delivery,
+        SearchProjectionEvent $event,
+    ): void {
+        $required = [
+            'event_contract' => $event->eventContract,
+            'event_id' => $event->eventId,
+            'event_type' => $event->eventType,
+            'source_event_seq' => $event->sourceEventSeq,
+            'organization' => $event->organization,
+            'message_id' => $event->messageId,
+        ];
+        foreach ($required as $field => $expected) {
+            if (!array_key_exists($field, $delivery->headers)
+                || $delivery->headers[$field] !== $expected) {
+                throw new PoisonMessageException(
+                    'search delivery header differs from body: ' . $field,
+                );
+            }
+        }
+        if ($delivery->brokerMessageId === null
+            || !hash_equals($event->eventId, $delivery->brokerMessageId)) {
+            throw new PoisonMessageException(
+                'search AMQP message_id must equal event_id',
+            );
+        }
+    }
+
+    private function requiredBrokerMessageId(SearchConsumerDelivery $delivery): string
+    {
+        $messageId = $delivery->brokerMessageId;
+        if ($messageId === null || preg_match('/^[a-f0-9]{64}$/D', $messageId) !== 1) {
+            throw new PoisonMessageException('search AMQP message_id is missing or invalid');
+        }
+
+        return $messageId;
     }
 
     private function refreshHeartbeat(): bool

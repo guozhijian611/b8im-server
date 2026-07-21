@@ -78,13 +78,14 @@ final class PhpAmqpLibSearchConsumerTransport implements SearchConsumerTransport
         string $body,
         string $routingKey,
         array $headers,
+        string $messageId,
         int $retryTier,
     ): void {
         $channel = $this->requiredChannel();
         $topology = $this->requiredTopology();
         $tier = $topology->retryTier($retryTier);
         $this->returned = false;
-        $channel->publish($body, $headers, $tier['exchange'], $routingKey, true, true);
+        $channel->publish($body, $headers, $messageId, $tier['exchange'], $routingKey, true, true);
         $channel->waitForPublisherConfirms($this->config->confirmTimeoutSeconds);
         if ($this->returned) {
             throw new RuntimeException('RabbitMQ returned the unroutable search retry publication.');

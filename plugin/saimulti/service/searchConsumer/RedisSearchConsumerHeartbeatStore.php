@@ -4,10 +4,11 @@ declare(strict_types=1);
 
 namespace plugin\saimulti\service\searchConsumer;
 
+use B8im\Module\Search\Rebuild\HeartbeatStore;
 use RuntimeException;
 use support\think\Cache;
 
-final class RedisSearchConsumerHeartbeatStore implements SearchConsumerHeartbeatStoreInterface
+final class RedisSearchConsumerHeartbeatStore implements SearchConsumerHeartbeatStoreInterface, HeartbeatStore
 {
     private const CLAIM_OR_RENEW_LUA = <<<'LUA'
 local current = redis.call('GET', KEYS[1])

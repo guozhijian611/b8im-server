@@ -12,6 +12,7 @@ final class SearchConsumerDelivery
         public readonly string $body,
         public readonly string $routingKey,
         public readonly array $headers,
+        public readonly ?string $brokerMessageId = null,
     ) {
     }
 }

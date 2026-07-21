@@ -7,4 +7,8 @@ return [
         'handler' => plugin\saimulti\process\SearchConsumerProcess::class,
         'count' => 1,
     ],
+    'search-rebuild' => [
+        'handler' => plugin\saimulti\process\SearchRebuildProcess::class,
+        'count' => 1,
+    ],
 ];

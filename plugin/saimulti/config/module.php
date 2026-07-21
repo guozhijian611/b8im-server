@@ -63,4 +63,7 @@ return [
     'expiry_scan_interval_seconds' => max(10, (int) env('MODULE_EXPIRY_SCAN_INTERVAL_SECONDS', 60)),
     'expiry_scan_batch_size' => max(1, min(1000, (int) env('MODULE_EXPIRY_SCAN_BATCH_SIZE', 200))),
     'expiry_lock_ttl_seconds' => max(10, (int) env('MODULE_EXPIRY_LOCK_TTL_SECONDS', 55)),
+    'expiry_task_lease_seconds' => max(60, (int) env('MODULE_EXPIRY_TASK_LEASE_SECONDS', 1800)),
+    'expiry_task_retry_base_delay_seconds' => max(1, (int) env('MODULE_EXPIRY_TASK_RETRY_BASE_DELAY_SECONDS', 5)),
+    'expiry_task_retry_max_delay_seconds' => max(1, (int) env('MODULE_EXPIRY_TASK_RETRY_MAX_DELAY_SECONDS', 300)),
 ];

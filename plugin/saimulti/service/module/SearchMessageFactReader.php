@@ -103,12 +103,17 @@ final class SearchMessageFactReader
         foreach ($documents as $document) {
             $messageId = (string) $document['message_id'];
             $body = $bodyByMessage[$messageId];
-            $this->assertBinding($document, $indexByMessage[$messageId], $body);
+            $conversationType = $this->assertBinding(
+                $document,
+                $indexByMessage[$messageId],
+                $body,
+            );
             $facts[] = array_replace($document, [
                 '_projection_content' => (string) ($document['content'] ?? ''),
                 'source_change_seq' => $this->unsignedDecimal(
                     $indexByMessage[$messageId]['authoritative_source_change_seq'] ?? null,
                 ),
+                'conversation_type' => $conversationType,
                 'sender_organization' => (int) $body['sender_organization'],
                 'sender_user_id' => (string) $body['sender_id'],
                 'message_type' => (int) $body['message_type'],
@@ -206,7 +211,7 @@ final class SearchMessageFactReader
         array $document,
         array $index,
         array $body,
-    ): void {
+    ): int {
         $organization = $this->positiveOrganization($document['organization'] ?? null);
         $messageId = $this->canonicalId($document['message_id'] ?? null, 'message_id');
         $conversationId = $this->canonicalId(
@@ -223,6 +228,7 @@ final class SearchMessageFactReader
         $messageType = (int) ($document['message_type'] ?? 0);
         $bodyStatus = (int) ($body['status'] ?? 0);
         $conversationType = (int) ($index['index_conversation_type'] ?? 0);
+        $documentConversationType = (int) ($document['conversation_type'] ?? 0);
         $documentSourceChangeSeq = $this->unsignedDecimal(
             $document['source_change_seq'] ?? null,
         );
@@ -260,6 +266,8 @@ final class SearchMessageFactReader
             || $messageType !== (int) ($body['message_type'] ?? 0)
             || !MessageType::isFirstStage($messageType)
             || !in_array($conversationType, [1, 2], true)
+            || !array_key_exists('conversation_type', $document)
+            || $documentConversationType !== $conversationType
             || $conversationType !== (int) ($body['conversation_type'] ?? 0)
             || $bodyStatus !== 1
             || ($body['delete_time'] ?? null) !== null
@@ -269,6 +277,8 @@ final class SearchMessageFactReader
                 503,
             );
         }
+
+        return $conversationType;
     }
 
     /** @param list<string> $messageIds @return array{0:string,1:list<string>} */

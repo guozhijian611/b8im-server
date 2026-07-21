@@ -84,12 +84,16 @@ final class PhpAmqpLibSearchAmqpChannel implements SearchAmqpChannelInterface
             $message->getBody(),
             (string) $message->get('routing_key'),
             $headers,
+            isset($properties['message_id']) && is_string($properties['message_id'])
+                ? $properties['message_id']
+                : null,
         );
     }
 
     public function publish(
         string $body,
         array $headers,
+        string $messageId,
         string $exchange,
         string $routingKey,
         bool $mandatory,
@@ -97,6 +101,7 @@ final class PhpAmqpLibSearchAmqpChannel implements SearchAmqpChannelInterface
     ): void {
         $message = new AMQPMessage($body, [
             'content_type' => 'application/json',
+            'message_id' => $messageId,
             'delivery_mode' => $persistent
                 ? AMQPMessage::DELIVERY_MODE_PERSISTENT
                 : AMQPMessage::DELIVERY_MODE_NON_PERSISTENT,

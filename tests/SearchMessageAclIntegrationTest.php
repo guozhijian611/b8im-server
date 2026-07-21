@@ -149,20 +149,29 @@ CREATE TABLE sm_search_index (
  id bigint unsigned AUTO_INCREMENT PRIMARY KEY, organization int unsigned NOT NULL,
  backend varchar(32) NOT NULL, status varchar(20) NOT NULL, doc_count bigint unsigned NOT NULL,
  last_built_at datetime NULL, last_error varchar(500) NOT NULL DEFAULT '',
+ rebuild_required tinyint unsigned NOT NULL DEFAULT 1,
+ lifecycle_fenced tinyint unsigned NOT NULL DEFAULT 1,
  created_by int unsigned NULL, updated_by int unsigned NULL,
  create_time datetime NULL, update_time datetime NULL, delete_time datetime NULL,
  UNIQUE KEY uni_org (organization)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+CREATE TABLE sm_search_projection_checkpoint (
+ organization int unsigned PRIMARY KEY,
+ reconciled_through_event_seq bigint unsigned NOT NULL DEFAULT 0,
+ create_time datetime NULL, update_time datetime NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 CREATE TABLE sm_search_doc (
  id bigint unsigned AUTO_INCREMENT PRIMARY KEY, organization int unsigned NOT NULL,
  message_id varchar(64) NOT NULL, conversation_id varchar(64) NOT NULL,
+ conversation_type tinyint unsigned NOT NULL COMMENT '1单聊,2群聊',
  sender_organization int unsigned NOT NULL, sender_user_id varchar(64) NOT NULL,
  message_type int unsigned NOT NULL,
  message_seq bigint unsigned NOT NULL,
  source_change_seq bigint unsigned NOT NULL DEFAULT 0,
  content text NOT NULL, visibility tinyint unsigned NOT NULL,
  sent_at datetime NULL, create_time datetime NULL, update_time datetime NULL,
- UNIQUE KEY uni_org_message (organization, message_id), FULLTEXT KEY ft_content (content)
+ UNIQUE KEY uni_org_message (organization, message_id), FULLTEXT KEY ft_content (content),
+ CONSTRAINT chk_search_doc_conversation_type CHECK (conversation_type IN (1,2))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 CREATE TABLE im_message_index (
  id bigint unsigned AUTO_INCREMENT PRIMARY KEY, organization int unsigned NOT NULL,
@@ -228,8 +237,9 @@ SQL);
         . '(1,"cross_org_social_enabled","1"),(1,"cross_org_access_snapshot_id","1")',
     );
     $pdo->exec(
-        'INSERT INTO sm_search_index (organization,backend,status,doc_count) '
-        . 'VALUES (101,"mysql","ready",0),(202,"mysql","ready",0)',
+        'INSERT INTO sm_search_index '
+        . '(organization,backend,status,doc_count,rebuild_required,lifecycle_fenced) '
+        . 'VALUES (101,"mysql","ready",0,0,0),(202,"mysql","ready",0,0,0)',
     );
     $pdo->exec(
         'INSERT INTO im_runtime_config (config_key,config_value) '
@@ -252,9 +262,10 @@ SQL);
     );
     $document = $pdo->prepare(
         'INSERT INTO sm_search_doc '
-        . '(organization,message_id,conversation_id,sender_organization,sender_user_id,'
+        . '(organization,message_id,conversation_id,conversation_type,'
+        . 'sender_organization,sender_user_id,'
         . 'message_type,message_seq,content,visibility,sent_at) '
-        . 'VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)',
+        . 'VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)',
     );
     $messageIndex = $pdo->prepare(
         'INSERT INTO im_message_index '
@@ -321,7 +332,7 @@ SQL);
         $typeStatement->execute([$organization, $conversationId]);
         $conversationType = (int) ($typeStatement->fetchColumn() ?: 2);
         $document->execute([
-            $organization, $messageId, $conversationId,
+            $organization, $messageId, $conversationId, $conversationType,
             $senderOrganization > 0 ? $senderOrganization : $organization,
             $senderUserId, $messageSeq,
             $content, $visibility, $sentAt,
@@ -803,9 +814,10 @@ SQL);
     $written = $service->upsertMessageDocument(101, 'writer-valid');
     $assert(
         $written['conversation_id'] === $writerConversation
+        && $written['conversation_type'] === 1
         && $written['sender_organization'] === 202
         && $written['sender_user_id'] === 'same_sender'
-        && $written['message_seq'] === 1
+        && $written['message_seq'] === '1'
         && $written['message_type'] === 1
         && $written['content'] === '{"text":"writer authoritative searchable"}'
         && $written['visibility'] === 1
@@ -813,16 +825,17 @@ SQL);
         'Internal writer did not derive the document from the exact index/body pair.',
     );
     $pdo->exec(
-        'UPDATE sm_search_doc SET conversation_id="forged",sender_organization=101,
+        'UPDATE sm_search_doc SET conversation_id="forged",conversation_type=2,sender_organization=101,
           sender_user_id="forged",message_seq=99,content="forged",visibility=0
          WHERE organization=101 AND message_id="writer-valid"',
     );
     $rewritten = $service->upsertMessageDocument(101, 'writer-valid');
     $assert(
         $rewritten['conversation_id'] === $writerConversation
+        && $rewritten['conversation_type'] === 1
         && $rewritten['sender_organization'] === 202
         && $rewritten['sender_user_id'] === 'same_sender'
-        && $rewritten['message_seq'] === 1
+        && $rewritten['message_seq'] === '1'
         && $rewritten['content'] === '{"text":"writer authoritative searchable"}'
         && $rewritten['visibility'] === 1,
         'Internal writer preserved caller-forged search document fields.',
@@ -953,6 +966,7 @@ SQL);
         101,
         $missingTableMessage,
         $activeGroup,
+        2,
         101,
         'shared',
         31,
@@ -1017,6 +1031,7 @@ SQL);
         101,
         $nullTimeMessage,
         $activeGroup,
+        2,
         101,
         'shared',
         30,
@@ -1226,7 +1241,7 @@ SQL);
     $expectApiCode(
         503,
         static fn () => $service->rebuild(101, 1),
-        'Placeholder search rebuild without a real shard worker',
+        'Search rebuild without consumer and rebuild-worker readiness',
     );
     $changeNo = 1000;
     $addMutation = static function (
@@ -1691,6 +1706,25 @@ SQL);
     );
     $pdo->prepare('UPDATE sm_search_doc SET visibility=0 WHERE message_id=?')
         ->execute([$wrongBindingMessage]);
+    $forgedProjectionTypeMessage = $addDoc(
+        101,
+        $activeGroup,
+        25,
+        'forgedprojectionconversationtype',
+    );
+    $pdo->prepare(
+        'UPDATE sm_search_doc SET conversation_type=1'
+        . ' WHERE organization=101 AND BINARY message_id=BINARY ?',
+    )->execute([$forgedProjectionTypeMessage]);
+    $expectIntegrity(
+        static fn () => $service->searchMessages(101, 'shared', [
+            'q'=>'forgedprojectionconversationtype',
+            'conversation_id'=>$activeGroup,
+        ]),
+        'Search hit with a forged projection conversation_type',
+    );
+    $pdo->prepare('UPDATE sm_search_doc SET visibility=0 WHERE message_id=?')
+        ->execute([$forgedProjectionTypeMessage]);
     $wrongConversationTypeMessage = $addDoc(
         101,
         $activeGroup,
@@ -1855,7 +1889,9 @@ SQL);
 
     $history = $service->searchMessages(101,'shared',['q'=>'x','conversation_id'=>$historyGroup]);
     $assert(
-        $history['total'] === 2 && array_column($history['data'], 'message_seq') === [7,2],
+        $history['total'] === 2
+        && array_column($history['data'], 'message_seq') === ['7','2']
+        && array_unique(array_column($history['data'], 'conversation_type')) === [2],
         'history_only did not enforce disjoint membership periods.',
     );
     $assert(
@@ -1906,7 +1942,12 @@ SQL);
     )->execute([$sameSingle]);
 
     $crossFilters = ['q'=>'x','conversation_id'=>$crossSingle];
-    $assert($service->searchMessages(101,'shared',$crossFilters)['total'] === 1, 'Valid cross chat denied.');
+    $crossResult = $service->searchMessages(101,'shared',$crossFilters);
+    $assert(
+        $crossResult['total'] === 1
+        && ($crossResult['data'][0]['conversation_type'] ?? null) === 1,
+        'Valid cross chat DTO omitted strict conversation_type.',
+    );
     $pdo->exec('UPDATE sm_system_config SET `value`="0" WHERE `key`="cross_org_social_enabled"');
     $assert($service->searchMessages(101,'shared',$crossFilters)['total'] === 0, 'Disabled policy leaked.');
     $assert(
@@ -1982,6 +2023,22 @@ SQL);
     $assert($controllerResult(WebSearchController::class,'shared')['total'] === 2, 'Web lost user_id.');
     $assert($controllerResult(WebSearchController::class,'someone_else')['total'] === 0, 'Web used org only.');
     $assert($controllerResult(AppSearchController::class,'shared')['total'] === 2, 'App lost user_id.');
+
+    $uint64Max = '18446744073709551615';
+    $maxDocument = $pdo->prepare(
+        'INSERT INTO sm_search_doc '
+        . '(id,organization,message_id,conversation_id,conversation_type,'
+        . 'sender_organization,sender_user_id,'
+        . 'message_type,message_seq,source_change_seq,content,visibility) '
+        . 'VALUES (?,101,"uint64-max-doc","uint64-boundary",2,101,"shared",1,?,0,"max",0)',
+    );
+    $maxDocument->execute([$uint64Max, $uint64Max]);
+    $maxDocumentRead = $service->hideDocument(101, 'uint64-max-doc');
+    $assert(
+        ($maxDocumentRead['id'] ?? null) === $uint64Max
+        && ($maxDocumentRead['message_seq'] ?? null) === $uint64Max,
+        'Search document max UINT64 id/message_seq was coerced during lookup/readback.',
+    );
 
     echo sprintf("SearchMessageAclIntegrationTest: %d assertions passed\n", $assertions);
 } finally {

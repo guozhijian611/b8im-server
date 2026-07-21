@@ -15,6 +15,7 @@ use plugin\saimulti\service\searchConsumer\SearchConsumerRuntime;
 use plugin\saimulti\service\searchConsumer\ServerSearchAccessDecider;
 use plugin\saimulti\service\searchConsumer\ServerSearchProjectionWriter;
 use plugin\saimulti\service\searchConsumer\SystemClock;
+use plugin\saimulti\service\searchConsumer\ThinkOrmSearchConsumerGate;
 use RuntimeException;
 use Workerman\Timer;
 
@@ -51,6 +52,7 @@ final class SearchConsumerProcess
                         new ServerSearchAccessDecider(ModuleServiceFactory::access()),
                         new ServerSearchProjectionWriter(new SearchService()),
                     ),
+                    new ThinkOrmSearchConsumerGate(),
                 );
             };
         $this->timerAdder = $timerAdder

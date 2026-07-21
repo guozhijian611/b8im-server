@@ -28,7 +28,7 @@ final class ModuleServiceFactory
         return new ModuleManager(
             self::catalog(),
             new ModuleMigrationRunner(),
-            new ModuleLifecycleHookRunner(),
+            self::lifecycleHookRunner(),
             new ModuleMenuRegistrar(),
             new ModuleDependencyGuard(),
             self::access(),
@@ -49,13 +49,22 @@ final class ModuleServiceFactory
             new RedisDistributedLock(),
             self::access(),
             new ModuleAuditWriter(),
-            new ModuleLifecycleHookRunner(),
+            self::lifecycleHookRunner(),
         );
     }
 
     public static function clientConfigProjection(): ClientConfigProjectionService
     {
         return new ClientConfigProjectionService(self::access());
+    }
+
+    private static function lifecycleHookRunner(): ModuleLifecycleHookRunner
+    {
+        return new ModuleLifecycleHookRunner(
+            optionsEnricher: new SearchLifecycleContextOptionsEnricher(
+                new SearchLifecycleFence(),
+            ),
+        );
     }
 
     private function __construct()

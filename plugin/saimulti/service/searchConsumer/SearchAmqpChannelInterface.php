@@ -31,6 +31,7 @@ interface SearchAmqpChannelInterface
     public function publish(
         string $body,
         array $headers,
+        string $messageId,
         string $exchange,
         string $routingKey,
         bool $mandatory,

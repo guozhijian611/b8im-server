@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace plugin\saimulti\service\searchConsumer;
 
-final class SystemClock implements ClockInterface
+use B8im\Module\Search\Rebuild\Clock;
+
+final class SystemClock implements ClockInterface, Clock
 {
     public function now(): int
     {
