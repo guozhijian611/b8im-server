@@ -31,6 +31,7 @@ $environment = [
     'SEARCH_ACL_TEST_DB_NAME' => "nb8im_{$suffix}_search_acl_test",
     'SEARCH_MODULE_MIGRATION_TEST_DB_NAME' => "nb8im_{$suffix}_search_module_migration_test",
     'WEB_IM_TEST_DB_NAME' => "nb8im_{$suffix}_web_test",
+    'STORAGE_QUOTA_TEST_DB_NAME' => "nb8im_{$suffix}_storage_quota_test",
 ];
 putenv('OTEL_SDK_DISABLED=true');
 $_ENV['OTEL_SDK_DISABLED'] = 'true';
@@ -69,7 +70,7 @@ if ($suite !== 'unit') {
     if (!is_string($snapshot) || $snapshot === '') {
         throw new RuntimeException('测试数据库快照为空');
     }
-    foreach (['MODULE_TEST_DB_NAME', 'MODULE_ACL_TEST_DB_NAME', 'ROUTING_TEST_DB_NAME', 'TENANT_IM_POLICY_TEST_DB_NAME', 'IM_USER_MGMT_TEST_DB_NAME', 'WEB_REGISTER_QR_TEST_DB_NAME'] as $key) {
+    foreach (['MODULE_TEST_DB_NAME', 'MODULE_ACL_TEST_DB_NAME', 'ROUTING_TEST_DB_NAME', 'TENANT_IM_POLICY_TEST_DB_NAME', 'IM_USER_MGMT_TEST_DB_NAME', 'WEB_REGISTER_QR_TEST_DB_NAME', 'STORAGE_QUOTA_TEST_DB_NAME'] as $key) {
         $database = $environment[$key];
         $admin->exec("DROP DATABASE IF EXISTS `{$database}`");
         $admin->exec("CREATE DATABASE `{$database}` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci");
@@ -115,6 +116,8 @@ $databaseByTest = [
     'WebImAccessSessionIntegrationTest.php' => 'WEB_IM_ACCESS_TEST_DB_NAME',
     'WebImControlPlaneIntegrationTest.php' => 'WEB_IM_TEST_DB_NAME',
     'WebRegistrationQrLoginIntegrationTest.php' => 'WEB_REGISTER_QR_TEST_DB_NAME',
+    'StorageQuotaUploadIntegrationTest.php' => 'STORAGE_QUOTA_TEST_DB_NAME',
+    'StorageQuotaMigrationIntegrationTest.php' => 'STORAGE_QUOTA_TEST_DB_NAME',
 ];
 foreach ($selected as $file) {
     $basename = basename($file);

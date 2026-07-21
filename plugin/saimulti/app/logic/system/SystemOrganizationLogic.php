@@ -171,6 +171,19 @@ class SystemOrganizationLogic extends BaseLogic
                 'create_time' => date('Y-m-d H:i:s'),
                 'update_time' => date('Y-m-d H:i:s'),
             ]);
+            Db::table('sm_tenant_quota')->insert([
+                'organization' => (int) $this->model->id,
+                'quota_key' => 'storage_bytes',
+                'quota_value' => 0,
+                'used_value' => 0,
+                'source' => 'system',
+                'status' => 'active',
+                'order_no' => 'organization-create',
+                'remark' => '机构存储容量，0 表示不限容量',
+                'version' => 1,
+                'create_time' => date('Y-m-d H:i:s'),
+                'update_time' => date('Y-m-d H:i:s'),
+            ]);
 
             return true;
         });

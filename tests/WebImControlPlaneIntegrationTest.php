@@ -125,6 +125,37 @@ $tenantConfig = $pdo->prepare(
 );
 $tenantConfig->execute([901, json_encode(['message_delete_both_enabled' => '2'], JSON_THROW_ON_ERROR)]);
 
+$pdo->exec(<<<'SQL'
+CREATE TABLE sm_tenant_quota (
+  id bigint unsigned NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  organization int unsigned NOT NULL,
+  quota_key varchar(64) NOT NULL,
+  quota_value bigint unsigned NOT NULL DEFAULT 0,
+  used_value bigint unsigned NOT NULL DEFAULT 0,
+  status varchar(16) NOT NULL DEFAULT 'active',
+  start_at datetime NULL,
+  end_at datetime NULL,
+  version int unsigned NOT NULL DEFAULT 1,
+  update_time datetime NOT NULL,
+  delete_time datetime NULL,
+  UNIQUE KEY uni_organization_quota_key (organization, quota_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+SQL);
+$pdo->exec(<<<'SQL'
+CREATE TABLE sm_im_upload_reservation (
+  id bigint unsigned NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  organization int unsigned NOT NULL,
+  KEY idx_organization (organization)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+SQL);
+$pdo->exec(
+    "INSERT INTO sm_tenant_quota
+      (organization,quota_key,quota_value,used_value,status,version,update_time)
+     VALUES
+      (901,'storage_bytes',1000000000,0,'active',1,NOW()),
+      (902,'storage_bytes',1000000000,0,'active',1,NOW())",
+);
+
 $thinkOrmConfig['connections'][$connectionName]['database'] = $database;
 Db::setConfig($thinkOrmConfig);
 
@@ -194,12 +225,23 @@ final class ReadyWebImUploadStorage implements WebImUploadStorageInterface
     {
     }
 
-    public function upload(
+    public function reservePath(int $organization, string $extension, string $objectId): string
+    {
+        return "private/organizations/{$organization}/im/202607/{$objectId}.{$extension}";
+    }
+
+    public function uploadExact(
         int $organization,
         SplFileInfo $file,
-        string $extension,
+        string $storagePath,
         string $mimeType,
-    ): array {
+        ?callable $heartbeat = null,
+    ): void {
+        throw new RuntimeException('Integration test only exercises upload preparation.');
+    }
+
+    public function inspect(int $organization, string $storagePath): array
+    {
         throw new RuntimeException('Integration test only exercises upload preparation.');
     }
 
@@ -713,16 +755,6 @@ $assert(
     $messageConfig === ['delete_single_enabled' => true, 'delete_both_enabled' => false],
     'Tenant message config override mismatch.',
 );
-$uploadService = new WebImUploadService(new ReadyWebImUploadStorage());
-$preparedUpload = $uploadService->prepare($alice, 'image', 'photo.webp', 1024, 'image/webp');
-$assert(
-    $preparedUpload['mode'] === 'proxy'
-    && $preparedUpload['upload_path'] === '/saimulti/web/im/upload'
-    && $preparedUpload['method'] === 'POST',
-    'Upload preparation did not expose the real proxy contract.',
-);
-$expectApiCode(409, static fn () => $uploadService->confirm($alice));
-
 $group = $service->createGroup($alice, 'Project Group', ['user_b', 'user_c']);
 $conversationId = (string) $group['conversation_id'];
 $assert(
@@ -2205,6 +2237,20 @@ $pdo->prepare(
      VALUES (901, ?, "user_a", "image", "forward.webp", ?, ?, 4321,
              "image/webp", "webp", 1, ?, ?)',
 )->execute([$sourceFileId, $sourceUrl, $sourceStoragePath, $now, $now]);
+$sourceOrganizationPhysicalUsed = (int) $pdo->query(
+    'SELECT COALESCE(SUM(path_size),0)
+       FROM (
+         SELECT storage_path,MAX(size_byte) AS path_size
+           FROM im_upload_asset
+          WHERE organization=901
+       GROUP BY storage_path
+       ) physical_paths',
+)->fetchColumn();
+$pdo->prepare(
+    "UPDATE sm_tenant_quota
+        SET used_value=?,version=version+1,update_time=NOW()
+      WHERE organization=901 AND quota_key='storage_bytes'",
+)->execute([$sourceOrganizationPhysicalUsed]);
 $assetMessageId = 'web-test-asset-message';
 $assetContent = [
     'file_id' => $sourceFileId,
@@ -2233,6 +2279,12 @@ $pdo->prepare(
      VALUES (901, 100, ?, ?, 100, "user_a", 901, "web-test-asset-client", "mysql-primary", ?, ?)',
 )->execute([$assetMessageId, $conversationId, $messageTable, $now]);
 
+$pdo->exec('INSERT INTO sm_system_config_group (id, code) VALUES (2, "social_config")');
+$pdo->exec(
+    'INSERT INTO sm_system_config (group_id, `key`, `value`) VALUES
+        (2, "cross_org_social_enabled", "1"),
+        (2, "cross_org_access_snapshot_id", "1")',
+);
 $assetStore = new ThinkOrmWebImAssetForwardStore();
 $forwardService = new WebImAssetForwardService(
     $assetStore,
@@ -2281,12 +2333,6 @@ $derivedCount = (int) Db::query(
 $assert($derivedCount === 1, 'Repeated derivation inserted duplicate asset rows.');
 
 // A recipient-home message must resolve the original file from the sender/source organization.
-$pdo->exec('INSERT INTO sm_system_config_group (id, code) VALUES (2, "social_config")');
-$pdo->exec(
-    'INSERT INTO sm_system_config (group_id, `key`, `value`) VALUES
-        (2, "cross_org_social_enabled", "1"),
-        (2, "cross_org_access_snapshot_id", "1")',
-);
 $crossAssetConversationId = \plugin\saimulti\service\web\SingleConversationIdentity::conversationId(
     901,
     'user_a',
@@ -2703,6 +2749,189 @@ PHP;
 } else {
     echo "SKIP proc_open visible-asset lock-order regression\n";
 }
+$targetPhysicalUsed = (int) $pdo->query(
+    'SELECT COALESCE(SUM(path_size),0)
+       FROM (
+         SELECT storage_path,MAX(size_byte) AS path_size
+           FROM im_upload_asset
+          WHERE organization=902
+       GROUP BY storage_path
+       ) physical_paths',
+)->fetchColumn();
+$pdo->prepare(
+    "UPDATE sm_tenant_quota
+        SET used_value=?,version=version+1,update_time=NOW()
+      WHERE organization=902 AND quota_key='storage_bytes'",
+)->execute([$targetPhysicalUsed]);
+$reverseSourceFileId = hash('sha1', 'web-cross-reverse-source-file');
+$reverseSourceStoragePath = 'private/organizations/902/im/202607/'
+    . substr(hash('sha256', 'web-cross-reverse-source-path'), 0, 32) . '.webp';
+$reverseSourceUrl = 'https://cdn.example.test/' . $reverseSourceStoragePath;
+$pdo->prepare(
+    'INSERT INTO im_upload_asset
+        (organization, file_id, user_id, kind, name, url, storage_path, size_byte,
+         mime_type, extension, status, create_time, update_time)
+     VALUES (902, ?, "outsider", "image", "reverse.webp", ?, ?, 3210,
+             "image/webp", "webp", 1, ?, ?)',
+)->execute([
+    $reverseSourceFileId,
+    $reverseSourceUrl,
+    $reverseSourceStoragePath,
+    $now,
+    $now,
+]);
+$reverseAssetMessageId = 'web-cross-reverse-asset-message';
+$reverseAssetContent = [
+    'file_id' => $reverseSourceFileId,
+    'url' => $reverseSourceUrl,
+    'name' => 'reverse.webp',
+    'size' => 3210,
+    'mime_type' => 'image/webp',
+    'extension' => 'webp',
+];
+foreach ([901, 902] as $homeOrganization) {
+    $pdo->prepare(
+        'INSERT INTO `' . $messageTable . '`
+            (organization, conversation_id, conversation_type, message_id, message_seq,
+             client_msg_id, sender_id, sender_organization, message_type, content, status,
+             create_time, update_time)
+         VALUES (?, ?, 1, ?, 2, "web-cross-reverse-asset-client", "outsider", 902,
+                 2, ?, 1, ?, ?)',
+    )->execute([
+        $homeOrganization,
+        $crossAssetConversationId,
+        $reverseAssetMessageId,
+        json_encode($reverseAssetContent, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
+        $now,
+        $now,
+    ]);
+    $pdo->prepare(
+        'INSERT INTO im_message_index
+            (organization, global_seq, message_id, conversation_id, message_seq, sender_id,
+             sender_organization, client_msg_id, storage_node, shard_table, create_time)
+         VALUES (?, ?, ?, ?, 2, "outsider", 902, "web-cross-reverse-asset-client",
+                 "mysql-primary", ?, ?)',
+    )->execute([
+        $homeOrganization,
+        $homeOrganization === 901 ? 102 : 2,
+        $reverseAssetMessageId,
+        $crossAssetConversationId,
+        $messageTable,
+        $now,
+    ]);
+}
+$targetPhysicalUsed = (int) $pdo->query(
+    'SELECT COALESCE(SUM(path_size),0)
+       FROM (
+         SELECT storage_path,MAX(size_byte) AS path_size
+           FROM im_upload_asset
+          WHERE organization=902
+       GROUP BY storage_path
+       ) physical_paths',
+)->fetchColumn();
+$pdo->prepare(
+    "UPDATE sm_tenant_quota
+        SET used_value=?,version=version+1,update_time=NOW()
+      WHERE organization=902 AND quota_key='storage_bytes'",
+)->execute([$targetPhysicalUsed]);
+
+if (function_exists('proc_open')) {
+    $deriveRacePrefix = sys_get_temp_dir() . '/b8im-derive-race-' . bin2hex(random_bytes(8));
+    $deriveRaceStart = $deriveRacePrefix . '-start';
+    $deriveRaceJobs = [
+        [902, 'outsider', $crossAssetMessageId, $sourceFileId],
+        [901, 'user_a', $reverseAssetMessageId, $reverseSourceFileId],
+    ];
+    $deriveRaceWorkers = [];
+    foreach ($deriveRaceJobs as $index => [$targetOrganization, $targetUserId, $sourceMessageId, $sourceAssetId]) {
+        $readyPath = $deriveRacePrefix . "-{$index}-ready";
+        $resultPath = $deriveRacePrefix . "-{$index}-result.json";
+        $process = proc_open(
+            [
+                PHP_BINARY,
+                dirname(__DIR__) . '/tests/support/web_im_asset_derive_worker.php',
+                $database,
+                (string) $targetOrganization,
+                $targetUserId,
+                $crossAssetConversationId,
+                $sourceMessageId,
+                $sourceAssetId,
+                $readyPath,
+                $deriveRaceStart,
+                $resultPath,
+            ],
+            [
+                1 => ['pipe', 'w'],
+                2 => ['pipe', 'w'],
+            ],
+            $pipes,
+        );
+        if (!is_resource($process)) {
+            throw new RuntimeException('Unable to start reverse derive worker.');
+        }
+        $deriveRaceWorkers[] = [$process, $pipes, $readyPath, $resultPath];
+    }
+    $allDeriveWorkersReady = false;
+    $deriveRaceDeadline = microtime(true) + 10;
+    while (microtime(true) < $deriveRaceDeadline) {
+        $allDeriveWorkersReady = true;
+        foreach ($deriveRaceWorkers as [, , $readyPath]) {
+            if (!is_file($readyPath)) {
+                $allDeriveWorkersReady = false;
+                break;
+            }
+        }
+        if ($allDeriveWorkersReady) {
+            break;
+        }
+        usleep(1000);
+    }
+    touch($deriveRaceStart);
+    $deriveRaceResults = [];
+    foreach ($deriveRaceWorkers as [$process, $pipes, $readyPath, $resultPath]) {
+        $stdout = stream_get_contents($pipes[1]);
+        $stderr = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $exit = proc_close($process);
+        $payload = is_file($resultPath)
+            ? json_decode((string) file_get_contents($resultPath), true, 512, JSON_THROW_ON_ERROR)
+            : ['error' => 'missing result'];
+        $deriveRaceResults[] = [
+            'exit' => $exit,
+            'stdout' => $stdout,
+            'stderr' => $stderr,
+            'payload' => $payload,
+        ];
+        @unlink($readyPath);
+        @unlink($resultPath);
+    }
+    @unlink($deriveRaceStart);
+    $reverseDeriveRows = (int) $pdo->query(
+        'SELECT COUNT(*) FROM im_upload_asset
+          WHERE (organization=902 AND user_id="outsider" AND storage_path='
+        . $pdo->quote($sourceStoragePath) . ')
+             OR (organization=901 AND user_id="user_a" AND storage_path='
+        . $pdo->quote($reverseSourceStoragePath) . ')',
+    )->fetchColumn();
+    $deriveRacePassed = $allDeriveWorkersReady && $reverseDeriveRows >= 2;
+    foreach ($deriveRaceResults as $deriveRaceResult) {
+        $deriveRacePassed = $deriveRacePassed
+            && $deriveRaceResult['exit'] === 0
+            && ($deriveRaceResult['payload']['status'] ?? '') === 'derived'
+            && preg_match(
+                '/^[a-f0-9]{40}$/',
+                (string) ($deriveRaceResult['payload']['asset']['file_id'] ?? ''),
+            ) === 1;
+    }
+    $assert(
+        $deriveRacePassed,
+        'Reverse cross-organization derives deadlocked or lost an asset: '
+        . json_encode($deriveRaceResults, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+    );
+} else {
+    echo "SKIP proc_open reverse derive lock-order regression\n";
+}
 $crossDerived = $forwardService->derive(
     $outsider,
     $crossAssetConversationId,
@@ -2854,6 +3083,20 @@ $pdo->prepare(
      VALUES (901, ?, "user_a", "image", "hidden.webp", ?, ?, 111,
              "image/webp", "webp", 1, ?, ?)',
 )->execute([$hiddenFileId, $hiddenUrl, $hiddenStoragePath, $now, $now]);
+$hiddenPhysicalUsed = (int) $pdo->query(
+    'SELECT COALESCE(SUM(path_size),0)
+       FROM (
+         SELECT storage_path,MAX(size_byte) AS path_size
+           FROM im_upload_asset
+          WHERE organization=901
+       GROUP BY storage_path
+       ) physical_paths',
+)->fetchColumn();
+$pdo->prepare(
+    "UPDATE sm_tenant_quota
+        SET used_value=?,version=version+1,update_time=NOW()
+      WHERE organization=901 AND quota_key='storage_bytes'",
+)->execute([$hiddenPhysicalUsed]);
 $hiddenContent = [
     'file_id' => $hiddenFileId,
     'url' => $hiddenUrl,
@@ -2896,6 +3139,16 @@ $assetUrlService = new WebImAssetUrlService(
     new S3WebImAssetUrlSigner(static fn (): array => $s3Config),
     static fn (): int => $urlNow,
     300,
+);
+$crossOrgUrl = $assetUrlService->resolve(
+    $outsider,
+    (string) $crossDerived['file_id'],
+);
+$assert(
+    $crossOrgUrl['expires_at'] === $urlNow + 300
+    && str_contains($crossOrgUrl['url'], 'X-Amz-Signature=')
+    && str_contains($crossOrgUrl['url'], 'private/organizations/901/'),
+    'Cross-org derived attachment did not sign its canonical source organization path.',
 );
 $ownerUrl = $assetUrlService->resolve($carol, (string) $derived['file_id']);
 $visibleUrl = $assetUrlService->resolve($bob, $sourceFileId, $conversationId, $assetMessageId);

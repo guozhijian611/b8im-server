@@ -108,6 +108,17 @@ $assert(
     Db::table('sm_tenant_im_policy')->where('organization', $organization)->count() === 1,
     '新机构未在同一事务初始化默认 IM 策略',
 );
+$storageQuota = Db::table('sm_tenant_quota')
+    ->where('organization', $organization)
+    ->where('quota_key', 'storage_bytes')
+    ->find();
+$assert(
+    is_array($storageQuota)
+    && (int) $storageQuota['quota_value'] === 0
+    && (int) $storageQuota['used_value'] === 0
+    && $storageQuota['status'] === 'active',
+    '新机构未在同一事务初始化不限容量 storage_bytes 配额',
+);
 
 $publisher = new IntegrationPolicyPublisher();
 $service = new TenantImPolicyService(new ThinkOrmTenantImPolicyStore(), $publisher);

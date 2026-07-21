@@ -8,6 +8,7 @@ use plugin\saimulti\basic\WebController;
 use plugin\saimulti\exception\ApiException;
 use plugin\saimulti\service\ModuleRequired;
 use plugin\saimulti\service\module\FileMediaService;
+use plugin\saimulti\utils\CanonicalInteger;
 use support\Request;
 use support\Response;
 
@@ -16,26 +17,30 @@ class FileMediaController extends WebController
 {
     public function usage(Request $request): Response
     {
-        return $this->success((new FileMediaService())->quotaRead($this->organization, true));
+        return $this->success((new FileMediaService())->usage($this->organization));
     }
 
     public function checkUpload(Request $request): Response
     {
         $input = is_array($request->post()) ? $request->post() : [];
-        $size = $input['size_bytes'] ?? $input['size'] ?? 0;
+        if (array_keys($input) !== ['size_bytes']) {
+            throw new ApiException('请求体必须且只能包含 size_bytes。', 422);
+        }
 
         return $this->success((new FileMediaService())->checkUpload(
             $this->organization,
-            $this->intVal($size, '文件大小'),
+            CanonicalInteger::positive($input['size_bytes'], '文件大小'),
         ));
     }
 
     public function folderIndex(Request $request): Response
     {
-        $filters = $request->get();
-        $filters['owner_user_id'] = (string) $this->webIdentity['user_id'];
-
-        return $this->success((new FileMediaService())->folderList($this->organization, $filters, false));
+        return $this->success((new FileMediaService())->folderList(
+            $this->organization,
+            $request->get(),
+            false,
+            (string) $this->webIdentity['user_id'],
+        ));
     }
 
     public function folderSave(Request $request): Response
@@ -50,10 +55,12 @@ class FileMediaController extends WebController
 
     public function itemIndex(Request $request): Response
     {
-        $filters = $request->get();
-        $filters['owner_user_id'] = (string) $this->webIdentity['user_id'];
-
-        return $this->success((new FileMediaService())->itemList($this->organization, $filters, false));
+        return $this->success((new FileMediaService())->itemList(
+            $this->organization,
+            $request->get(),
+            false,
+            (string) $this->webIdentity['user_id'],
+        ));
     }
 
     public function itemSave(Request $request): Response
@@ -79,11 +86,7 @@ class FileMediaController extends WebController
             throw new ApiException('编号列表无效。', 422);
         }
         $ids = array_map(function (mixed $id): int {
-            if (!is_int($id) && (!is_string($id) || !preg_match('/^\d+$/', $id))) {
-                throw new ApiException('编号列表无效。', 422);
-            }
-
-            return (int) $id;
+            return CanonicalInteger::positive($id, '编号');
         }, $ids);
 
         return $this->success([
@@ -91,18 +94,9 @@ class FileMediaController extends WebController
                 $this->organization,
                 $ids,
                 (int) $this->webIdentity['id'],
+                (string) $this->webIdentity['user_id'],
             ),
         ]);
     }
 
-    private function intVal(mixed $value, string $label): int
-    {
-        if (is_int($value)) {
-            return $value;
-        }
-        if (is_string($value) && preg_match('/^-?\d+$/', $value)) {
-            return (int) $value;
-        }
-        throw new ApiException($label . '无效。', 422);
-    }
 }

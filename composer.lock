@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "baa5e557b2492c1a219c22dd7a1833ea",
+    "content-hash": "4c09d27ce0c604bb4aa3878e96226736",
     "packages": [
         {
             "name": "aliyuncs/oss-sdk-php",
@@ -301,21 +301,24 @@
         },
         {
             "name": "b8im/module-file-media",
-            "version": "v0.3.0",
+            "version": "v0.4.1",
             "source": {
                 "type": "git",
                 "url": "https://github.com/guozhijian611/b8im-module-file-media.git",
-                "reference": "2ad2bf51eaf4d8a56c48d91782782017701c992a"
+                "reference": "3e56e2e2a533df82a87f7e8c3af21fe72a108226"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/guozhijian611/b8im-module-file-media/zipball/2ad2bf51eaf4d8a56c48d91782782017701c992a",
-                "reference": "2ad2bf51eaf4d8a56c48d91782782017701c992a",
+                "url": "https://api.github.com/repos/guozhijian611/b8im-module-file-media/zipball/3e56e2e2a533df82a87f7e8c3af21fe72a108226",
+                "reference": "3e56e2e2a533df82a87f7e8c3af21fe72a108226",
                 "shasum": ""
             },
             "require": {
                 "b8im/module-sdk": "^0.2.0",
                 "php": ">=8.1"
+            },
+            "require-dev": {
+                "robmorgan/phinx": "^0.16.6"
             },
             "type": "library",
             "autoload": {
@@ -323,11 +326,18 @@
                     "B8im\\Module\\FileMedia\\": "src/"
                 }
             },
+            "scripts": {
+                "test": [
+                    "@php tests/policy.php",
+                    "@php tests/contracts.php",
+                    "@php tests/migration_mysql.php"
+                ]
+            },
             "license": [
                 "proprietary"
             ],
             "description": "B8IM file_media commercial module",
-            "time": "2026-07-20T20:48:30+00:00"
+            "time": "2026-07-21T21:58:36+00:00"
         },
         {
             "name": "b8im/module-i18n",

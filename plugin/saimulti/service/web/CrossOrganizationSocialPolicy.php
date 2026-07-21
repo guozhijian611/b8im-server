@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace plugin\saimulti\service\web;
 
+use plugin\saimulti\exception\ApiException;
 use support\think\Db;
 
 /**
@@ -38,6 +39,29 @@ final class CrossOrganizationSocialPolicy
     /** @return array{enabled: bool, access_snapshot_id: string} */
     public static function lockSharedInsideTransaction(): array
     {
+        return self::read(' LOCK IN SHARE MODE', false);
+    }
+
+    /**
+     * Serialize attachment derivations before they take any organization quota
+     * or asset lock. Config writers already lock this group row first, so the
+     * global fence also preserves their established group -> config lock order.
+     *
+     * @return array{enabled: bool, access_snapshot_id: string}
+     */
+    public static function lockAssetDeriveExclusiveInsideTransaction(): array
+    {
+        $groups = Db::query(
+            'SELECT id
+               FROM sm_system_config_group
+              WHERE code = ? AND delete_time IS NULL
+              FOR UPDATE',
+            [self::CONFIG_GROUP],
+        );
+        if (count($groups) !== 1 || (int) ($groups[0]['id'] ?? 0) <= 0) {
+            throw new ApiException('跨租户社交锁事实不可用。', 503);
+        }
+
         return self::read(' LOCK IN SHARE MODE', false);
     }
 

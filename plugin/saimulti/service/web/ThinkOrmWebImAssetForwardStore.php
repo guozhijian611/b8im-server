@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace plugin\saimulti\service\web;
 
 use plugin\saimulti\exception\ApiException;
+use plugin\saimulti\service\quota\CanonicalPhysicalStoragePath;
+use plugin\saimulti\service\quota\StorageQuotaAuthority;
 use support\think\Db;
 
 final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInterface
@@ -72,6 +74,14 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
             $derivedFileId,
             $now,
         ): array {
+            // This global derive fence is the transaction's first lock. It
+            // prevents reverse A->B/B->A derives from holding each target's
+            // assets while waiting on the peer source asset.
+            CrossOrganizationSocialPolicy::lockAssetDeriveExclusiveInsideTransaction();
+            // Quota authority remains the first organization-scoped lock in
+            // every target-organization asset write.
+            $authority = new StorageQuotaAuthority();
+            $quota = $authority->lock($organization);
             $asset = $this->visibleMessageAsset(
                 $organization,
                 $userId,
@@ -81,6 +91,30 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
                 $kind,
                 true,
             );
+            $storagePath = (new CanonicalPhysicalStoragePath())->assert(
+                (string) $asset['storage_path'],
+            );
+            $size = $this->authoritativeSize($asset['size_byte'] ?? null);
+            if (isset($quota['held_paths'][$storagePath])) {
+                throw new ApiException('目标机构附件路径仍受上传或清理预留保护。', 503);
+            }
+            $knownSize = $quota['physical_paths'][$storagePath] ?? null;
+            if ($knownSize !== null && (int) $knownSize !== $size) {
+                throw new ApiException('同一物理附件路径存在冲突尺寸。', 503);
+            }
+            $newPhysicalPath = $knownSize === null;
+            $newUsed = (int) $quota['used_value'];
+            if ($newPhysicalPath) {
+                $newUsed = $this->checkedUsageAdd($newUsed, $size);
+                $newOccupancy = $this->checkedUsageAdd(
+                    (int) $quota['occupancy_value'],
+                    $size,
+                );
+                if ((int) $quota['quota_value'] > 0
+                    && $newOccupancy > (int) $quota['quota_value']) {
+                    throw new ApiException('机构存储配额不足。', 422);
+                }
+            }
 
             Db::execute(
                 'INSERT INTO im_upload_asset
@@ -95,8 +129,8 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
                     $kind,
                     (string) $asset['name'],
                     '',
-                    (string) $asset['storage_path'],
-                    (int) $asset['size_byte'],
+                    $storagePath,
+                    $size,
                     (string) $asset['mime_type'],
                     (string) $asset['extension'],
                     $now,
@@ -114,6 +148,20 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
             )[0] ?? null;
             if ($derived === null || !$this->sameDerivedAsset($derived, $userId, $asset)) {
                 throw new ApiException('派生附件标识冲突，请稍后重试。', 409);
+            }
+            if ($newPhysicalPath) {
+                $quotaRow = $quota['row'];
+                $updated = Db::table('sm_tenant_quota')
+                    ->where('id', (int) $quotaRow['id'])
+                    ->where('version', (int) $quotaRow['version'])
+                    ->update([
+                        'used_value' => $newUsed,
+                        'version' => (int) $quotaRow['version'] + 1,
+                        'update_time' => $now,
+                    ]);
+                if ((int) $updated !== 1) {
+                    throw new ApiException('机构存储配额版本冲突。', 409);
+                }
             }
 
             return $this->response($derived, $kind);
@@ -321,7 +369,8 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
             && (string) $derived['name'] === (string) $source['name']
             && (string) $derived['url'] === ''
             && (string) $derived['storage_path'] === (string) $source['storage_path']
-            && (int) $derived['size_byte'] === (int) $source['size_byte']
+            && $this->authoritativeSize($derived['size_byte'] ?? null)
+                === $this->authoritativeSize($source['size_byte'] ?? null)
             && (string) $derived['mime_type'] === (string) $source['mime_type']
             && (string) $derived['extension'] === (string) $source['extension']
             && (int) $derived['status'] === 1
@@ -338,7 +387,7 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
             'file_id' => (string) $asset['file_id'],
             'kind' => $kind,
             'name' => (string) $asset['name'],
-            'size' => (int) $asset['size_byte'],
+            'size' => $this->authoritativeSize($asset['size_byte'] ?? null),
             'mime_type' => (string) $asset['mime_type'],
             'extension' => (string) $asset['extension'],
         ];
@@ -347,6 +396,31 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
     private function messageShardRoutes(): MessageShardRouteValidator
     {
         return $this->messageShardRoutes ??= new MessageShardRouteValidator();
+    }
+
+    private function authoritativeSize(mixed $value): int
+    {
+        if (is_int($value) && $value > 0) {
+            return $value;
+        }
+        if (is_string($value) && preg_match('/^[1-9]\d*$/', $value) === 1) {
+            $maximum = (string) PHP_INT_MAX;
+            if (strlen($value) < strlen($maximum)
+                || (strlen($value) === strlen($maximum)
+                    && strcmp($value, $maximum) <= 0)) {
+                return (int) $value;
+            }
+        }
+        throw new ApiException('权威物理附件大小非法或超出服务端整数范围。', 503);
+    }
+
+    private function checkedUsageAdd(int $usage, int $size): int
+    {
+        if ($usage < 0 || $size <= 0 || $usage > PHP_INT_MAX - $size) {
+            throw new ApiException('机构存储用量超出服务端整数范围。', 503);
+        }
+
+        return $usage + $size;
     }
 
     private function quoteShard(string $table): string

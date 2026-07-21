@@ -9,41 +9,69 @@ use plugin\saimulti\exception\ApiException;
 use plugin\saimulti\service\ModuleRequired;
 use plugin\saimulti\service\module\FileMediaService;
 use plugin\saimulti\service\Permission;
+use plugin\saimulti\utils\CanonicalInteger;
 use support\Request;
 use support\Response;
 
-#[ModuleRequired('file_media', 'server', 'file_media.admin.manage')]
 final class FileMediaController extends AdminController
 {
-    #[Permission('平台配额列表', 'saimulti:admin:file_media:index')]
-    public function quotaIndex(Request $request): Response
+    #[ModuleRequired('file_media', 'server', 'file_media.admin.manage')]
+    #[Permission('文件媒体策略列表', 'saimulti:admin:file_media:index')]
+    public function policyIndex(Request $request): Response
     {
-        return $this->success((new FileMediaService())->quotaList($request->get()));
+        return $this->success((new FileMediaService())->policyList($request->get()));
     }
 
-    #[Permission('平台配额详情', 'saimulti:admin:file_media:index')]
-    public function quotaRead(Request $request): Response
-    {
-        $org = $this->org($request);
-
-        return $this->success((new FileMediaService())->quotaRead($org, true));
-    }
-
-    #[Permission('平台调整配额', 'saimulti:admin:file_media:update')]
-    public function quotaUpdate(Request $request): Response
+    #[ModuleRequired('file_media', 'server', 'file_media.admin.manage')]
+    #[Permission('文件媒体策略详情', 'saimulti:admin:file_media:index')]
+    public function policyRead(Request $request): Response
     {
         $org = $this->org($request);
-        $input = is_array($request->post()) ? $request->post() : [];
 
-        return $this->success((new FileMediaService())->quotaUpdate($org, $input, $this->adminId));
+        return $this->success((new FileMediaService())->policyRead($org));
     }
 
+    #[ModuleRequired('file_media', 'server', 'file_media.admin.manage')]
+    #[Permission('文件媒体策略更新', 'saimulti:admin:file_media:update')]
+    public function policyUpdate(Request $request): Response
+    {
+        $body = $request->post();
+        $expected = [
+            'organization',
+            'max_file_bytes',
+            'preview_enabled',
+            'large_file_enabled',
+            'status',
+        ];
+        if (!is_array($body)
+            || count($body) !== count($expected)
+            || array_diff(array_keys($body), $expected) !== []
+            || array_diff($expected, array_keys($body)) !== []) {
+            throw new ApiException('请求体必须且只能包含机构与完整策略字段。', 422);
+        }
+        $org = CanonicalInteger::positive($body['organization'], '机构编号');
+        $input = [
+            'max_file_bytes' => $body['max_file_bytes'],
+            'preview_enabled' => $body['preview_enabled'],
+            'large_file_enabled' => $body['large_file_enabled'],
+            'status' => $body['status'],
+        ];
+
+        return $this->success((new FileMediaService())->policyUpdate(
+            $org,
+            $input,
+            $this->adminId,
+        ));
+    }
+
+    #[ModuleRequired('file_media', 'server', 'file_media.admin.manage')]
     #[Permission('平台文件列表', 'saimulti:admin:file_media:index')]
     public function itemIndex(Request $request): Response
     {
         return $this->success((new FileMediaService())->itemList(0, $request->get(), true));
     }
 
+    #[ModuleRequired('file_media', 'server', 'file_media.admin.manage')]
     #[Permission('平台目录列表', 'saimulti:admin:file_media:index')]
     public function folderIndex(Request $request): Response
     {
@@ -52,15 +80,9 @@ final class FileMediaController extends AdminController
 
     private function org(Request $request): int
     {
-        $org = $request->input('organization') ?? $request->get('organization');
-        if (!is_int($org) && (!is_string($org) || !preg_match('/^\d+$/', $org))) {
-            throw new ApiException('机构编号无效。', 422);
-        }
-        $org = (int) $org;
-        if ($org <= 0) {
-            throw new ApiException('机构编号无效。', 422);
-        }
-
-        return $org;
+        return CanonicalInteger::positive(
+            $request->input('organization') ?? $request->get('organization'),
+            '机构编号',
+        );
     }
 }

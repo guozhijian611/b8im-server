@@ -53,6 +53,8 @@ foreach ([
 }
 
 return [
+    'upload_cleanup_interval_seconds' => (int) env('UPLOAD_CLEANUP_INTERVAL_SECONDS', 30),
+    'upload_cleanup_batch_size' => (int) env('UPLOAD_CLEANUP_BATCH_SIZE', 25),
     'system_version' => env('B8IM_SYSTEM_VERSION', '0.1.0'),
     'manifest_roots' => $manifestRoots,
     'server_module_paths' => (string) env('SERVER_MODULE_PATHS', ''),

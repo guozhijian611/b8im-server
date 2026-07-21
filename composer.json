@@ -115,7 +115,7 @@
         "b8im/module-sticker": "^0.2.0",
         "b8im/module-customer-service": "^0.3.0",
         "b8im/module-robot-single": "^0.2.0",
-        "b8im/module-file-media": "^0.3.0",
+        "b8im/module-file-media": "^0.4.1",
         "b8im/module-search": "^0.4.0",
         "b8im/module-moments": "^0.2.0"
     },

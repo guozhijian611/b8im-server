@@ -147,11 +147,18 @@ $assert(
 );
 $assert(!str_contains($signed, $s3Config['s3_secret']), 'S3 secret leaked into the signed URL.');
 
-$expectApiCode(409, static fn () => $realSigner->sign(
+$crossOrganizationSigned = $realSigner->sign(
     901,
     'private/organizations/902/im/202607/' . str_repeat('b', 32) . '.webp',
     time() + 300,
-));
+);
+$assert(
+    str_contains(
+        (string) (parse_url($crossOrganizationSigned, PHP_URL_PATH) ?: ''),
+        '/private-bucket/private/organizations/902/im/202607/',
+    ),
+    'Signer rejected or rewrote an authorized cross-organization canonical source path.',
+);
 $expectApiCode(409, static fn () => $realSigner->sign(
     901,
     'private/organizations/901/im/../902/' . str_repeat('b', 32) . '.webp',

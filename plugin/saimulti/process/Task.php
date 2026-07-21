@@ -20,6 +20,7 @@ class Task
     public $crontabIds = []; //定时任务表主键id => Crontab对象id
 
     private ?int $moduleExpiryTimerId = null;
+    private ?int $uploadCleanupTimerId = null;
 
     public function __construct()
     {
@@ -45,6 +46,27 @@ class Task
                 max(10, $interval),
                 fn () => $this->scanExpiredModuleLicenses(),
             );
+            $this->scanUploadCleanup();
+            $this->uploadCleanupTimerId = Timer::add(
+                max(10, (int) config('plugin.saimulti.module.upload_cleanup_interval_seconds', 30)),
+                fn () => $this->scanUploadCleanup(),
+            );
+        }
+    }
+
+    public function scanUploadCleanup(): void
+    {
+        try {
+            $result = ModuleServiceFactory::uploadCleanup()->run(
+                max(1, (int) config('plugin.saimulti.module.upload_cleanup_batch_size', 25)),
+            );
+            if ($result['scanned'] > 0 || $result['failed'] > 0) {
+                echo PHP_EOL . date('Y-m-d H:i:s') . ' => 上传孤儿清理: '
+                    . json_encode($result, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+            }
+        } catch (Throwable $exception) {
+            echo PHP_EOL . date('Y-m-d H:i:s') . ' => 上传孤儿清理失败: '
+                . $exception->getMessage() . PHP_EOL;
         }
     }
 

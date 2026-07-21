@@ -12,6 +12,7 @@ use plugin\saimulti\service\web\WebImControlService;
 use plugin\saimulti\service\web\WebImAuthService;
 use plugin\saimulti\service\web\WebImUploadService;
 use plugin\saimulti\service\WebOrganizationResolver;
+use plugin\saimulti\utils\CanonicalInteger;
 use support\Request;
 use support\Response;
 
@@ -319,27 +320,65 @@ final class ImController extends WebController
 
     public function prepareUpload(Request $request): Response
     {
+        $input = $request->post();
+        $expected = ['idempotency_key', 'kind', 'filename', 'size', 'mime_type'];
+        if (!is_array($input)
+            || count($input) !== count($expected)
+            || array_diff(array_keys($input), $expected) !== []
+            || array_diff($expected, array_keys($input)) !== []) {
+            throw new ApiException('请求体必须且只能包含完整的上传预留字段。', 422);
+        }
+        foreach (['idempotency_key', 'kind', 'filename', 'mime_type'] as $field) {
+            if (!is_string($input[$field])) {
+                throw new ApiException("{$field} 必须是字符串。", 422);
+            }
+        }
+        $size = CanonicalInteger::positive($input['size'], '文件大小');
+
         return $this->success($this->uploads->prepare(
             $this->webIdentity,
-            (string) $request->input('kind', 'file'),
-            (string) $request->input('filename', ''),
-            (int) $request->input('size', 0),
-            (string) $request->input('mime_type', ''),
+            $input['idempotency_key'],
+            $input['kind'],
+            $input['filename'],
+            $size,
+            $input['mime_type'],
         ));
     }
 
     public function upload(Request $request): Response
     {
+        $uploadId = $this->uploadIdOnly($request);
+
         return $this->success($this->uploads->upload(
             $this->webIdentity,
             $request,
-            (string) $request->input('kind', 'file'),
+            $uploadId,
         ));
     }
 
-    public function confirmUpload(): Response
+    public function releaseUpload(Request $request): Response
     {
-        return $this->success($this->uploads->confirm($this->webIdentity));
+        $uploadId = $this->uploadIdOnly($request);
+
+        return $this->success($this->uploads->release(
+            $this->webIdentity,
+            $uploadId,
+        ));
+    }
+
+    private function uploadIdOnly(Request $request): string
+    {
+        $post = $request->post();
+        if (!is_array($post) || count($post) !== 1
+            || !array_key_exists('upload_id', $post)
+            || !is_string($post['upload_id'])
+            || preg_match('/^[a-f0-9]{64}$/', $post['upload_id']) !== 1) {
+            throw new \plugin\saimulti\exception\ApiException(
+                '请求体必须且只能包含 upload_id。',
+                422,
+            );
+        }
+        return $post['upload_id'];
     }
 
     public function deriveForwardAsset(Request $request): Response

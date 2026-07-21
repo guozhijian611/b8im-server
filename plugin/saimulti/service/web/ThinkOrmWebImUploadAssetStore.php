@@ -8,11 +8,6 @@ use support\think\Db;
 
 final class ThinkOrmWebImUploadAssetStore implements WebImUploadAssetStoreInterface
 {
-    public function create(array $asset): void
-    {
-        Db::table('im_upload_asset')->insert($asset);
-    }
-
     public function findActiveImage(int $organization, string $fileId, ?string $ownerUserId = null): ?array
     {
         $query = Db::table('im_upload_asset')
