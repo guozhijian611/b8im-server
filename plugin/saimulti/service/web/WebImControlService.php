@@ -13,19 +13,15 @@ final class WebImControlService
 
     private Closure $clock;
 
-    private WebImRealtimePublisherInterface $realtime;
-
     private WebImAvatarServiceInterface $avatars;
 
     public function __construct(
         ?WebImControlStoreInterface $store = null,
         ?Closure $clock = null,
-        ?WebImRealtimePublisherInterface $realtime = null,
         ?WebImAvatarServiceInterface $avatars = null,
     ) {
         $this->store = $store ?? new ThinkOrmWebImControlStore();
         $this->clock = $clock ?? static fn (): int => time();
-        $this->realtime = $realtime ?? new RedisWebImRealtimePublisher();
         $this->avatars = $avatars ?? new WebImAvatarService();
     }
 
@@ -203,7 +199,7 @@ final class WebImControlService
         }
         $message = $this->text($message, '好友申请', 120, true);
 
-        $result = $this->store->sendFriendRequest(
+        return $this->store->sendFriendRequest(
             $organization,
             $userId,
             $toOrganization,
@@ -211,24 +207,6 @@ final class WebImControlService
             $message,
             $this->nowText(),
         );
-        if (is_array($result['_realtime_event'] ?? null)) {
-            $event = $result['_realtime_event'];
-            $eventOrganization = (int) ($result['_realtime_event_organization'] ?? $organization);
-            if (is_array($event['from_user'] ?? null)) {
-                $event['from_user'] = $this->projectUser($event['from_user']);
-            }
-            $this->publishRealtime(static function (WebImRealtimePublisherInterface $publisher) use (
-                $eventOrganization,
-                $event,
-            ): void {
-                $publisher->publishFriendRequestCreated($eventOrganization, $event);
-            });
-        }
-
-        return [
-            'status' => (string) $result['status'],
-            'message' => (string) $result['message'],
-        ];
     }
 
     /** @param array<string, mixed> $identity @return array{status: string} */
@@ -852,12 +830,4 @@ final class WebImControlService
         return date('Y-m-d H:i:s', $this->now());
     }
 
-    private function publishRealtime(Closure $publish): void
-    {
-        try {
-            $publish($this->realtime);
-        } catch (\Throwable $throwable) {
-            error_log('Web IM realtime event enqueue failed: ' . $throwable->getMessage());
-        }
-    }
 }

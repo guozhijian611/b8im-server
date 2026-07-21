@@ -16,7 +16,6 @@ use plugin\saimulti\service\web\WebImAssetUrlSignerInterface;
 use plugin\saimulti\service\web\WebImAssetUrlService;
 use plugin\saimulti\service\web\WebImAvatarService;
 use plugin\saimulti\service\web\WebImControlService;
-use plugin\saimulti\service\web\WebImRealtimePublisherInterface;
 use plugin\saimulti\service\web\WebImUploadService;
 use plugin\saimulti\service\web\WebImUploadStorageInterface;
 use support\think\Db;
@@ -179,18 +178,15 @@ $expectRuntime = static function (callable $callback, string $message) use ($ass
     }
     throw new RuntimeException('Expected RuntimeException was not thrown: ' . $message);
 };
-
-final class RecordingWebImRealtimePublisher implements WebImRealtimePublisherInterface
-{
-    /** @var list<array<string, mixed>> */
-    public array $friendEvents = [];
-
-    public function publishFriendRequestCreated(int $organization, array $payload): void
-    {
-        $this->friendEvents[] = ['organization' => $organization, 'payload' => $payload];
+$expectThrowable = static function (callable $callback, string $message) use ($assert): void {
+    try {
+        $callback();
+    } catch (Throwable) {
+        $assert(true, $message);
+        return;
     }
-
-}
+    throw new RuntimeException('Expected Throwable was not thrown: ' . $message);
+};
 
 final class ReadyWebImUploadStorage implements WebImUploadStorageInterface
 {
@@ -251,6 +247,8 @@ $users = [
     [901, 'user_f', '901007', 'frank', 'Frank', '13800000007', 'frank@example.com'],
     [901, 'user_g', '901008', 'grace', 'Grace', '13800000008', 'grace@example.com'],
     [901, 'user_h', '901009', 'heidi', 'Heidi', '13800000009', 'heidi@example.com'],
+    [901, 'user_i', '901010', 'ivan', 'Ivan', '13800000010', 'ivan@example.com'],
+    [901, 'user_j', '901011', 'judy', 'Judy', '13800000011', 'judy@example.com'],
     [902, 'outsider', '902001', 'outsider', 'Outsider', '13900000001', 'out@example.com'],
 ];
 foreach ($users as [$organization, $userId, $shortNo, $account, $nickname, $mobile, $email]) {
@@ -299,11 +297,9 @@ foreach ([
     $insertFriend->execute([$left, $right, $now, $now, $now]);
 }
 
-$realtime = new RecordingWebImRealtimePublisher();
 $service = new WebImControlService(
     new ThinkOrmWebImControlStore(),
     static fn (): int => strtotime('2026-07-10 12:00:00'),
-    $realtime,
     new WebImAvatarService(
         new ThinkOrmWebImUploadAssetStore(),
         new IntegrationAvatarSigner(),
@@ -382,6 +378,24 @@ $searchDan = $service->searchUsers($alice, 'dan');
 $assert(count($searchDan) === 1 && $searchDan[0]['relation_status'] === 'none', 'User search relation state mismatch.');
 $assert($service->searchUsers($alice, 'Outsider') === [], 'Cross-organization user leaked into search.');
 
+$caseCreatedFacts = [
+    (int) $pdo->query('SELECT COUNT(*) FROM im_friend_request')->fetchColumn(),
+    (int) $pdo->query('SELECT COUNT(*) FROM im_friend_relation')->fetchColumn(),
+    (int) $pdo->query('SELECT COUNT(*) FROM im_realtime_control_outbox')->fetchColumn(),
+];
+$expectApiCode(
+    422,
+    static fn () => $service->sendFriendRequest($alice, 901, 'User_D', 'case collision'),
+);
+$assert(
+    $caseCreatedFacts === [
+        (int) $pdo->query('SELECT COUNT(*) FROM im_friend_request')->fetchColumn(),
+        (int) $pdo->query('SELECT COUNT(*) FROM im_friend_relation')->fetchColumn(),
+        (int) $pdo->query('SELECT COUNT(*) FROM im_realtime_control_outbox')->fetchColumn(),
+    ],
+    'Case-colliding target identity created a request, relation or outbox fact.',
+);
+
 Db::table('im_user_privacy_setting')
     ->where('organization', 901)
     ->where('user_id', 'user_d')
@@ -391,23 +405,122 @@ Db::table('im_user_privacy_setting')
     ->where('organization', 901)
     ->where('user_id', 'user_d')
     ->update(['allow_add_by_username' => 1]);
+$pdo->exec(
+    "CREATE TRIGGER fail_friend_created_outbox
+     BEFORE INSERT ON im_realtime_control_outbox
+     FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'forced friend outbox failure'",
+);
+try {
+    $expectThrowable(
+        static fn () => $service->sendFriendRequest($alice, 901, 'user_i', 'rollback'),
+        'Created friend request must roll back when its outbox insert fails.',
+    );
+} finally {
+    $pdo->exec('DROP TRIGGER IF EXISTS fail_friend_created_outbox');
+}
+$assert(
+    (int) $pdo->query(
+        'SELECT COUNT(*) FROM im_friend_request
+          WHERE organization = 901 AND from_user_id = "user_a" AND to_user_id = "user_i"',
+    )->fetchColumn() === 0,
+    'Outbox failure committed a new friend request.',
+);
 $sent = $service->sendFriendRequest($alice, 901, 'user_d', 'hello');
 $resent = $service->sendFriendRequest($alice, 901, 'user_d', 'hello again');
 $assert($sent['status'] === 'pending' && $resent['status'] === 'pending', 'Friend request idempotency failed.');
-$assert(
-    count($realtime->friendEvents) === 1
-    && $realtime->friendEvents[0]['organization'] === 901
-    && $realtime->friendEvents[0]['payload']['to_user_id'] === 'user_d',
-    'Friend request realtime event was not emitted exactly once.',
-);
 $requestCount = (int) $pdo->query(
     'SELECT COUNT(*) FROM im_friend_request
       WHERE organization = 901 AND from_user_id = "user_a" AND to_user_id = "user_d"',
 )->fetchColumn();
 $assert($requestCount === 1, 'Duplicate pending friend request was persisted.');
+$createdOutbox = $pdo->query(
+    'SELECT * FROM im_realtime_control_outbox
+      WHERE aggregate_type = "friend_request" AND event_type = "friend_request.created"
+        AND organization = 901 AND BINARY target_user_id = BINARY "user_d"',
+)->fetch(PDO::FETCH_ASSOC);
+$createdPayload = is_array($createdOutbox)
+    ? json_decode((string) $createdOutbox['payload_json'], true, flags: JSON_THROW_ON_ERROR)
+    : null;
+$expectedCreatedId = hash('sha256', json_encode(
+    [
+        'friend_request.v1', (int) ($createdOutbox['aggregate_id'] ?? 0),
+        'friend_request.created', '901', 'user_a', '901', 'user_d',
+        '901', 'user_d', null,
+    ],
+    JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES,
+));
+$assert(
+    is_array($createdOutbox)
+    && $createdOutbox['event_id'] === $expectedCreatedId
+    && (int) $createdOutbox['status'] === 1
+    && (int) $createdOutbox['retry_count'] === 0
+    && $createdOutbox['next_retry_at'] === null
+    && $createdOutbox['locked_until'] === null
+    && $createdOutbox['worker_id'] === null
+    && $createdOutbox['claim_token'] === null
+    && $createdOutbox['published_at'] === null
+    && $createdOutbox['last_error'] === null,
+    'Created friend request did not persist the pending outbox row.',
+);
+$assert(
+    is_array($createdPayload)
+    && array_keys($createdPayload) === ['event_id', 'type', 'organization', 'data']
+    && $createdPayload['type'] === 'friend_request'
+    && $createdPayload['organization'] === '901'
+    && $createdPayload['data']['event'] === 'created'
+    && $createdPayload['data']['status'] === 1
+    && $createdPayload['data']['target_user_id'] === 'user_d'
+    && $createdPayload['data']['actor_user_id'] === 'user_a'
+    && array_key_exists('cross_org_access_snapshot_id', $createdPayload['data'])
+    && $createdPayload['data']['cross_org_access_snapshot_id'] === null
+    && $createdPayload['data']['handle_time'] === null,
+    'Created friend request immutable envelope is invalid.',
+);
 $danRequests = $service->friendRequests($dan);
 $assert(count($danRequests) === 1 && $danRequests[0]['direction'] === 'incoming', 'Friend request list contract mismatch.');
 $requestId = (int) $danRequests[0]['id'];
+$caseTerminalFacts = [
+    (int) $pdo->query('SELECT status FROM im_friend_request WHERE id = ' . $requestId)->fetchColumn(),
+    (int) $pdo->query('SELECT COUNT(*) FROM im_friend_relation')->fetchColumn(),
+    (int) $pdo->query('SELECT COUNT(*) FROM im_realtime_control_outbox')->fetchColumn(),
+];
+$caseDan = ['organization' => 901, 'user_id' => 'User_D'];
+$expectApiCode(422, static fn () => $service->handleFriendRequest($caseDan, $requestId, 'accept'));
+$expectApiCode(422, static fn () => $service->handleFriendRequest($caseDan, $requestId, 'reject'));
+$assert(
+    $caseTerminalFacts === [
+        (int) $pdo->query('SELECT status FROM im_friend_request WHERE id = ' . $requestId)->fetchColumn(),
+        (int) $pdo->query('SELECT COUNT(*) FROM im_friend_relation')->fetchColumn(),
+        (int) $pdo->query('SELECT COUNT(*) FROM im_realtime_control_outbox')->fetchColumn(),
+    ],
+    'Case-colliding recipient identity changed terminal friend facts.',
+);
+$pdo->exec(
+    "CREATE TRIGGER fail_friend_terminal_outbox
+     BEFORE INSERT ON im_realtime_control_outbox
+     FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'forced friend outbox failure'",
+);
+try {
+    $expectThrowable(
+        static fn () => $service->handleFriendRequest($dan, $requestId, 'accept'),
+        'Accepted friend request must roll back when its outbox insert fails.',
+    );
+} finally {
+    $pdo->exec('DROP TRIGGER IF EXISTS fail_friend_terminal_outbox');
+}
+$rolledBackStatus = (int) $pdo->query(
+    'SELECT status FROM im_friend_request WHERE id = ' . $requestId,
+)->fetchColumn();
+$rolledBackRelations = (int) $pdo->query(
+    'SELECT COUNT(*) FROM im_friend_relation
+      WHERE organization = 901
+        AND ((user_id = "user_a" AND friend_user_id = "user_d")
+          OR (user_id = "user_d" AND friend_user_id = "user_a"))',
+)->fetchColumn();
+$assert(
+    $rolledBackStatus === 1 && $rolledBackRelations === 0,
+    'Outbox failure committed friend status or relation facts.',
+);
 $accepted = $service->handleFriendRequest($dan, $requestId, 'accept');
 $acceptedAgain = $service->handleFriendRequest($dan, $requestId, 'accept');
 $assert($accepted['status'] === 'accepted' && $acceptedAgain['status'] === 'accepted', 'Friend acceptance is not idempotent.');
@@ -419,6 +532,173 @@ $friendPairCount = (int) Db::query(
         AND status = 1 AND delete_time IS NULL',
 )[0]['aggregate'];
 $assert($friendPairCount === 2, 'Accepted friend request did not create the pair atomically.');
+$caseRelationFacts = [
+    (int) $pdo->query('SELECT status FROM im_friend_request WHERE id = ' . $requestId)->fetchColumn(),
+    (int) $pdo->query('SELECT COUNT(*) FROM im_friend_relation')->fetchColumn(),
+    (int) $pdo->query('SELECT COUNT(*) FROM im_realtime_control_outbox')->fetchColumn(),
+];
+$expectApiCode(422, static fn () => $service->messages($alice, '', 901, 'User_D', 0, 0, 50));
+$assert(
+    $caseRelationFacts === [
+        (int) $pdo->query('SELECT status FROM im_friend_request WHERE id = ' . $requestId)->fetchColumn(),
+        (int) $pdo->query('SELECT COUNT(*) FROM im_friend_relation')->fetchColumn(),
+        (int) $pdo->query('SELECT COUNT(*) FROM im_realtime_control_outbox')->fetchColumn(),
+    ],
+    'Case-colliding relation lookup changed friend facts.',
+);
+$terminalRows = $pdo->query(
+    'SELECT event_type, organization, target_user_id, payload_json
+       FROM im_realtime_control_outbox
+      WHERE aggregate_type = "friend_request" AND aggregate_id = ' . $requestId . '
+      ORDER BY id ASC',
+)->fetchAll(PDO::FETCH_ASSOC);
+$acceptedPayload = json_decode((string) ($terminalRows[1]['payload_json'] ?? ''), true);
+$assert(
+    count($terminalRows) === 2
+    && $terminalRows[1]['event_type'] === 'friend_request.accepted'
+    && (int) $terminalRows[1]['organization'] === 901
+    && $terminalRows[1]['target_user_id'] === 'user_a'
+    && ($acceptedPayload['data']['event'] ?? null) === 'accepted'
+    && ($acceptedPayload['data']['status'] ?? null) === 2
+    && ($acceptedPayload['data']['actor_user_id'] ?? null) === 'user_d'
+    && ($acceptedPayload['data']['handle_time'] ?? null) === $now,
+    'Accepted friend request outbox direction or idempotency is invalid.',
+);
+$appendFriendEvent = (new ReflectionClass(ThinkOrmWebImControlStore::class))
+    ->getMethod('appendFriendRequestControlEvent');
+$appendFriendEvent->setAccessible(true);
+$requestRow = Db::query(
+    'SELECT * FROM im_friend_request WHERE id = ? LIMIT 1',
+    [$requestId],
+)[0];
+$appendFriendEvent->invoke(
+    new ThinkOrmWebImControlStore(),
+    $requestRow,
+    'friend_request.created',
+    901,
+    'user_d',
+    901,
+    'user_a',
+    null,
+    $now,
+);
+$assert(
+    (int) $pdo->query(
+        'SELECT COUNT(*) FROM im_realtime_control_outbox
+          WHERE aggregate_type = "friend_request" AND aggregate_id = ' . $requestId,
+    )->fetchColumn() === 2,
+    'Exact duplicate friend outbox insertion created another row.',
+);
+$pdo->exec(
+    'UPDATE im_realtime_control_outbox SET payload_json = "{}"
+      WHERE aggregate_type = "friend_request" AND aggregate_id = ' . $requestId . '
+        AND event_type = "friend_request.created"',
+);
+try {
+    $expectRuntime(
+        static fn () => $appendFriendEvent->invoke(
+            new ThinkOrmWebImControlStore(),
+            $requestRow,
+            'friend_request.created',
+            901,
+            'user_d',
+            901,
+            'user_a',
+            null,
+            $now,
+        ),
+        'Duplicate key must not hide immutable friend outbox payload drift.',
+    );
+} finally {
+    $restorePayload = $pdo->prepare(
+        'UPDATE im_realtime_control_outbox SET payload_json = ?
+          WHERE aggregate_type = "friend_request" AND aggregate_id = ?
+            AND event_type = "friend_request.created"',
+    );
+    $restorePayload->execute([$createdOutbox['payload_json'], $requestId]);
+}
+$erin = ['organization' => 901, 'user_id' => 'user_e'];
+$rejectedRequest = $service->sendFriendRequest($alice, 901, 'user_e', 'reject me');
+$rejectedRequestId = (int) $pdo->query(
+    'SELECT id FROM im_friend_request
+      WHERE organization = 901 AND from_user_id = "user_a" AND to_user_id = "user_e"
+      ORDER BY id DESC LIMIT 1',
+)->fetchColumn();
+$rejected = $service->handleFriendRequest($erin, $rejectedRequestId, 'reject');
+$rejectedAgain = $service->handleFriendRequest($erin, $rejectedRequestId, 'reject');
+$rejectedRows = $pdo->query(
+    'SELECT event_type, organization, target_user_id, payload_json
+       FROM im_realtime_control_outbox
+      WHERE aggregate_type = "friend_request" AND aggregate_id = ' . $rejectedRequestId . '
+      ORDER BY id ASC',
+)->fetchAll(PDO::FETCH_ASSOC);
+$rejectedPayload = json_decode((string) ($rejectedRows[1]['payload_json'] ?? ''), true);
+$assert(
+    $rejectedRequest['status'] === 'pending'
+    && $rejected['status'] === 'rejected'
+    && $rejectedAgain['status'] === 'rejected'
+    && count($rejectedRows) === 2
+    && $rejectedRows[1]['event_type'] === 'friend_request.rejected'
+    && (int) $rejectedRows[1]['organization'] === 901
+    && $rejectedRows[1]['target_user_id'] === 'user_a'
+    && ($rejectedPayload['data']['event'] ?? null) === 'rejected'
+    && ($rejectedPayload['data']['status'] ?? null) === 3
+    && ($rejectedPayload['data']['actor_user_id'] ?? null) === 'user_e',
+    'Rejected friend request outbox direction or idempotency is invalid.',
+);
+$ivan = ['organization' => 901, 'user_id' => 'user_i'];
+$judy = ['organization' => 901, 'user_id' => 'user_j'];
+$reversePending = $service->sendFriendRequest($ivan, 901, 'user_j', 'reverse pending');
+$reverseRequestId = (int) $pdo->query(
+    'SELECT id FROM im_friend_request
+      WHERE organization = 901
+        AND BINARY from_user_id = BINARY "user_i"
+        AND BINARY to_user_id = BINARY "user_j"
+      ORDER BY id DESC LIMIT 1',
+)->fetchColumn();
+$caseReverseFacts = [
+    (int) $pdo->query('SELECT status FROM im_friend_request WHERE id = ' . $reverseRequestId)->fetchColumn(),
+    (int) $pdo->query('SELECT COUNT(*) FROM im_friend_relation')->fetchColumn(),
+    (int) $pdo->query('SELECT COUNT(*) FROM im_realtime_control_outbox')->fetchColumn(),
+];
+$caseJudy = ['organization' => 901, 'user_id' => 'User_J'];
+$expectApiCode(422, static fn () => $service->sendFriendRequest($caseJudy, 901, 'user_i', 'case auto accept'));
+$assert(
+    $caseReverseFacts === [
+        (int) $pdo->query('SELECT status FROM im_friend_request WHERE id = ' . $reverseRequestId)->fetchColumn(),
+        (int) $pdo->query('SELECT COUNT(*) FROM im_friend_relation')->fetchColumn(),
+        (int) $pdo->query('SELECT COUNT(*) FROM im_realtime_control_outbox')->fetchColumn(),
+    ],
+    'Case-colliding reverse requester auto-accepted or wrote friend facts.',
+);
+$reverseAccepted = $service->sendFriendRequest($judy, 901, 'user_i', 'auto accept');
+$reverseAcceptedAgain = $service->sendFriendRequest($judy, 901, 'user_i', 'already friends');
+$reverseRows = $pdo->query(
+    'SELECT event_type, organization, target_user_id, payload_json
+       FROM im_realtime_control_outbox
+      WHERE aggregate_type = "friend_request" AND aggregate_id = ' . $reverseRequestId . '
+      ORDER BY id ASC',
+)->fetchAll(PDO::FETCH_ASSOC);
+$reversePayload = json_decode((string) ($reverseRows[1]['payload_json'] ?? ''), true);
+$reverseRelationCount = (int) $pdo->query(
+    'SELECT COUNT(*) FROM im_friend_relation
+      WHERE organization = 901
+        AND ((user_id = "user_i" AND friend_user_id = "user_j")
+          OR (user_id = "user_j" AND friend_user_id = "user_i"))
+        AND status = 1 AND delete_time IS NULL',
+)->fetchColumn();
+$assert(
+    $reversePending['status'] === 'pending'
+    && $reverseAccepted['status'] === 'accepted'
+    && $reverseAcceptedAgain['status'] === 'accepted'
+    && count($reverseRows) === 2
+    && $reverseRows[1]['event_type'] === 'friend_request.accepted'
+    && $reverseRows[1]['target_user_id'] === 'user_i'
+    && ($reversePayload['data']['actor_user_id'] ?? null) === 'user_j'
+    && ($reversePayload['data']['target_user_id'] ?? null) === 'user_i'
+    && $reverseRelationCount === 2,
+    'Reverse pending auto-accept did not atomically persist one terminal outbox event.',
+);
 $insertFriend->execute(['user_b', 'user_d', $now, $now, $now]);
 $assert($service->contacts($bob, 'Dan') === [], 'A unilateral relation leaked into contacts.');
 $bobSearchDan = $service->searchUsers($bob, 'dan');
@@ -1883,7 +2163,6 @@ $assert(
     && is_array($outboxPayload['message']['content'] ?? null),
     'Group notice outbox does not satisfy the Rabbit message.created contract.',
 );
-$assert(count($realtime->friendEvents) === 1, 'Group notice incorrectly used the Redis realtime side channel.');
 $broadcastRetry = $service->updateGroupProfile(
     $alice,
     $conversationId,
@@ -1898,8 +2177,7 @@ $noticeCount = (int) $pdo->query(
 )->fetchColumn();
 $assert(
     $broadcastRetry['notice_message'] === null
-    && $noticeCount === 1
-    && count($realtime->friendEvents) === 1,
+    && $noticeCount === 1,
     'Retrying an unchanged notify_all update created a duplicate group notice.',
 );
 

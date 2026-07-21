@@ -7,6 +7,7 @@ namespace plugin\saimulti\service\web;
 use B8im\ImShared\Protocol\MessageType;
 use plugin\saimulti\exception\ApiException;
 use OpenTelemetry\API\Trace\Span;
+use plugin\saimulti\service\RealtimeControlEventEnvelope;
 use plugin\saimulti\service\trace\Telemetry;
 use support\think\Db;
 
@@ -469,6 +470,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
 
     public function contacts(int $organization, string $userId, string $keyword): array
     {
+        $this->activeUser($organization, $userId, false, false);
         $crossOrganizationEnabled = CrossOrganizationSocialPolicy::isEnabled();
         $params = [$userId, $organization];
         $sql = 'SELECT u.*, COALESCE(p.signature, "") AS signature,
@@ -482,17 +484,17 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                    AND owner_org.delete_time IS NULL
             INNER JOIN im_user u
                     ON u.organization = fr.friend_organization
-                   AND u.user_id = fr.friend_user_id
+                   AND BINARY u.user_id = BINARY fr.friend_user_id
              LEFT JOIN im_user_profile p
                     ON p.organization = u.organization
-                   AND p.user_id = u.user_id
+                   AND BINARY p.user_id = BINARY u.user_id
                    AND p.status = 1
                    AND p.delete_time IS NULL
             INNER JOIN sm_system_organization org
                     ON org.id = u.organization
                    AND org.status = 1
                    AND org.delete_time IS NULL
-                 WHERE fr.user_id = ?
+                 WHERE BINARY fr.user_id = BINARY ?
                    AND fr.organization = ?
                    AND fr.friend_organization > 0
                    AND fr.status = 1
@@ -500,9 +502,9 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                    AND EXISTS (
                        SELECT 1 FROM im_friend_relation reverse_fr
                         WHERE reverse_fr.organization = fr.friend_organization
-                          AND reverse_fr.user_id = fr.friend_user_id
+                          AND BINARY reverse_fr.user_id = BINARY fr.friend_user_id
                           AND reverse_fr.friend_organization = fr.organization
-                          AND reverse_fr.friend_user_id = fr.user_id
+                          AND BINARY reverse_fr.friend_user_id = BINARY fr.user_id
                           AND reverse_fr.status = 1
                           AND reverse_fr.delete_time IS NULL
                    )
@@ -532,6 +534,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
     public function searchUsers(int $organization, string $userId, string $keyword): array
     {
         (new WebImConversationAccessGuard())->assertActiveOrganizations([$organization]);
+        $this->activeUser($organization, $userId, false, false);
         $pattern = $this->likePattern($keyword);
         $rows = Db::query(
             'SELECT u.*, COALESCE(p.signature, "") AS signature,
@@ -542,26 +545,26 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                         WHEN fr.id IS NOT NULL AND EXISTS (
                             SELECT 1 FROM im_friend_relation reverse_fr
                              WHERE reverse_fr.organization = fr.friend_organization
-                               AND reverse_fr.user_id = fr.friend_user_id
+                               AND BINARY reverse_fr.user_id = BINARY fr.friend_user_id
                                AND reverse_fr.friend_organization = fr.organization
-                               AND reverse_fr.friend_user_id = fr.user_id
+                               AND BINARY reverse_fr.friend_user_id = BINARY fr.user_id
                                AND reverse_fr.status = 1
                                AND reverse_fr.delete_time IS NULL
                         ) THEN "friend"
                         WHEN EXISTS (
                             SELECT 1 FROM im_friend_request outgoing
-                             WHERE outgoing.from_user_id = ?
+                             WHERE BINARY outgoing.from_user_id = BINARY ?
                                AND outgoing.from_organization = ?
-                               AND outgoing.to_user_id = u.user_id
+                               AND BINARY outgoing.to_user_id = BINARY u.user_id
                                AND outgoing.to_organization = u.organization
                                AND outgoing.status = 1
                                AND outgoing.delete_time IS NULL
                         ) THEN "pending_out"
                         WHEN EXISTS (
                             SELECT 1 FROM im_friend_request incoming
-                             WHERE incoming.from_user_id = u.user_id
+                             WHERE BINARY incoming.from_user_id = BINARY u.user_id
                                AND incoming.from_organization = u.organization
-                               AND incoming.to_user_id = ?
+                               AND BINARY incoming.to_user_id = BINARY ?
                                AND incoming.to_organization = ?
                                AND incoming.status = 1
                                AND incoming.delete_time IS NULL
@@ -571,17 +574,17 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                FROM im_user u
           LEFT JOIN im_user_profile p
                  ON p.organization = u.organization
-                AND p.user_id = u.user_id
+                AND BINARY p.user_id = BINARY u.user_id
                 AND p.status = 1
                 AND p.delete_time IS NULL
           LEFT JOIN im_user_privacy_setting ps
                  ON ps.organization = u.organization
-                AND ps.user_id = u.user_id
+                AND BINARY ps.user_id = BINARY u.user_id
           LEFT JOIN im_friend_relation fr
                 ON fr.organization = ?
-                AND fr.user_id = ?
+                AND BINARY fr.user_id = BINARY ?
                 AND fr.friend_organization = u.organization
-                AND fr.friend_user_id = u.user_id
+                AND BINARY fr.friend_user_id = BINARY u.user_id
                 AND fr.status = 1
                 AND fr.delete_time IS NULL
          INNER JOIN sm_system_organization org
@@ -589,7 +592,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 AND org.status = 1
                 AND org.delete_time IS NULL
               WHERE u.organization = ?
-                AND u.user_id <> ?
+                AND NOT (BINARY u.user_id = BINARY ?)
                 AND u.status = 1
                 AND u.is_system = 2
                 AND u.delete_time IS NULL
@@ -636,26 +639,26 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                             WHEN fr.id IS NOT NULL AND EXISTS (
                                 SELECT 1 FROM im_friend_relation reverse_fr
                                  WHERE reverse_fr.organization = fr.friend_organization
-                                   AND reverse_fr.user_id = fr.friend_user_id
+                                   AND BINARY reverse_fr.user_id = BINARY fr.friend_user_id
                                    AND reverse_fr.friend_organization = fr.organization
-                                   AND reverse_fr.friend_user_id = fr.user_id
+                                   AND BINARY reverse_fr.friend_user_id = BINARY fr.user_id
                                    AND reverse_fr.status = 1
                                    AND reverse_fr.delete_time IS NULL
                             ) THEN "friend"
                             WHEN EXISTS (
                                 SELECT 1 FROM im_friend_request outgoing
-                                 WHERE outgoing.from_user_id = ?
+                                 WHERE BINARY outgoing.from_user_id = BINARY ?
                                    AND outgoing.from_organization = ?
-                                   AND outgoing.to_user_id = u.user_id
+                                   AND BINARY outgoing.to_user_id = BINARY u.user_id
                                    AND outgoing.to_organization = u.organization
                                    AND outgoing.status = 1
                                    AND outgoing.delete_time IS NULL
                             ) THEN "pending_out"
                             WHEN EXISTS (
                                 SELECT 1 FROM im_friend_request incoming
-                                 WHERE incoming.from_user_id = u.user_id
+                                 WHERE BINARY incoming.from_user_id = BINARY u.user_id
                                    AND incoming.from_organization = u.organization
-                                   AND incoming.to_user_id = ?
+                                   AND BINARY incoming.to_user_id = BINARY ?
                                    AND incoming.to_organization = ?
                                    AND incoming.status = 1
                                    AND incoming.delete_time IS NULL
@@ -665,17 +668,17 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                    FROM im_user u
               LEFT JOIN im_user_profile p
                      ON p.organization = u.organization
-                    AND p.user_id = u.user_id
+                    AND BINARY p.user_id = BINARY u.user_id
                     AND p.status = 1
                     AND p.delete_time IS NULL
               LEFT JOIN im_user_privacy_setting ps
                      ON ps.organization = u.organization
-                    AND ps.user_id = u.user_id
+                    AND BINARY ps.user_id = BINARY u.user_id
               LEFT JOIN im_friend_relation fr
                 ON fr.organization = ?
-                AND fr.user_id = ?
+                AND BINARY fr.user_id = BINARY ?
                 AND fr.friend_organization = u.organization
-                AND fr.friend_user_id = u.user_id
+                AND BINARY fr.friend_user_id = BINARY u.user_id
                     AND fr.status = 1
                     AND fr.delete_time IS NULL
              INNER JOIN sm_system_organization org
@@ -687,10 +690,10 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                     AND u.is_system = 2
                     AND u.delete_time IS NULL
                     AND (
-                        (u.user_id = ? OR u.account = ? OR u.im_short_no = ? OR u.mobile = ?)
+                        (BINARY u.user_id = BINARY ? OR u.account = ? OR u.im_short_no = ? OR u.mobile = ?)
                     )
                     AND (
-                        ((u.account = ? OR u.user_id = ?) AND COALESCE(ps.allow_add_by_username, 1) = 1)
+                        ((u.account = ? OR BINARY u.user_id = BINARY ?) AND COALESCE(ps.allow_add_by_username, 1) = 1)
                         OR (u.mobile = ? AND COALESCE(ps.allow_add_by_mobile, 1) = 1)
                         OR (u.im_short_no = ? AND COALESCE(ps.allow_add_by_short_no, 1) = 1)
                     )
@@ -743,6 +746,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
 
     public function friendRequests(int $organization, string $userId): array
     {
+        $this->activeUser($organization, $userId, false, false);
         $crossOrganizationEnabled = CrossOrganizationSocialPolicy::isEnabled();
         $policySql = $crossOrganizationEnabled ? '' : ' AND from_organization = to_organization';
         $rows = Db::query(
@@ -764,8 +768,8 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                        AND to_org.delete_time IS NULL
                 )
                 AND (
-                    (from_organization = ? AND from_user_id = ?)
-                    OR (to_organization = ? AND to_user_id = ?)
+                    (from_organization = ? AND BINARY from_user_id = BINARY ?)
+                    OR (to_organization = ? AND BINARY to_user_id = BINARY ?)
                 )' . $policySql . '
            ORDER BY id DESC
               LIMIT 100',
@@ -850,7 +854,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 [$organization, $toOrganization],
                 true,
             );
-            [$fromUser, $toUser] = $this->activeUserPairForUpdate(
+            $this->activeUserPairForUpdate(
                 $organization,
                 $fromUserId,
                 $toOrganization,
@@ -874,7 +878,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             }
             $privacy = Db::query(
                 'SELECT allow_add_by_username FROM im_user_privacy_setting
-                  WHERE organization = ? AND user_id = ?
+                  WHERE organization = ? AND BINARY user_id = BINARY ?
                   LIMIT 1
                   FOR UPDATE',
                 [$toOrganization, $toUserId],
@@ -901,11 +905,24 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                     'username',
                     $now,
                 );
-                Db::execute(
+                $updated = Db::execute(
                     'UPDATE im_friend_request
                         SET status = 2, handle_time = ?, update_time = ?
                       WHERE id = ? AND status = 1',
                     [$now, $now, (int) $reversePending['id']],
+                );
+                if ($updated !== 1) {
+                    throw new \RuntimeException('Reverse friend request transition failed.');
+                }
+                $this->appendFriendRequestControlEvent(
+                    $reversePending,
+                    'friend_request.accepted',
+                    (int) $reversePending['from_organization'],
+                    (string) $reversePending['from_user_id'],
+                    (int) $reversePending['to_organization'],
+                    (string) $reversePending['to_user_id'],
+                    $crossOrgAccessSnapshotId,
+                    $now,
                 );
 
                 return ['status' => 'accepted', 'message' => '已接受对方的好友申请'];
@@ -927,33 +944,27 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 'create_time' => $now,
                 'update_time' => $now,
             ]);
-            $pendingCount = Db::query(
-                'SELECT COUNT(*) AS aggregate FROM im_friend_request
-                  WHERE to_organization = ?
-                    AND to_user_id = ?
-                    AND status = 1
-                    AND delete_time IS NULL',
-                [$toOrganization, $toUserId],
-            )[0]['aggregate'] ?? 0;
+            $this->appendFriendRequestControlEvent(
+                [
+                    'id' => $requestId,
+                    'from_organization' => $organization,
+                    'from_user_id' => $fromUserId,
+                    'to_organization' => $toOrganization,
+                    'to_user_id' => $toUserId,
+                    'create_time' => $now,
+                ],
+                'friend_request.created',
+                $toOrganization,
+                $toUserId,
+                $organization,
+                $fromUserId,
+                $crossOrgAccessSnapshotId,
+                $now,
+            );
 
             return [
                 'status' => 'pending',
                 'message' => '好友申请已发送',
-                '_realtime_event_organization' => $toOrganization,
-                '_realtime_event' => [
-                    ...($crossOrgAccessSnapshotId !== null ? [
-                        'cross_org_access_snapshot_id' => $crossOrgAccessSnapshotId,
-                    ] : []),
-                    'request_id' => (int) $requestId,
-                    'from_user_id' => $fromUserId,
-                    'to_user_id' => $toUserId,
-                    'from_organization' => $organization,
-                    'to_organization' => $toOrganization,
-                    'message' => $message,
-                    'pending_count' => (int) $pendingCount,
-                    'create_time' => $now,
-                    'from_user' => $this->userView($fromUser, '', 'none', $toOrganization),
-                ],
             ];
         });
     }
@@ -965,6 +976,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         string $action,
         string $now,
     ): array {
+        $this->activeUser($organization, $userId, false, false);
         // Discover the participant homes before the transaction. The exact
         // request is locked and revalidated only after the common
         // policy -> organizations -> users prefix below.
@@ -972,7 +984,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             'SELECT from_organization, from_user_id, to_organization
                FROM im_friend_request
               WHERE id = ?
-                AND to_user_id = ?
+                AND BINARY to_user_id = BINARY ?
                 AND to_organization = ?
                 AND organization = to_organization
                 AND delete_time IS NULL
@@ -1001,6 +1013,9 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             if ($crossOrg && !$policy['enabled']) {
                 throw new ApiException('跨租户好友未开放。', 403);
             }
+            $crossOrgAccessSnapshotId = $crossOrg
+                ? (string) $policy['access_snapshot_id']
+                : null;
             (new WebImConversationAccessGuard())->assertActiveOrganizations(
                 [$fromOrganization, $toOrganization],
                 true,
@@ -1017,9 +1032,9 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 'SELECT * FROM im_friend_request
                   WHERE id = ?
                     AND from_organization = ?
-                    AND from_user_id = ?
+                    AND BINARY from_user_id = BINARY ?
                     AND to_organization = ?
-                    AND to_user_id = ?
+                    AND BINARY to_user_id = BINARY ?
                     AND organization = ?
                     AND organization = to_organization
                     AND delete_time IS NULL
@@ -1069,21 +1084,47 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                     (string) $request['add_method'],
                     $now,
                 );
-                Db::execute(
+                $updated = Db::execute(
                     'UPDATE im_friend_request
                         SET status = 2, handle_time = ?, update_time = ?
                       WHERE id = ? AND status = 1',
                     [$now, $now, $requestId],
                 );
+                if ($updated !== 1) {
+                    throw new \RuntimeException('Friend request accept transition failed.');
+                }
+                $this->appendFriendRequestControlEvent(
+                    $request,
+                    'friend_request.accepted',
+                    $lockedFromOrganization,
+                    $lockedFromUserId,
+                    $lockedToOrganization,
+                    $lockedToUserId,
+                    $crossOrgAccessSnapshotId,
+                    $now,
+                );
 
                 return ['status' => 'accepted'];
             }
 
-            Db::execute(
+            $updated = Db::execute(
                 'UPDATE im_friend_request
                     SET status = 3, handle_time = ?, update_time = ?
                   WHERE id = ? AND status = 1',
                 [$now, $now, $requestId],
+            );
+            if ($updated !== 1) {
+                throw new \RuntimeException('Friend request reject transition failed.');
+            }
+            $this->appendFriendRequestControlEvent(
+                $request,
+                'friend_request.rejected',
+                $lockedFromOrganization,
+                $lockedFromUserId,
+                $lockedToOrganization,
+                $lockedToUserId,
+                $crossOrgAccessSnapshotId,
+                $now,
             );
 
             return ['status' => 'rejected'];
@@ -1518,9 +1559,9 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             $relation = Db::query(
                 'SELECT id FROM im_friend_relation
                   WHERE organization = ?
-                    AND user_id = ?
+                    AND BINARY user_id = BINARY ?
                     AND friend_organization = ?
-                    AND friend_user_id = ?
+                    AND BINARY friend_user_id = BINARY ?
                     AND status = 1
                     AND delete_time IS NULL
                   LIMIT 1
@@ -1533,7 +1574,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             Db::execute(
                 'UPDATE im_friend_relation
                     SET remark_name = ?, update_time = ?
-                  WHERE id = ? AND organization = ? AND user_id = ?',
+                  WHERE id = ? AND organization = ? AND BINARY user_id = BINARY ?',
                 [$remark !== '' ? $remark : null, $now, (int) $relation['id'], $organization, $userId],
             );
 
@@ -2432,14 +2473,14 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                    FROM im_user u
               LEFT JOIN im_friend_relation fr
                      ON fr.organization = ?
-                    AND fr.user_id = ?
+                    AND BINARY fr.user_id = BINARY ?
                     AND fr.friend_organization = u.organization
-                    AND fr.friend_user_id = u.user_id
+                    AND BINARY fr.friend_user_id = BINARY u.user_id
                     AND fr.status = 1
                     AND fr.delete_time IS NULL
               LEFT JOIN im_user_profile p
                      ON p.organization = u.organization
-                    AND p.user_id = u.user_id
+                    AND BINARY p.user_id = BINARY u.user_id
                     AND p.status = 1
                     AND p.delete_time IS NULL
              INNER JOIN sm_system_organization org
@@ -2447,7 +2488,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                     AND org.status = 1
                     AND org.delete_time IS NULL
                   WHERE u.organization = ?
-                    AND u.user_id = ?
+                    AND BINARY u.user_id = BINARY ?
                     AND u.delete_time IS NULL
                   LIMIT 1',
                 [
@@ -3158,6 +3199,23 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         int $rightOrganization,
         string $rightUserId,
     ): array {
+        return $this->activeUserPair(
+            $leftOrganization,
+            $leftUserId,
+            $rightOrganization,
+            $rightUserId,
+            true,
+        );
+    }
+
+    /** @return array{0: array<string, mixed>, 1: array<string, mixed>} */
+    private function activeUserPair(
+        int $leftOrganization,
+        string $leftUserId,
+        int $rightOrganization,
+        string $rightUserId,
+        bool $lock,
+    ): array {
         $leftIdentity = SingleConversationIdentity::identity(
             $leftOrganization,
             $leftUserId,
@@ -3167,11 +3225,9 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             $rightUserId,
         );
         if (hash_equals($leftIdentity, $rightIdentity)) {
-            $user = $this->activeUserForUpdate(
-                $leftOrganization,
-                $leftUserId,
-                false,
-            );
+            $user = $lock
+                ? $this->activeUserForUpdate($leftOrganization, $leftUserId, false)
+                : $this->activeUser($leftOrganization, $leftUserId, false, false);
 
             return [$user, $user];
         }
@@ -3198,11 +3254,9 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
 
         $locked = [];
         foreach ($users as $user) {
-            $locked[$user['identity']] = $this->activeUserForUpdate(
-                $user['organization'],
-                $user['user_id'],
-                false,
-            );
+            $locked[$user['identity']] = $lock
+                ? $this->activeUserForUpdate($user['organization'], $user['user_id'], false)
+                : $this->activeUser($user['organization'], $user['user_id'], false, false);
         }
 
         return [$locked[$leftIdentity], $locked[$rightIdentity]];
@@ -3211,17 +3265,28 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
     /** @return array<string, mixed> */
     private function activeUserForUpdate(int $organization, string $userId, bool $allowSystem): array
     {
+        return $this->activeUser($organization, $userId, $allowSystem, true);
+    }
+
+    /** @return array<string, mixed> */
+    private function activeUser(
+        int $organization,
+        string $userId,
+        bool $allowSystem,
+        bool $lock,
+    ): array {
         $sql = 'SELECT u.*
                   FROM im_user u
                  WHERE u.organization = ?
-                   AND u.user_id = ?
+                   AND BINARY u.user_id = BINARY ?
                    AND u.status = 1
                    AND u.delete_time IS NULL'
             . ($allowSystem ? '' : ' AND u.is_system = 2')
-            . ' LIMIT 1 FOR UPDATE';
+            . ' LIMIT 1'
+            . ($lock ? ' FOR UPDATE' : '');
         $user = Db::query($sql, [$organization, $userId])[0] ?? null;
         if ($user === null) {
-            throw new ApiException('用户不存在或已停用。', 404);
+            throw new ApiException('用户身份不存在、不精确或已停用。', 422);
         }
 
         return $user;
@@ -3241,7 +3306,7 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                    AND org.status = 1
                    AND org.delete_time IS NULL
                  WHERE u.organization = ?
-                   AND u.user_id IN (' . $placeholders . ')
+                   AND BINARY u.user_id IN (' . $placeholders . ')
                    AND u.status = 1
                    AND u.delete_time IS NULL'
             . ($allowSystem ? '' : ' AND u.is_system = 2')
@@ -3268,14 +3333,13 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 $lock,
             );
         }
-        if ($lock) {
-            $this->activeUserPairForUpdate(
-                $organization,
-                $userId,
-                $friendOrganization,
-                $friendUserId,
-            );
-        }
+        $this->activeUserPair(
+            $organization,
+            $userId,
+            $friendOrganization,
+            $friendUserId,
+            $lock,
+        );
         $lockSql = $lock ? ' FOR UPDATE' : '';
         $friends = true;
         foreach (self::canonicalFriendDirections(
@@ -3288,9 +3352,9 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                 'SELECT id, organization, user_id, friend_organization, friend_user_id
                    FROM im_friend_relation
                   WHERE organization = ?
-                    AND user_id = ?
+                    AND BINARY user_id = BINARY ?
                     AND friend_organization = ?
-                    AND friend_user_id = ?
+                    AND BINARY friend_user_id = BINARY ?
                     AND status = 1
                     AND delete_time IS NULL
                   LIMIT 1' . $lockSql,
@@ -3412,9 +3476,9 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
             $rows = Db::query(
                 'SELECT * FROM im_friend_request
                   WHERE from_organization = ?
-                    AND from_user_id = ?
+                    AND BINARY from_user_id = BINARY ?
                     AND to_organization = ?
-                    AND to_user_id = ?
+                    AND BINARY to_user_id = BINARY ?
                     AND status = 1
                     AND delete_time IS NULL
                ORDER BY id ASC
@@ -3430,6 +3494,151 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
         }
 
         return $pending;
+    }
+
+    /** @param array<string,mixed> $request */
+    private function appendFriendRequestControlEvent(
+        array $request,
+        string $eventType,
+        int $targetOrganization,
+        string $targetUserId,
+        int $actorOrganization,
+        string $actorUserId,
+        ?string $crossOrgAccessSnapshotId,
+        string $now,
+    ): void {
+        $requestId = (int) ($request['id'] ?? 0);
+        $fromOrganization = $this->requiredOrganization(
+            $request,
+            'from_organization',
+            '好友申请控制事件',
+        );
+        $toOrganization = $this->requiredOrganization(
+            $request,
+            'to_organization',
+            '好友申请控制事件',
+        );
+        $fromUserId = (string) ($request['from_user_id'] ?? '');
+        $toUserId = (string) ($request['to_user_id'] ?? '');
+        $createTime = (string) ($request['create_time'] ?? '');
+        $handleTime = $eventType === 'friend_request.created' ? null : $now;
+        $envelope = RealtimeControlEventEnvelope::friendRequest(
+            $eventType,
+            $requestId,
+            $fromOrganization,
+            $fromUserId,
+            $toOrganization,
+            $toUserId,
+            $targetOrganization,
+            $targetUserId,
+            $actorOrganization,
+            $actorUserId,
+            $crossOrgAccessSnapshotId,
+            $createTime,
+            $handleTime,
+        );
+        $payloadJson = json_encode(
+            $envelope,
+            JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES,
+        );
+        $trace = Telemetry::currentTraceHeaders();
+        $immutable = [
+            'event_id' => $envelope['event_id'],
+            'aggregate_type' => 'friend_request',
+            'aggregate_id' => $requestId,
+            'event_type' => $eventType,
+            'organization' => $targetOrganization,
+            'target_user_id' => $targetUserId,
+            'payload_json' => $payloadJson,
+            'traceparent' => $trace['traceparent'] ?? null,
+            'tracestate' => $trace['tracestate'] ?? null,
+        ];
+
+        try {
+            Db::execute(
+                'INSERT INTO im_realtime_control_outbox
+                    (event_id, aggregate_type, aggregate_id, event_type, organization,
+                     target_user_id, payload_json, traceparent, tracestate, status,
+                     retry_count, next_retry_at, create_time, update_time)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?)',
+                [
+                    $immutable['event_id'],
+                    $immutable['aggregate_type'],
+                    $immutable['aggregate_id'],
+                    $immutable['event_type'],
+                    $immutable['organization'],
+                    $immutable['target_user_id'],
+                    $immutable['payload_json'],
+                    $immutable['traceparent'],
+                    $immutable['tracestate'],
+                    null,
+                    $now,
+                    $now,
+                ],
+            );
+
+            return;
+        } catch (\Throwable $exception) {
+            if (!$this->isDuplicateKey($exception)) {
+                throw $exception;
+            }
+        }
+
+        $rows = Db::query(
+            'SELECT event_id, aggregate_type, aggregate_id, event_type, organization,
+                    target_user_id, payload_json, traceparent, tracestate
+               FROM im_realtime_control_outbox
+              WHERE BINARY event_id = BINARY ?
+                 OR (
+                    aggregate_type = ? AND aggregate_id = ? AND event_type = ?
+                    AND organization = ? AND BINARY target_user_id = BINARY ?
+                 )
+              FOR UPDATE',
+            [
+                $immutable['event_id'],
+                $immutable['aggregate_type'],
+                $immutable['aggregate_id'],
+                $immutable['event_type'],
+                $immutable['organization'],
+                $immutable['target_user_id'],
+            ],
+        );
+        if (count($rows) !== 1) {
+            throw new \RuntimeException('Friend request outbox unique conflict is ambiguous.');
+        }
+        $row = $rows[0];
+        foreach ($immutable as $field => $expected) {
+            $actual = $row[$field] ?? null;
+            if ($field === 'aggregate_id' || $field === 'organization') {
+                $matches = (string) $actual === (string) $expected;
+            } elseif ($expected === null) {
+                $matches = $actual === null;
+            } else {
+                $matches = is_string($actual) && hash_equals((string) $expected, $actual);
+            }
+            if (!$matches) {
+                throw new \RuntimeException(
+                    'Friend request outbox immutable payload drift: ' . $field,
+                );
+            }
+        }
+    }
+
+    private function isDuplicateKey(\Throwable $exception): bool
+    {
+        do {
+            if ($exception instanceof \PDOException
+                && (int) ($exception->errorInfo[1] ?? 0) === 1062) {
+                return true;
+            }
+            if (str_contains($exception->getMessage(), 'Duplicate entry')
+                && str_contains($exception->getMessage(), '1062')) {
+                return true;
+            }
+            $exception = $exception->getPrevious();
+        } while ($exception instanceof \Throwable);
+
+        return false;
     }
 
     private function upsertFriend(
@@ -3473,11 +3682,11 @@ final class ThinkOrmWebImControlStore implements WebImControlStoreInterface
                    AND org.delete_time IS NULL
              LEFT JOIN im_user_profile p
                     ON p.organization = u.organization
-                   AND p.user_id = u.user_id
+                   AND BINARY p.user_id = BINARY u.user_id
                    AND p.status = 1
                    AND p.delete_time IS NULL
                  WHERE u.organization = ?
-                   AND u.user_id IN (' . $placeholders . ')
+                   AND BINARY u.user_id IN (' . $placeholders . ')
                    AND u.delete_time IS NULL';
         if ($activeOnly) {
             $sql .= ' AND u.status = 1';

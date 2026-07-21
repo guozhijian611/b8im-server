@@ -178,6 +178,51 @@ CREATE TABLE im_friend_request (
   update_time datetime NULL,
   delete_time datetime NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE im_realtime_control_outbox (
+  id bigint unsigned NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  event_id char(64) NOT NULL,
+  aggregate_type varchar(32) NOT NULL,
+  aggregate_id bigint unsigned NOT NULL,
+  event_type varchar(64) NOT NULL,
+  organization int unsigned NOT NULL,
+  target_user_id varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+  payload_json longtext NOT NULL,
+  traceparent char(55) NULL,
+  tracestate varchar(512) NULL,
+  status tinyint unsigned NOT NULL DEFAULT 1,
+  retry_count int unsigned NOT NULL DEFAULT 0,
+  next_retry_at datetime NULL,
+  locked_until datetime NULL,
+  worker_id varchar(64) NULL,
+  claim_token char(40) NULL,
+  published_at datetime NULL,
+  last_error varchar(500) NULL,
+  create_time datetime NOT NULL,
+  update_time datetime NOT NULL,
+  UNIQUE KEY uni_realtime_control_event (event_id),
+  UNIQUE KEY uni_realtime_control_transition
+    (aggregate_type, aggregate_id, event_type, organization, target_user_id),
+  KEY idx_realtime_control_claim (status, next_retry_at, locked_until, id),
+  CONSTRAINT chk_realtime_control_event_id CHECK (event_id REGEXP '^[0-9a-f]{64}$'),
+  CONSTRAINT chk_realtime_control_aggregate
+    CHECK (aggregate_type = 'friend_request' AND aggregate_id > 0),
+  CONSTRAINT chk_realtime_control_event_type
+    CHECK (event_type IN ('friend_request.created','friend_request.accepted','friend_request.rejected')),
+  CONSTRAINT chk_realtime_control_target
+    CHECK (organization > 0 AND target_user_id <> ''
+      AND BINARY target_user_id = BINARY TRIM(target_user_id)
+      AND LOCATE(CHAR(0),target_user_id) = 0 AND LOCATE('|',target_user_id) = 0),
+  CONSTRAINT chk_realtime_control_payload_json CHECK (JSON_VALID(payload_json)),
+  CONSTRAINT chk_realtime_control_status CHECK (status IN (1,2,3,4,5)),
+  CONSTRAINT chk_realtime_control_retry_count CHECK (retry_count <= 10),
+  CONSTRAINT chk_realtime_control_claim_state
+    CHECK ((status=2 AND locked_until IS NOT NULL AND worker_id IS NOT NULL AND claim_token IS NOT NULL)
+      OR (status<>2 AND locked_until IS NULL AND worker_id IS NULL AND claim_token IS NULL)),
+  CONSTRAINT chk_realtime_control_retry_state
+    CHECK ((status=4 AND next_retry_at IS NOT NULL) OR (status<>4 AND next_retry_at IS NULL)),
+  CONSTRAINT chk_realtime_control_publish_state
+    CHECK ((status=3 AND published_at IS NOT NULL) OR (status<>3 AND published_at IS NULL))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 CREATE TABLE im_conversation (
   id bigint unsigned NOT NULL AUTO_INCREMENT PRIMARY KEY,
   organization int unsigned NOT NULL,
@@ -676,10 +721,38 @@ PHP;
             AND status = 2
             AND delete_time IS NULL",
     )->fetchColumn();
+    $reverseOutboxRows = $pdo->query(
+        "SELECT o.event_type, o.organization, o.target_user_id, o.payload_json,
+                r.from_organization, r.from_user_id, r.to_organization, r.to_user_id
+           FROM im_realtime_control_outbox o
+     INNER JOIN im_friend_request r ON r.id = o.aggregate_id
+          WHERE o.aggregate_type = 'friend_request'
+            AND r.from_user_id = 'lock_user' AND r.to_user_id = 'lock_user'
+            AND ((r.from_organization = 2 AND r.to_organization = 10)
+              OR (r.from_organization = 10 AND r.to_organization = 2))
+       ORDER BY o.id",
+    )->fetchAll(PDO::FETCH_ASSOC);
+    $reverseOutboxValid = count($reverseOutboxRows) === 2;
+    foreach ($reverseOutboxRows as $row) {
+        $payload = json_decode((string) $row['payload_json'], true);
+        $created = $row['event_type'] === 'friend_request.created';
+        $expectedOrganization = (int) $row[
+            $created ? 'to_organization' : 'from_organization'
+        ];
+        $expectedUserId = (string) $row[$created ? 'to_user_id' : 'from_user_id'];
+        $reverseOutboxValid = $reverseOutboxValid
+            && (int) $row['organization'] === $expectedOrganization
+            && $row['target_user_id'] === $expectedUserId
+            && ($payload['organization'] ?? null) === (string) $expectedOrganization
+            && ($payload['data']['target_user_id'] ?? null) === $expectedUserId
+            && ($payload['data']['event'] ?? null) === ($created ? 'created' : 'accepted')
+            && ($payload['data']['cross_org_access_snapshot_id'] ?? null) === '1';
+    }
     $reverseProbePassed = $childErrors === []
         && $reverseStatuses === ['accepted', 'pending']
         && $reverseRelations === 2
-        && $acceptedReverseRequests === 1;
+        && $acceptedReverseRequests === 1
+        && $reverseOutboxValid;
     $assert(
         $reverseProbePassed,
         '2/10 reverse concurrent friend requests serialize without deadlock or duplicate gaps: '
@@ -687,6 +760,7 @@ PHP;
             'results' => $reverseResults,
             'relations' => $reverseRelations,
             'accepted_requests' => $acceptedReverseRequests,
+            'outbox' => $reverseOutboxRows,
             'child_errors' => $childErrors,
         ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)),
     );
@@ -1069,21 +1143,53 @@ $assert(
 
 $sent = $store->sendFriendRequest(1, 'u1', 2, 'u2', 'hello cross', $now);
 $assert(($sent['status'] ?? '') === 'pending', 'friend request pending');
-$assert((int) ($sent['_realtime_event_organization'] ?? 0) === 2, 'realtime targets recipient org');
-$assert(
-    ($sent['_realtime_event']['cross_org_access_snapshot_id'] ?? '') === '1',
-    'cross-org friend realtime event binds the transaction access snapshot',
-);
 
 $requests = $store->friendRequests(2, 'u2');
 $assert(count($requests) >= 1, 'recipient sees request');
 $requestId = (int) $requests[0]['id'];
+$createdControl = $pdo->query(
+    'SELECT * FROM im_realtime_control_outbox
+      WHERE aggregate_type = "friend_request" AND aggregate_id = ' . $requestId . '
+        AND event_type = "friend_request.created"',
+)->fetch(PDO::FETCH_ASSOC);
+$createdControlPayload = is_array($createdControl)
+    ? json_decode((string) $createdControl['payload_json'], true)
+    : null;
+$assert(
+    is_array($createdControl)
+    && (int) $createdControl['organization'] === 2
+    && $createdControl['target_user_id'] === 'u2'
+    && ($createdControlPayload['organization'] ?? null) === '2'
+    && ($createdControlPayload['data']['event'] ?? null) === 'created'
+    && ($createdControlPayload['data']['target_organization'] ?? null) === '2'
+    && ($createdControlPayload['data']['actor_organization'] ?? null) === '1'
+    && ($createdControlPayload['data']['cross_org_access_snapshot_id'] ?? null) === '1',
+    'cross-org friend created outbox binds the target home and transaction snapshot',
+);
 $accepted = $store->handleFriendRequest(2, 'u2', $requestId, 'accept', $now);
 $assert(($accepted['status'] ?? '') === 'accepted', 'accept ok');
 
 // Accept again is idempotent
 $acceptedAgain = $store->handleFriendRequest(2, 'u2', $requestId, 'accept', $now);
 $assert(($acceptedAgain['status'] ?? '') === 'accepted', 'accept idempotent');
+$handledControls = $pdo->query(
+    'SELECT event_type, organization, target_user_id, payload_json
+       FROM im_realtime_control_outbox
+      WHERE aggregate_type = "friend_request" AND aggregate_id = ' . $requestId . '
+      ORDER BY id',
+)->fetchAll(PDO::FETCH_ASSOC);
+$acceptedControlPayload = json_decode((string) ($handledControls[1]['payload_json'] ?? ''), true);
+$assert(
+    count($handledControls) === 2
+    && $handledControls[1]['event_type'] === 'friend_request.accepted'
+    && (int) $handledControls[1]['organization'] === 1
+    && $handledControls[1]['target_user_id'] === 'u1'
+    && ($acceptedControlPayload['data']['event'] ?? null) === 'accepted'
+    && ($acceptedControlPayload['data']['target_organization'] ?? null) === '1'
+    && ($acceptedControlPayload['data']['actor_organization'] ?? null) === '2'
+    && ($acceptedControlPayload['data']['cross_org_access_snapshot_id'] ?? null) === '1',
+    'cross-org friend acceptance emits exactly one event to the original applicant',
+);
 
 $contacts1 = $store->contacts(1, 'u1', '');
 $assert(count($contacts1) === 1, 'org1 has one contact');
@@ -1806,9 +1912,47 @@ $pdo->prepare('INSERT INTO im_user_privacy_setting (organization, user_id, creat
     ->execute(['u3', $now, $now]);
 $same = $store->sendFriendRequest(1, 'u1', 1, 'u3', 'same org', $now);
 $assert(($same['status'] ?? '') === 'pending', 'same-org friend still works when switch off');
+$sameRequestId = (int) $pdo->query(
+    'SELECT id FROM im_friend_request
+      WHERE from_organization = 1 AND from_user_id = "u1"
+        AND to_organization = 1 AND to_user_id = "u3"
+      ORDER BY id DESC LIMIT 1',
+)->fetchColumn();
+$sameControlJson = (string) $pdo->query(
+    'SELECT payload_json FROM im_realtime_control_outbox
+      WHERE aggregate_type = "friend_request" AND aggregate_id = ' . $sameRequestId . '
+        AND event_type = "friend_request.created"',
+)->fetchColumn();
+$sameControl = json_decode($sameControlJson, true, flags: JSON_THROW_ON_ERROR);
 $assert(
-    !array_key_exists('cross_org_access_snapshot_id', $same['_realtime_event'] ?? []),
-    'same-org friend realtime event does not claim a cross-org epoch',
+    array_key_exists('cross_org_access_snapshot_id', $sameControl['data'])
+    && $sameControl['data']['cross_org_access_snapshot_id'] === null,
+    'same-org friend outbox keeps a null cross-org epoch field',
+);
+$sameRejected = $store->handleFriendRequest(1, 'u3', $sameRequestId, 'reject', $now);
+$sameRejectedAgain = $store->handleFriendRequest(1, 'u3', $sameRequestId, 'reject', $now);
+$sameRejectedRows = $pdo->query(
+    'SELECT event_type, organization, target_user_id, payload_json
+       FROM im_realtime_control_outbox
+      WHERE aggregate_type = "friend_request" AND aggregate_id = ' . $sameRequestId . '
+      ORDER BY id',
+)->fetchAll(PDO::FETCH_ASSOC);
+$sameRejectedPayload = json_decode(
+    (string) ($sameRejectedRows[1]['payload_json'] ?? ''),
+    true,
+);
+$assert(
+    ($sameRejected['status'] ?? null) === 'rejected'
+    && ($sameRejectedAgain['status'] ?? null) === 'rejected'
+    && count($sameRejectedRows) === 2
+    && $sameRejectedRows[1]['event_type'] === 'friend_request.rejected'
+    && (int) $sameRejectedRows[1]['organization'] === 1
+    && $sameRejectedRows[1]['target_user_id'] === 'u1'
+    && ($sameRejectedPayload['data']['event'] ?? null) === 'rejected'
+    && ($sameRejectedPayload['data']['actor_user_id'] ?? null) === 'u3'
+    && array_key_exists('cross_org_access_snapshot_id', $sameRejectedPayload['data'])
+    && $sameRejectedPayload['data']['cross_org_access_snapshot_id'] === null,
+    'friend rejection emits exactly one terminal event to the original applicant',
 );
 
 $pdo->exec(
