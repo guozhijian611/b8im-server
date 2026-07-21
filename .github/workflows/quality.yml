@@ -11,7 +11,33 @@ permissions:
   contents: read
 
 jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: b8im-server
+          persist-credentials: false
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: "8.3"
+          coverage: none
+
+      - name: Validate Composer metadata
+        working-directory: b8im-server
+        run: composer validate --no-check-publish
+
+      - name: Lint PHP without private dependencies
+        working-directory: b8im-server
+        run: php scripts/php-lint.php
+
   test:
+    needs: syntax
+    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
@@ -53,9 +79,10 @@ jobs:
 
     steps:
       - name: Checkout backend
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           path: b8im-server
+          persist-credentials: false
 
       - name: Verify private Composer credential
         env:
@@ -67,7 +94,7 @@ jobs:
           fi
 
       - name: Checkout Search migration fixture
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: guozhijian611/b8im-module-search
           path: b8im-module-search
@@ -76,33 +103,39 @@ jobs:
           persist-credentials: false
 
       - name: Checkout IM migration fixture
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: guozhijian611/b8im-im
           path: b8im-im
-          ref: 918bdddf03102884f7b55037d67e03e497f8616e
+          ref: f9caf6ca65230e2e4edda9dab0f903df0cebb4db
+          persist-credentials: false
 
       - name: Checkout IM Shared fixture
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: guozhijian611/b8im-im-shared
           path: b8im-im-shared
-          ref: 3ed922c7b8d7359aed3443ae87e5b0f29b09fe88
+          ref: 727e0b16558369631d8acdc46a4a0d82d4c7d326
+          persist-credentials: false
 
       - name: Checkout admin generator target
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: guozhijian611/b8im-admin-vue
           path: b8im-admin-vue
+          ref: 73588cc73d90ae783ddf31c4a0ea319fb40e6a14
+          persist-credentials: false
 
       - name: Checkout tenant generator target
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: guozhijian611/b8im-tenant-vue
           path: b8im-tenant-vue
+          ref: 13d1ddb9c2e2deba25e8ec863c7501d23f14737f
+          persist-credentials: false
 
       - name: Set up PHP
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
         with:
           php-version: "8.3"
           extensions: pdo_mysql, redis, sodium, mbstring
