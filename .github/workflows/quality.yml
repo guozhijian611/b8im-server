@@ -11,7 +11,33 @@ permissions:
   contents: read
 
 jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: b8im-server
+          persist-credentials: false
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: "8.3"
+          coverage: none
+
+      - name: Validate Composer metadata
+        working-directory: b8im-server
+        run: composer validate --no-check-publish
+
+      - name: Lint PHP without private dependencies
+        working-directory: b8im-server
+        run: php scripts/php-lint.php
+
   test:
+    needs: syntax
+    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
@@ -50,7 +76,7 @@ jobs:
 
     steps:
       - name: Checkout backend
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           path: b8im-server
           persist-credentials: false
@@ -66,7 +92,7 @@ jobs:
           fi
 
       - name: Checkout module SDK path dependency
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: guozhijian611/b8im-module-sdk
           path: b8im-module-sdk
@@ -74,7 +100,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout i18n module path dependency
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: guozhijian611/b8im-module-i18n
           path: b8im-module-i18n
@@ -83,7 +109,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout favorite module path dependency
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: guozhijian611/b8im-module-favorite
           path: b8im-module-favorite
@@ -92,7 +118,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout sticker module path dependency
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: guozhijian611/b8im-module-sticker
           path: b8im-module-sticker
@@ -101,7 +127,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout customer service module path dependency
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: guozhijian611/b8im-module-customer-service
           path: b8im-module-customer-service
@@ -110,7 +136,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout single robot module path dependency
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: guozhijian611/b8im-module-robot-single
           path: b8im-module-robot-single
@@ -119,7 +145,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout file media module path dependency
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: guozhijian611/b8im-module-file-media
           path: b8im-module-file-media
@@ -128,7 +154,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout search module path dependency
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: guozhijian611/b8im-module-search
           path: b8im-module-search
@@ -137,7 +163,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout moments module path dependency
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: guozhijian611/b8im-module-moments
           path: b8im-module-moments
@@ -146,7 +172,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout IM migration dependency
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: guozhijian611/b8im-im
           path: b8im-im
@@ -154,7 +180,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout IM shared path dependency
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: guozhijian611/b8im-im-shared
           path: b8im-im-shared
@@ -162,7 +188,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout admin generator target
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: guozhijian611/b8im-admin-vue
           path: b8im-admin-vue
@@ -170,7 +196,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout tenant generator target
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: guozhijian611/b8im-tenant-vue
           path: b8im-tenant-vue
@@ -178,7 +204,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up PHP
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
         with:
           php-version: "8.3"
           extensions: pdo_mysql, redis, sodium, mbstring
