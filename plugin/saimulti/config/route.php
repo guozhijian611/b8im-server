@@ -643,6 +643,9 @@ Route::group("/saimulti", function () {
 	// 租户 IM 运行策略（organization 只取认证上下文）
 	Route::get('/tenant/im/policy/read', [\plugin\saimulti\app\controller\tenant\TenantImPolicyController::class, 'read']);
 	Route::put('/tenant/im/policy/update', [\plugin\saimulti\app\controller\tenant\TenantImPolicyController::class, 'update']);
+    // 租户账号注册策略（organization 只取认证上下文）
+    Route::get('/tenant/account/policy/read', [\plugin\saimulti\app\controller\tenant\TenantAccountPolicyController::class, 'read']);
+    Route::put('/tenant/account/policy/update', [\plugin\saimulti\app\controller\tenant\TenantAccountPolicyController::class, 'update']);
 	// IM 用户管理（organization 只取认证上下文）
 	Route::get('/tenant/im/user/index', [\plugin\saimulti\app\controller\tenant\TenantImUserController::class, 'index']);
 	Route::get('/tenant/im/user/read', [\plugin\saimulti\app\controller\tenant\TenantImUserController::class, 'read']);

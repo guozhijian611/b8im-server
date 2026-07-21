@@ -89,6 +89,46 @@ $serverMigrations = $serverManager->getMigrations('default');
 $registrationCloseMigration = $serverMigrations[20260721130000] ?? null;
 $assert($registrationCloseMigration instanceof Phinx\Migration\MigrationInterface, 'registration closure migration is unavailable');
 $registrationCloseMigration->setAdapter($serverManager->getEnvironment('default')->getAdapter());
+$permissionMigration = $serverMigrations[20260721131000] ?? null;
+$assert($permissionMigration instanceof Phinx\Migration\MigrationInterface, 'account policy permission migration is unavailable');
+$permissionMigration->setAdapter($serverManager->getEnvironment('default')->getAdapter());
+$page = Db::table('sm_tenant_menu')->where('organization', 0)
+    ->where('code', 'system/account-policy')->whereNull('delete_time')->find();
+$assert(is_array($page) && (string) $page['component'] === '/system/account-policy/index', 'account policy page seed is missing');
+$buttons = Db::table('sm_tenant_menu')->where('organization', 0)
+    ->where('parent_id', (int) $page['id'])->where('type', 3)->select()->toArray();
+$assert(count($buttons) === 2, 'account policy permission buttons were not seeded exactly');
+$menuIds = array_merge([(int) $page['id']], array_map(
+    static fn (array $row): int => (int) $row['id'], $buttons,
+));
+$groupCount = (int) Db::table('sm_tenant_group')->where('status', 1)->whereNull('delete_time')->count();
+$assert((int) Db::table('sm_tenant_group_menu')->whereIn('menu_id', $menuIds)->count() === 3 * $groupCount, 'active group mappings are incomplete');
+$inactiveGroupId = (int) Db::table('sm_tenant_group')->insertGetId([
+    'group_name' => 'Account Policy Inactive Fixture', 'status' => 2,
+    'create_time' => date('Y-m-d H:i:s'), 'update_time' => date('Y-m-d H:i:s'),
+]);
+Db::table('sm_tenant_group_menu')->insert(['group_id' => $inactiveGroupId, 'menu_id' => $menuIds[0]]);
+$permissionMigration->up();
+$assert((int) Db::table('sm_tenant_menu')->whereIn('id', $menuIds)->count() === 3, 'permission replay duplicated or removed menus');
+Db::table('sm_tenant_group_menu')->where('group_id', $inactiveGroupId)->delete();
+Db::table('sm_tenant_group')->where('id', $inactiveGroupId)->delete();
+$activeGroupId = (int) Db::table('sm_tenant_group')->where('status', 1)->whereNull('delete_time')->value('id');
+Db::table('sm_tenant_group_menu')->insert(['group_id' => $activeGroupId, 'menu_id' => $menuIds[0]]);
+Db::table('sm_tenant_menu')->where('id', $menuIds[0])->update(['name' => 'Rollback Fixture']);
+$seedRollbackFailure = null;
+try {
+    $permissionMigration->up();
+} catch (Throwable $throwable) {
+    $seedRollbackFailure = $throwable;
+}
+$assert($seedRollbackFailure instanceof Throwable, 'duplicate active group mapping was accepted');
+$assert((string) Db::table('sm_tenant_menu')->where('id', $menuIds[0])->value('name') === 'Rollback Fixture', 'failed seed did not roll back menu writes');
+Db::table('sm_tenant_group_menu')->where('group_id', $activeGroupId)->where('menu_id', $menuIds[0])->order('id', 'desc')->limit(1)->delete();
+$permissionMigration->up();
+$permissionMigration->down();
+$assert((int) Db::table('sm_tenant_menu')->whereIn('id', $menuIds)->count() === 0, 'permission down retained owned menus');
+$assert((int) Db::table('sm_tenant_group_menu')->whereIn('menu_id', $menuIds)->count() === 0, 'permission down retained mappings');
+$permissionMigration->up();
 Db::execute("ALTER TABLE `sm_tenant_account_policy` MODIFY COLUMN `register_enabled` tinyint(3) UNSIGNED NOT NULL DEFAULT 1 COMMENT '是否开放注册'");
 Db::execute('ALTER TABLE `sm_tenant_account_policy` DROP COLUMN `version`');
 $shapeFailure = null;
@@ -103,8 +143,77 @@ ALTER TABLE `sm_tenant_account_policy`
 SQL);
 }
 $assert($shapeFailure instanceof Throwable, 'partial account policy schema was accepted');
-$assert(str_contains($shapeFailure->getMessage(), 'version is missing'), 'partial schema failure did not identify the missing version column');
+$assert(str_contains($shapeFailure->getMessage(), 'column shape drift'), 'partial schema failure did not identify column shape drift');
 $assert($columnDefault() === 1, 'partial schema failure mutated the legacy default');
+$expectShapeFailure = static function (string $mutate, string $restore, string $message) use (
+    $registrationCloseMigration, $columnDefault, $assert,
+): void {
+    Db::execute($mutate);
+    $beforeDefault = $columnDefault();
+    $failure = null;
+    try {
+        $registrationCloseMigration->up();
+    } catch (Throwable $throwable) {
+        $failure = $throwable;
+    }
+    $afterFailureDefault = $columnDefault();
+    Db::execute($restore);
+    $assert($failure instanceof Throwable, $message . ' was accepted');
+    $assert($afterFailureDefault === $beforeDefault, $message . ' mutated the registration default before failing');
+};
+$expectShapeFailure(
+    "ALTER TABLE sm_tenant_account_policy MODIFY invite_required smallint UNSIGNED NOT NULL DEFAULT 0 COMMENT '是否要求邀请码'",
+    "ALTER TABLE sm_tenant_account_policy MODIFY invite_required tinyint(3) UNSIGNED NOT NULL DEFAULT 0 COMMENT '是否要求邀请码'",
+    'wrong column type',
+);
+$expectShapeFailure(
+    "ALTER TABLE sm_tenant_account_policy MODIFY version bigint UNSIGNED NULL DEFAULT 1 COMMENT '乐观锁版本'",
+    "ALTER TABLE sm_tenant_account_policy MODIFY version bigint(20) UNSIGNED NOT NULL DEFAULT 1 COMMENT '乐观锁版本'",
+    'nullable version',
+);
+$expectShapeFailure(
+    "ALTER TABLE sm_tenant_account_policy MODIFY register_enabled tinyint(3) UNSIGNED NOT NULL DEFAULT 2 COMMENT '是否开放注册'",
+    "ALTER TABLE sm_tenant_account_policy MODIFY register_enabled tinyint(3) UNSIGNED NOT NULL DEFAULT 1 COMMENT '是否开放注册'",
+    'unsupported registration default',
+);
+$expectShapeFailure(
+    'ALTER TABLE sm_tenant_account_policy DROP INDEX idx_tenant_account_policy_status',
+    'ALTER TABLE sm_tenant_account_policy ADD INDEX idx_tenant_account_policy_status (status) USING BTREE',
+    'missing policy index',
+);
+$expectShapeFailure(
+    "ALTER TABLE sm_tenant_account_policy COMMENT='drift'",
+    "ALTER TABLE sm_tenant_account_policy COMMENT='租户账号准入策略'",
+    'wrong table shape',
+);
+$expectShapeFailure(
+    'CREATE TRIGGER account_policy_hostile BEFORE UPDATE ON sm_tenant_account_policy FOR EACH ROW SET NEW.update_time=NEW.update_time',
+    'DROP TRIGGER account_policy_hostile',
+    'unexpected policy trigger',
+);
+$expectShapeFailure(
+    'ALTER TABLE sm_tenant_account_policy ADD CONSTRAINT chk_account_policy_hostile CHECK (version >= 1)',
+    'ALTER TABLE sm_tenant_account_policy DROP CHECK chk_account_policy_hostile',
+    'unexpected policy check constraint',
+);
+$expectDataFailure = static function (int $enabled, string $version, string $message) use (
+    $registrationCloseMigration, $columnDefault, $assert,
+): void {
+    Db::table('sm_tenant_account_policy')->where('organization', 1)->update([
+        'register_enabled' => $enabled, 'version' => $version,
+    ]);
+    $failure = null;
+    try {
+        $registrationCloseMigration->up();
+    } catch (Throwable $throwable) {
+        $failure = $throwable;
+    }
+    $assert($failure instanceof Throwable, $message . ' was accepted');
+    $assert($columnDefault() === 1, $message . ' mutated the default before failing');
+};
+$expectDataFailure(0, '0', 'zero policy version');
+$expectDataFailure(1, '9007199254740991', 'non-incrementable policy version');
+$expectDataFailure(0, '9007199254740992', 'JS-unsafe policy version');
 Db::table('sm_tenant_account_policy')->where('organization', 1)->update([
     'register_enabled' => 1,
     'version' => 41,
@@ -172,7 +281,8 @@ $inputData = [
 ];
 
 $expectCode(403, static fn () => $registration->register($organization, $inputData, '203.0.113.1'));
-Db::table('sm_tenant_account_policy')->where('organization', 1)->update(['register_enabled' => 1]);
+$currentPolicy = $policy->read(1);
+$policy->update(1, ['register_enabled' => true, 'version' => $currentPolicy['version']]);
 $expectCode(422, static fn () => $registration->register($organization, array_replace($inputData, ['code' => 'WXYZ']), '203.0.113.1'));
 
 $registrationAtomicTables = [
