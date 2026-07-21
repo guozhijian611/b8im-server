@@ -18,7 +18,7 @@ final class TenantAccountPolicyService
         $now ??= date('Y-m-d H:i:s');
 
         return [
-            'register_enabled' => 1,
+            'register_enabled' => 0,
             'invite_required' => 0,
             'tenant_invite_enabled' => 0,
             'user_invite_enabled' => 0,

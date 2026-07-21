@@ -78,7 +78,62 @@ $input = new ArrayInput([]);
 $input->setInteractive(false);
 (new Manager(new Config(require $imConfigPath, $imConfigPath), $input, new BufferedOutput()))->migrate('development');
 
-$assert((int) Db::table('sm_tenant_account_policy')->where('organization', 1)->value('register_enabled') === 1, 'existing organization was not seeded open');
+$assert((int) Db::table('sm_tenant_account_policy')->where('organization', 1)->value('register_enabled') === 0, 'fresh installation seeded registration open');
+$columnDefault = static fn (): int => (int) Db::query(
+    "SELECT COLUMN_DEFAULT FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'sm_tenant_account_policy' AND COLUMN_NAME = 'register_enabled'",
+)[0]['COLUMN_DEFAULT'];
+$assert($columnDefault() === 0, 'fresh installation schema default is not fail closed');
+$serverConfigPath = dirname(__DIR__) . '/phinx.php';
+$serverManager = new Manager(new Config(require $serverConfigPath, $serverConfigPath), $input, new BufferedOutput());
+$serverMigrations = $serverManager->getMigrations('default');
+$registrationCloseMigration = $serverMigrations[20260721130000] ?? null;
+$assert($registrationCloseMigration instanceof Phinx\Migration\MigrationInterface, 'registration closure migration is unavailable');
+$registrationCloseMigration->setAdapter($serverManager->getEnvironment('default')->getAdapter());
+Db::execute("ALTER TABLE `sm_tenant_account_policy` MODIFY COLUMN `register_enabled` tinyint(3) UNSIGNED NOT NULL DEFAULT 1 COMMENT '是否开放注册'");
+Db::execute('ALTER TABLE `sm_tenant_account_policy` DROP COLUMN `version`');
+$shapeFailure = null;
+try {
+    $registrationCloseMigration->up();
+} catch (Throwable $throwable) {
+    $shapeFailure = $throwable;
+} finally {
+    Db::execute(<<<'SQL'
+ALTER TABLE `sm_tenant_account_policy`
+  ADD COLUMN `version` bigint(20) UNSIGNED NOT NULL DEFAULT 1 COMMENT '乐观锁版本' AFTER `status`
+SQL);
+}
+$assert($shapeFailure instanceof Throwable, 'partial account policy schema was accepted');
+$assert(str_contains($shapeFailure->getMessage(), 'version is missing'), 'partial schema failure did not identify the missing version column');
+$assert($columnDefault() === 1, 'partial schema failure mutated the legacy default');
+Db::table('sm_tenant_account_policy')->where('organization', 1)->update([
+    'register_enabled' => 1,
+    'version' => 41,
+]);
+$legacyPolicy = Db::table('sm_tenant_account_policy')->where('organization', 1)->find();
+unset($legacyPolicy['id']);
+Db::table('sm_tenant_account_policy')->insert(array_replace($legacyPolicy, [
+    'organization' => 2,
+    'register_enabled' => 2,
+    'version' => 51,
+]));
+Db::table('sm_tenant_account_policy')->insert(array_replace($legacyPolicy, [
+    'organization' => 3,
+    'register_enabled' => 0,
+    'version' => 61,
+]));
+$registrationCloseMigration->up();
+$assert($columnDefault() === 0, 'destructive migration did not restore the closed schema default');
+$assert((int) Db::table('sm_tenant_account_policy')->where('organization', 1)->value('register_enabled') === 0, 'legacy open policy was not closed');
+$assert((int) Db::table('sm_tenant_account_policy')->where('organization', 1)->value('version') === 42, 'legacy open policy version was not advanced once');
+$assert((int) Db::table('sm_tenant_account_policy')->where('organization', 2)->value('register_enabled') === 0, 'invalid non-zero policy was not closed');
+$assert((int) Db::table('sm_tenant_account_policy')->where('organization', 2)->value('version') === 52, 'invalid non-zero policy version was not advanced once');
+$assert((int) Db::table('sm_tenant_account_policy')->where('organization', 3)->value('version') === 61, 'already closed policy version changed');
+$registrationCloseMigration->up();
+$assert((int) Db::table('sm_tenant_account_policy')->where('organization', 1)->value('version') === 42, 'forward replay advanced a closed policy version');
+$registrationCloseMigration->down();
+$assert($columnDefault() === 0, 'failed rollback reopened the schema default');
+$assert((int) Db::table('sm_tenant_account_policy')->where('organization', 1)->value('register_enabled') === 0, 'failed rollback reopened an existing policy');
+$assert((int) Db::table('sm_tenant_account_policy')->where('organization', 1)->value('version') === 42, 'fail-closed rollback changed an already closed policy version');
 $assert((int) Db::table('im_web_qr_login')->count() === 0, 'QR table was not created cleanly');
 Db::table('sm_tenant_quota')->where('organization', 1)->where('quota_key', 'im_user_seats')->update([
     'quota_value' => 2,
@@ -116,7 +171,6 @@ $inputData = [
     'code' => 'ABCD',
 ];
 
-Db::table('sm_tenant_account_policy')->where('organization', 1)->update(['register_enabled' => 0]);
 $expectCode(403, static fn () => $registration->register($organization, $inputData, '203.0.113.1'));
 Db::table('sm_tenant_account_policy')->where('organization', 1)->update(['register_enabled' => 1]);
 $expectCode(422, static fn () => $registration->register($organization, array_replace($inputData, ['code' => 'WXYZ']), '203.0.113.1'));

@@ -12,7 +12,7 @@ final class CreateWebRegistrationAndQrLogin extends AbstractMigration
 CREATE TABLE `sm_tenant_account_policy` (
   `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键',
   `organization` int(11) UNSIGNED NOT NULL COMMENT '机构编号',
-  `register_enabled` tinyint(3) UNSIGNED NOT NULL DEFAULT 1 COMMENT '是否开放注册',
+  `register_enabled` tinyint(3) UNSIGNED NOT NULL DEFAULT 0 COMMENT '是否开放注册',
   `invite_required` tinyint(3) UNSIGNED NOT NULL DEFAULT 0 COMMENT '是否要求邀请码',
   `tenant_invite_enabled` tinyint(3) UNSIGNED NOT NULL DEFAULT 0 COMMENT '是否启用机构邀请码',
   `user_invite_enabled` tinyint(3) UNSIGNED NOT NULL DEFAULT 0 COMMENT '是否启用用户邀请码',
@@ -74,7 +74,7 @@ INSERT INTO `sm_tenant_account_policy` (
   `invite_bind_customer_service`, `status`, `version`, `create_time`, `update_time`
 )
 SELECT
-  `id`, 1, 0, 0,
+  `id`, 0, 0, 0,
   0, 0, 0,
   0, 'tenant_single', 0,
   0, 'ENABLED', 1, {$now}, {$now}
