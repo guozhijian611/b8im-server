@@ -32,12 +32,4 @@ final class SearchController extends TenantController
         return $this->success((new SearchService())->jobList((int) $this->organization, $request->get(), false));
     }
 
-    #[Permission('租户写入文档', 'saimulti:tenant:search:index')]
-    public function docUpsert(Request $request): Response
-    {
-        return $this->success((new SearchService())->upsertDocument(
-            (int) $this->organization,
-            is_array($request->post()) ? $request->post() : [],
-        ));
-    }
 }

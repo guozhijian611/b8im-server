@@ -13,6 +13,8 @@ use plugin\saimulti\app\middleware\AppClientRequest;
 use plugin\saimulti\app\middleware\CheckWebLogin;
 use plugin\saimulti\exception\ApiException;
 use plugin\saimulti\service\WebTokenService;
+use plugin\saimulti\service\web\GroupMemberAccessService;
+use plugin\saimulti\service\web\WebImControlService;
 use Webman\Route;
 
 $assertions = 0;
@@ -46,6 +48,14 @@ $expectedRoutes = [
     'GET /saimulti/app/im/searchUsers' => 'searchUsers',
     'POST /saimulti/app/im/sendFriendRequest' => 'sendFriendRequest',
     'POST /saimulti/app/im/handleFriendRequest' => 'handleFriendRequest',
+    'POST /saimulti/app/im/createGroup' => 'createGroup',
+    'GET /saimulti/app/im/groupMembers' => 'groupMembers',
+    'POST /saimulti/app/im/addGroupMembers' => 'addGroupMembers',
+    'POST /saimulti/app/im/removeGroupMember' => 'removeGroupMember',
+    'POST /saimulti/app/im/leaveGroup' => 'leaveGroup',
+    'POST /saimulti/app/im/suspendGroupMember' => 'suspendGroupMember',
+    'POST /saimulti/app/im/restoreGroupMember' => 'restoreGroupMember',
+    'POST /saimulti/app/im/revokeGroupMemberHistory' => 'revokeGroupMemberHistory',
 ];
 $expectedMiddleware = [AppClientRequest::class, CheckWebLogin::class];
 sort($expectedMiddleware);
@@ -65,6 +75,99 @@ foreach ($expectedRoutes as $routeKey => $action) {
     sort($optionsMiddleware);
     $assert($optionsMiddleware === $expectedMiddleware, $optionsKey . ' escaped the App middleware group.');
 }
+
+foreach ([
+    'POST /saimulti/admin/search/docUpsert',
+    'POST /saimulti/tenant/search/docUpsert',
+] as $removedSearchWriteRoute) {
+    $assert(
+        ($routes[$removedSearchWriteRoute] ?? []) === [],
+        $removedSearchWriteRoute . ' exposed caller-controlled search document writes.',
+    );
+}
+$assert(
+    !(new ReflectionClass(\plugin\saimulti\app\controller\admin\SearchController::class))
+        ->hasMethod('docUpsert')
+    && !(new ReflectionClass(\plugin\saimulti\app\controller\tenant\SearchController::class))
+        ->hasMethod('docUpsert'),
+    'Search controllers retained the public docUpsert action.',
+);
+
+$parameterNames = static fn (string $method): array => array_map(
+    static fn (ReflectionParameter $parameter): string => $parameter->getName(),
+    (new ReflectionMethod(WebImControlService::class, $method))->getParameters(),
+);
+$assert(
+    $parameterNames('sendFriendRequest')
+        === ['identity', 'toOrganization', 'toUserId', 'message'],
+    'Friend request contract must require the target organization.',
+);
+$assert(
+    $parameterNames('messages')
+        === [
+            'identity',
+            'conversationId',
+            'peerOrganization',
+            'peerUserId',
+            'afterSeq',
+            'beforeSeq',
+            'limit',
+        ],
+    'Message history peer lookup must use a composite identity.',
+);
+$assert(
+    $parameterNames('updateFriendRemark')
+        === ['identity', 'friendOrganization', 'friendUserId', 'remark'],
+    'Friend remark contract must use a composite identity.',
+);
+
+$controlReflection = new ReflectionClass(WebImControlService::class);
+$controlWithoutDependencies = $controlReflection->newInstanceWithoutConstructor();
+$identifierMethod = $controlReflection->getMethod('identifier');
+$optionalIdentifierMethod = $controlReflection->getMethod('optionalIdentifier');
+$assert(
+    $identifierMethod->invoke($controlWithoutDependencies, 'User_1', 'user_id', 64) === 'User_1',
+    'Canonical identifier bytes changed during validation.',
+);
+foreach ([" User_1", "User_1 ", "User\0_1", 'User|1'] as $invalidIdentifier) {
+    $expectApiCode(422, static fn () => $identifierMethod->invoke(
+        $controlWithoutDependencies,
+        $invalidIdentifier,
+        'user_id',
+        64,
+    ));
+}
+$expectApiCode(422, static fn () => $optionalIdentifierMethod->invoke(
+    $controlWithoutDependencies,
+    ' ',
+    'conversation_id',
+    64,
+));
+$expectedVersionMapMethod = $controlReflection->getMethod('expectedVersionMap');
+$numericExpectedVersions = $expectedVersionMapMethod->invoke(
+    $controlWithoutDependencies,
+    [123 => '0'],
+    ['123'],
+);
+$assert(
+    ($numericExpectedVersions['123'] ?? null) === '0',
+    'Numeric user IDs were lost from expected_access_versions.',
+);
+$groupAccessReflection = new ReflectionClass(GroupMemberAccessService::class);
+$canonicalUserIdsMethod = $groupAccessReflection->getMethod('canonicalUserIds');
+$numericUserIds = $canonicalUserIdsMethod->invoke(
+    $groupAccessReflection->newInstanceWithoutConstructor(),
+    ['20', '3', '20'],
+);
+$assert(
+    $numericUserIds === ['20', '3']
+    && array_reduce(
+        $numericUserIds,
+        static fn (bool $carry, mixed $id): bool => $carry && is_string($id),
+        true,
+    ),
+    'Numeric user IDs changed type during canonical byte ordering.',
+);
 
 $tokens = new WebTokenService(str_repeat('app-contact-route-secret-', 2), 'HS256');
 $user = ['id' => 9, 'user_id' => 'app_user_9', 'account' => 'alice'];

@@ -236,6 +236,7 @@ final class WebImAuthService implements WebAccessIssuerInterface
         return [
             'organization' => $organizationId,
             'deployment_id' => $deploymentId,
+            'cross_org_access_snapshot_id' => CrossOrganizationSocialPolicy::accessSnapshotId(),
             'token' => $issued['token'],
             'user' => $this->userView($organizationId, $user),
         ];
@@ -397,6 +398,7 @@ final class WebImAuthService implements WebAccessIssuerInterface
             'expire_at' => $credential['expire_at'],
             'device_id' => $deviceId,
             'client_id' => $clientId,
+            'cross_org_access_snapshot_id' => CrossOrganizationSocialPolicy::accessSnapshotId(),
         ];
     }
 
@@ -409,7 +411,10 @@ final class WebImAuthService implements WebAccessIssuerInterface
             throw new ApiException('客户端用户已停用或不存在。', 401);
         }
 
-        return $this->userView($organization, $user);
+        return [
+            ...$this->userView($organization, $user),
+            'cross_org_access_snapshot_id' => CrossOrganizationSocialPolicy::accessSnapshotId(),
+        ];
     }
 
     /** @param array<string, mixed> $identity @return array<string, mixed> */
@@ -495,15 +500,20 @@ final class WebImAuthService implements WebAccessIssuerInterface
     /** @return array<string, mixed> */
     private function userView(int $organization, array $user): array
     {
+        $userOrganization = (int) ($user['organization'] ?? 0);
+        if ($organization <= 0 || $userOrganization !== $organization) {
+            throw new \RuntimeException('Web IM user projection requires a consistent organization identity.');
+        }
         $status = (int) ($user['status'] ?? 0);
         $fileId = trim((string) ($user['avatar'] ?? ''));
         $avatar = $fileId === ''
             ? ['avatar_file_id' => '', 'avatar_url' => '', 'avatar_expires_at' => 0]
-            : $this->avatars->project($organization, $fileId);
+            : $this->avatars->project($userOrganization, $fileId);
 
         return array_merge([
             'id' => (string) ($user['id'] ?? ''),
             'user_id' => (string) ($user['user_id'] ?? ''),
+            'organization' => $userOrganization,
             'account' => (string) ($user['account'] ?? ''),
             'nickname' => (string) ($user['nickname'] ?? ''),
             'signature' => (string) ($user['signature'] ?? ''),

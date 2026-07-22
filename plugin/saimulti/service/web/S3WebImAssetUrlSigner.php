@@ -27,7 +27,7 @@ final class S3WebImAssetUrlSigner implements WebImAssetUrlSignerInterface
             throw new \RuntimeException('Web IM asset signing context is invalid.');
         }
         $config = $this->config->requirePrivate();
-        $storagePath = $this->config->assertObjectKey($config, $organization, $storagePath);
+        $storagePath = $this->config->assertCanonicalObjectKey($config, $storagePath);
 
         $client = ($this->clientFactory)($config['options']);
         if (!is_object($client)

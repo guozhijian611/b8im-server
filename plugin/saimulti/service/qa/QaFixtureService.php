@@ -162,6 +162,14 @@ final class QaFixtureService
             if (!password_verify(self::IM_PASSWORD, (string) $user['password_hash']) || (int) $user['status'] !== 1) {
                 throw new RuntimeException('QA IM credentials are not valid: ' . $user['account']);
             }
+            $groupAccessState = Db::table('im_user_group_access_state')
+                ->where('organization', (int) $user['organization'])
+                ->where('user_id', (string) $user['user_id'])
+                ->find();
+            if (!$groupAccessState
+                || preg_match('/^[1-9][0-9]*$/', (string) ($groupAccessState['access_snapshot_id'] ?? '')) !== 1) {
+                throw new RuntimeException('QA IM group access state is not valid: ' . $user['account']);
+            }
         }
         $announcementLicense = Db::table('sm_tenant_module_license')
             ->where('organization', $primaryId)
@@ -452,12 +460,25 @@ final class QaFixtureService
             'update_time' => $now,
         ];
         $existing = Db::table('im_user')->where('organization', $organization)->where('account', $account)->find();
+        $identityOwner = Db::table('im_user')
+            ->where('organization', $organization)
+            ->where('user_id', $userId)
+            ->find();
         if ($existing) {
             if (!hash_equals(self::MARKER, (string) ($existing['remark'] ?? ''))) {
                 throw new RuntimeException("QA IM account {$account} is owned by non-QA data.");
             }
-            Db::table('im_user')->where('id', (int) $existing['id'])->update($data + ['user_id' => $userId, 'im_short_no' => $shortNo]);
+            if (!hash_equals($userId, (string) $existing['user_id'])) {
+                throw new RuntimeException("QA IM account {$account} has an unexpected user identity; cleanup is required.");
+            }
+            if ($identityOwner && (int) $identityOwner['id'] !== (int) $existing['id']) {
+                throw new RuntimeException("QA IM user identity {$userId} is owned by another account.");
+            }
+            Db::table('im_user')->where('id', (int) $existing['id'])->update($data + ['im_short_no' => $shortNo]);
         } else {
+            if ($identityOwner) {
+                throw new RuntimeException("QA IM user identity {$userId} is already in use.");
+            }
             Db::table('im_user')->insert($data + [
                 'organization' => $organization,
                 'user_id' => $userId,
@@ -481,6 +502,76 @@ final class QaFixtureService
                 allow_add_by_username = 1, update_time = VALUES(update_time)',
             [$organization, $userId, $now, $now],
         );
+        $groupAccessState = Db::table('im_user_group_access_state')
+            ->where('organization', $organization)
+            ->where('user_id', $userId)
+            ->lock(true)
+            ->find();
+        if (!$groupAccessState) {
+            $accessSnapshotId = $existing
+                ? $this->recoverQaGroupAccessSnapshot($organization, $userId)
+                : '1';
+            Db::table('im_user_group_access_state')->insert([
+                'organization' => $organization,
+                'user_id' => $userId,
+                'access_snapshot_id' => $accessSnapshotId,
+                'create_time' => $now,
+                'update_time' => $now,
+            ]);
+        } elseif (preg_match('/^[1-9][0-9]*$/', (string) ($groupAccessState['access_snapshot_id'] ?? '')) !== 1) {
+            throw new RuntimeException("QA IM group access state is invalid for {$account}.");
+        }
+    }
+
+    private function recoverQaGroupAccessSnapshot(int $organization, string $userId): string
+    {
+        $audit = Db::query(
+            'SELECT MAX(access_snapshot_id) AS access_snapshot_id
+               FROM im_group_member_access_audit
+              WHERE member_organization = ? AND BINARY user_id = BINARY ?',
+            [$organization, $userId],
+        )[0] ?? [];
+        $snapshot = (string) ($audit['access_snapshot_id'] ?? '');
+        if ($snapshot !== '') {
+            if (preg_match('/^[1-9][0-9]*$/', $snapshot) !== 1) {
+                throw new RuntimeException('QA IM group access audit snapshot is invalid.');
+            }
+            return $snapshot;
+        }
+
+        $groupMemberships = Db::query(
+            'SELECT COUNT(*) AS aggregate
+               FROM im_conversation_member member
+          LEFT JOIN im_conversation conversation
+                 ON conversation.organization = member.organization
+                AND BINARY conversation.conversation_id = BINARY member.conversation_id
+              WHERE member.member_organization = ?
+                AND BINARY member.user_id = BINARY ?
+                AND (
+                    conversation.id IS NULL
+                    OR conversation.conversation_type = 2
+                )',
+            [$organization, $userId],
+        )[0]['aggregate'] ?? 0;
+        $groupPeriods = Db::query(
+            'SELECT COUNT(*) AS aggregate
+               FROM im_conversation_membership_period period
+          LEFT JOIN im_conversation conversation
+                 ON conversation.organization = period.organization
+                AND BINARY conversation.conversation_id = BINARY period.conversation_id
+              WHERE period.member_organization = ?
+                AND BINARY period.user_id = BINARY ?
+                AND (
+                    conversation.id IS NULL
+                    OR conversation.conversation_type = 2
+                )',
+            [$organization, $userId],
+        )[0]['aggregate'] ?? 0;
+        if ((int) $groupMemberships !== 0 || (int) $groupPeriods !== 0) {
+            throw new RuntimeException('QA IM group access state cannot be recovered without immutable audit.');
+        }
+
+        return '1';
     }
 
     private function upsertFriendship(int $organization, string $userA, string $userB, string $now): void
@@ -488,11 +579,13 @@ final class QaFixtureService
         foreach ([[$userA, $userB], [$userB, $userA]] as [$userId, $friendUserId]) {
             Db::execute(
                 'INSERT INTO im_friend_relation
-                    (organization, user_id, friend_user_id, add_method, added_at, status, create_time, update_time, delete_time)
-                 VALUES (?, ?, ?, ?, ?, 1, ?, ?, NULL)
-                 ON DUPLICATE KEY UPDATE add_method = VALUES(add_method), added_at = VALUES(added_at),
+                    (organization, user_id, friend_organization, friend_user_id, add_method, added_at,
+                     status, create_time, update_time, delete_time)
+                 VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)
+                 ON DUPLICATE KEY UPDATE friend_organization = VALUES(friend_organization),
+                    add_method = VALUES(add_method), added_at = VALUES(added_at),
                     status = 1, update_time = VALUES(update_time), delete_time = NULL',
-                [$organization, $userId, $friendUserId, 'auto', $now, $now, $now],
+                [$organization, $userId, $organization, $friendUserId, 'auto', $now, $now, $now],
             );
         }
     }

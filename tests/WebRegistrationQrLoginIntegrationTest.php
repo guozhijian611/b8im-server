@@ -20,6 +20,7 @@ use Phinx\Migration\Manager;
 use plugin\saimulti\exception\ApiException;
 use plugin\saimulti\service\WebTokenService;
 use plugin\saimulti\service\web\TenantAccountPolicyService;
+use plugin\saimulti\service\web\ImChallengeTokenService;
 use plugin\saimulti\service\web\ThinkOrmTenantAccountPolicyStore;
 use plugin\saimulti\service\web\ThinkOrmWebImAuthStore;
 use plugin\saimulti\service\web\ThinkOrmWebImPolicyStore;
@@ -56,10 +57,15 @@ $expectCode = static function (int $code, callable $callback) use ($assert): voi
 };
 
 $imConfigPath = null;
-foreach ([
+$imCandidates = [
     dirname(__DIR__, 2) . '/b8im-im/phinx.php',
     dirname(__DIR__, 4) . '/b8im-im/phinx.php',
-] as $candidate) {
+];
+$configuredImRoot = trim((string) getenv('B8IM_IM_ROOT'));
+if ($configuredImRoot !== '') {
+    array_unshift($imCandidates, $configuredImRoot . '/phinx.php');
+}
+foreach ($imCandidates as $candidate) {
     if (is_file($candidate)) {
         $imConfigPath = $candidate;
         break;
@@ -72,7 +78,261 @@ $input = new ArrayInput([]);
 $input->setInteractive(false);
 (new Manager(new Config(require $imConfigPath, $imConfigPath), $input, new BufferedOutput()))->migrate('development');
 
-$assert((int) Db::table('sm_tenant_account_policy')->where('organization', 1)->value('register_enabled') === 1, 'existing organization was not seeded open');
+$assert((int) Db::table('sm_tenant_account_policy')->where('organization', 1)->value('register_enabled') === 0, 'fresh installation seeded registration open');
+$columnDefault = static fn (): int => (int) Db::query(
+    "SELECT COLUMN_DEFAULT FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'sm_tenant_account_policy' AND COLUMN_NAME = 'register_enabled'",
+)[0]['COLUMN_DEFAULT'];
+$assert($columnDefault() === 0, 'fresh installation schema default is not fail closed');
+$serverConfigPath = dirname(__DIR__) . '/phinx.php';
+$serverManager = new Manager(new Config(require $serverConfigPath, $serverConfigPath), $input, new BufferedOutput());
+$serverMigrations = $serverManager->getMigrations('default');
+$registrationCloseMigration = $serverMigrations[20260721130000] ?? null;
+$assert($registrationCloseMigration instanceof Phinx\Migration\MigrationInterface, 'registration closure migration is unavailable');
+$registrationCloseMigration->setAdapter($serverManager->getEnvironment('default')->getAdapter());
+$permissionMigration = $serverMigrations[20260721131000] ?? null;
+$assert($permissionMigration instanceof Phinx\Migration\MigrationInterface, 'account policy permission migration is unavailable');
+$permissionMigration->setAdapter($serverManager->getEnvironment('default')->getAdapter());
+$page = Db::table('sm_tenant_menu')->where('organization', 0)
+    ->where('code', 'system/account-policy')->whereNull('delete_time')->find();
+$assert(is_array($page) && (string) $page['component'] === '/system/account-policy/index', 'account policy page seed is missing');
+$buttons = Db::table('sm_tenant_menu')->where('organization', 0)
+    ->where('parent_id', (int) $page['id'])->where('type', 3)->select()->toArray();
+$assert(count($buttons) === 2, 'account policy permission buttons were not seeded exactly');
+$menuIds = array_merge([(int) $page['id']], array_map(
+    static fn (array $row): int => (int) $row['id'], $buttons,
+));
+$groupCount = (int) Db::table('sm_tenant_group')->where('status', 1)->whereNull('delete_time')->count();
+$assert((int) Db::table('sm_tenant_group_menu')->whereIn('menu_id', $menuIds)->count() === 3 * $groupCount, 'active group mappings are incomplete');
+$inactiveGroupId = (int) Db::table('sm_tenant_group')->insertGetId([
+    'group_name' => 'Account Policy Inactive Fixture', 'status' => 2,
+    'create_time' => date('Y-m-d H:i:s'), 'update_time' => date('Y-m-d H:i:s'),
+]);
+Db::table('sm_tenant_group_menu')->insert(['group_id' => $inactiveGroupId, 'menu_id' => $menuIds[0]]);
+$inactiveMappingCount = static fn (): int => (int) Db::table('sm_tenant_group_menu')
+    ->where('group_id', $inactiveGroupId)->where('menu_id', $menuIds[0])->count();
+$assert($inactiveMappingCount() === 1, 'inactive group fixture was not created exactly once');
+$permissionMigration->up();
+$assert((int) Db::table('sm_tenant_menu')->whereIn('id', $menuIds)->count() === 3, 'permission replay duplicated or removed menus');
+$assert($inactiveMappingCount() === 1, 'permission replay changed an inactive group mapping');
+Db::table('sm_tenant_group_menu')->where('group_id', $inactiveGroupId)->delete();
+Db::table('sm_tenant_group')->where('id', $inactiveGroupId)->delete();
+$activeGroupId = (int) Db::table('sm_tenant_group')->where('status', 1)->whereNull('delete_time')->value('id');
+Db::table('sm_tenant_group_menu')->insert(['group_id' => $activeGroupId, 'menu_id' => $menuIds[0]]);
+Db::table('sm_tenant_menu')->where('id', $menuIds[0])->update(['name' => 'Rollback Fixture']);
+$rollbackMenusBefore = Db::table('sm_tenant_menu')->whereIn('id', $menuIds)->order('id')->select()->toArray();
+$rollbackMappingsBefore = Db::table('sm_tenant_group_menu')->whereIn('menu_id', $menuIds)->order('id')->select()->toArray();
+$seedRollbackFailure = null;
+try {
+    $permissionMigration->up();
+} catch (Throwable $throwable) {
+    $seedRollbackFailure = $throwable;
+}
+$assert($seedRollbackFailure instanceof Throwable, 'duplicate active group mapping was accepted');
+$assert((string) Db::table('sm_tenant_menu')->where('id', $menuIds[0])->value('name') === 'Rollback Fixture', 'failed seed did not roll back menu writes');
+$assert(Db::table('sm_tenant_menu')->whereIn('id', $menuIds)->order('id')->select()->toArray() === $rollbackMenusBefore,
+    'failed seed did not roll back every owned menu write');
+$assert(Db::table('sm_tenant_group_menu')->whereIn('menu_id', $menuIds)
+    ->order('id')->select()->toArray() === $rollbackMappingsBefore,
+    'failed seed did not roll back every group mapping write');
+Db::table('sm_tenant_group_menu')->where('group_id', $activeGroupId)->where('menu_id', $menuIds[0])->order('id', 'desc')->limit(1)->delete();
+$permissionMigration->up();
+$unownedMenuId = (int) Db::table('sm_tenant_menu')->insertGetId([
+    'organization' => 0, 'parent_id' => (int) $page['parent_id'],
+    'name' => 'Unowned Account Policy Fixture', 'code' => 'system/unowned-account-policy-fixture',
+    'type' => 2, 'path' => 'unowned-account-policy-fixture', 'sort' => 999,
+    'is_hidden' => 2, 'status' => 1,
+    'create_time' => date('Y-m-d H:i:s'), 'update_time' => date('Y-m-d H:i:s'),
+]);
+Db::table('sm_tenant_group_menu')->insert(['group_id' => $activeGroupId, 'menu_id' => $unownedMenuId]);
+$permissionMigration->down();
+$assert((int) Db::table('sm_tenant_menu')->whereIn('id', $menuIds)->count() === 0, 'permission down retained owned menus');
+$assert((int) Db::table('sm_tenant_group_menu')->whereIn('menu_id', $menuIds)->count() === 0, 'permission down retained mappings');
+$assert((int) Db::table('sm_tenant_menu')->where('id', $unownedMenuId)->count() === 1, 'permission down removed an unowned menu');
+$assert((int) Db::table('sm_tenant_group_menu')->where('menu_id', $unownedMenuId)->count() === 1, 'permission down removed an unowned mapping');
+Db::table('sm_tenant_group_menu')->where('menu_id', $unownedMenuId)->delete();
+Db::table('sm_tenant_menu')->where('id', $unownedMenuId)->delete();
+$permissionMigration->up();
+$hostilePage = Db::table('sm_tenant_menu')->where('organization', 0)
+    ->where('code', 'system/account-policy')->whereNull('delete_time')->find();
+$hostileButtons = Db::table('sm_tenant_menu')->where('organization', 0)
+    ->whereIn('slug', ['saimulti:tenant:account:policy:read', 'saimulti:tenant:account:policy:update'])
+    ->whereNull('delete_time')->select()->toArray();
+$assert(is_array($hostilePage) && count($hostileButtons) === 2, 'hostile menu fixtures were unavailable');
+$menuDrift = [
+    'parent_id' => 0, 'name' => 'Hostile Menu', 'module_key' => 'hostile',
+    'type' => 1, 'path' => 'hostile', 'component' => 'hostile', 'method' => 'POST',
+    'icon' => 'hostile', 'sort' => 999, 'link_url' => 'https://hostile.invalid',
+    'is_iframe' => 1, 'is_keep_alive' => 1, 'is_hidden' => 1,
+    'is_fixed_tab' => 1, 'is_full_page' => 1, 'generate_id' => 999,
+    'generate_key' => 'hostile', 'status' => 2, 'remark' => 'hostile',
+];
+Db::table('sm_tenant_menu')->where('id', (int) $hostilePage['id'])
+    ->update(array_replace($menuDrift, ['slug' => 'hostile-page-slug']));
+foreach ($hostileButtons as $hostileButton) {
+    Db::table('sm_tenant_menu')->where('id', (int) $hostileButton['id'])
+        ->update(array_replace($menuDrift, ['code' => 'hostile-button-code']));
+}
+$permissionMigration->up();
+$repairedPage = Db::table('sm_tenant_menu')->where('id', (int) $hostilePage['id'])->find();
+$assert((string) $repairedPage['name'] === '账号注册策略'
+    && (int) $repairedPage['parent_id'] === (int) $page['parent_id']
+    && $repairedPage['slug'] === null && $repairedPage['module_key'] === null
+    && $repairedPage['method'] === null && $repairedPage['link_url'] === null
+    && (int) $repairedPage['is_keep_alive'] === 2
+    && (int) $repairedPage['generate_id'] === 0
+    && $repairedPage['generate_key'] === null && $repairedPage['remark'] === null,
+    'permission replay did not reset the complete page contract');
+$permissionMigration->up();
+$assert((int) Db::table('sm_tenant_menu')->where('organization', 0)
+    ->whereIn('slug', ['saimulti:tenant:account:policy:read', 'saimulti:tenant:account:policy:update'])
+    ->whereNull('delete_time')->count() === 2, 'permission replay duplicated hostile buttons');
+Db::execute("ALTER TABLE `sm_tenant_account_policy` MODIFY COLUMN `register_enabled` tinyint(3) UNSIGNED NOT NULL DEFAULT 1 COMMENT '是否开放注册'");
+Db::execute('ALTER TABLE `sm_tenant_account_policy` DROP COLUMN `version`');
+$shapeFailure = null;
+try {
+    $registrationCloseMigration->up();
+} catch (Throwable $throwable) {
+    $shapeFailure = $throwable;
+} finally {
+    Db::execute(<<<'SQL'
+ALTER TABLE `sm_tenant_account_policy`
+  ADD COLUMN `version` bigint(20) UNSIGNED NOT NULL DEFAULT 1 COMMENT '乐观锁版本' AFTER `status`
+SQL);
+}
+$assert($shapeFailure instanceof Throwable, 'partial account policy schema was accepted');
+$assert(str_contains($shapeFailure->getMessage(), 'column shape drift'), 'partial schema failure did not identify column shape drift');
+$assert($columnDefault() === 1, 'partial schema failure mutated the legacy default');
+$expectShapeFailure = static function (string $mutate, string $restore, string $message) use (
+    $registrationCloseMigration, $columnDefault, $assert,
+): void {
+    Db::execute($mutate);
+    $beforeDefault = $columnDefault();
+    $failure = null;
+    try {
+        $registrationCloseMigration->up();
+    } catch (Throwable $throwable) {
+        $failure = $throwable;
+    }
+    $afterFailureDefault = $columnDefault();
+    Db::execute($restore);
+    $assert($failure instanceof Throwable, $message . ' was accepted');
+    $assert($afterFailureDefault === $beforeDefault, $message . ' mutated the registration default before failing');
+};
+$expectShapeFailure(
+    "ALTER TABLE sm_tenant_account_policy MODIFY invite_required smallint UNSIGNED NOT NULL DEFAULT 0 COMMENT '是否要求邀请码'",
+    "ALTER TABLE sm_tenant_account_policy MODIFY invite_required tinyint(3) UNSIGNED NOT NULL DEFAULT 0 COMMENT '是否要求邀请码'",
+    'wrong column type',
+);
+$expectShapeFailure(
+    "ALTER TABLE sm_tenant_account_policy MODIFY version bigint UNSIGNED NULL DEFAULT 1 COMMENT '乐观锁版本'",
+    "ALTER TABLE sm_tenant_account_policy MODIFY version bigint(20) UNSIGNED NOT NULL DEFAULT 1 COMMENT '乐观锁版本'",
+    'nullable version',
+);
+$expectShapeFailure(
+    "ALTER TABLE sm_tenant_account_policy MODIFY register_enabled tinyint(3) UNSIGNED NOT NULL DEFAULT 2 COMMENT '是否开放注册'",
+    "ALTER TABLE sm_tenant_account_policy MODIFY register_enabled tinyint(3) UNSIGNED NOT NULL DEFAULT 1 COMMENT '是否开放注册'",
+    'unsupported registration default',
+);
+$expectShapeFailure(
+    'ALTER TABLE sm_tenant_account_policy DROP INDEX idx_tenant_account_policy_status',
+    'ALTER TABLE sm_tenant_account_policy ADD INDEX idx_tenant_account_policy_status (status) USING BTREE',
+    'missing policy index',
+);
+$expectShapeFailure(
+    'ALTER TABLE sm_tenant_account_policy DROP INDEX idx_tenant_account_policy_status, ADD INDEX idx_tenant_account_policy_status (status(1)) USING BTREE',
+    'ALTER TABLE sm_tenant_account_policy DROP INDEX idx_tenant_account_policy_status, ADD INDEX idx_tenant_account_policy_status (status) USING BTREE',
+    'prefix policy index',
+);
+$expectShapeFailure(
+    'ALTER TABLE sm_tenant_account_policy DROP INDEX idx_tenant_account_policy_status, ADD INDEX idx_tenant_account_policy_status (status DESC) USING BTREE INVISIBLE',
+    'ALTER TABLE sm_tenant_account_policy DROP INDEX idx_tenant_account_policy_status, ADD INDEX idx_tenant_account_policy_status (status) USING BTREE VISIBLE',
+    'descending invisible policy index',
+);
+$expectShapeFailure(
+    'ALTER TABLE sm_tenant_account_policy STATS_PERSISTENT=1',
+    'ALTER TABLE sm_tenant_account_policy STATS_PERSISTENT=DEFAULT',
+    'unexpected policy table option',
+);
+$expectShapeFailure(
+    "ALTER TABLE sm_tenant_account_policy COMMENT='drift'",
+    "ALTER TABLE sm_tenant_account_policy COMMENT='租户账号准入策略'",
+    'wrong table shape',
+);
+$expectShapeFailure(
+    'CREATE TRIGGER account_policy_hostile BEFORE UPDATE ON sm_tenant_account_policy FOR EACH ROW SET NEW.update_time=NEW.update_time',
+    'DROP TRIGGER account_policy_hostile',
+    'unexpected policy trigger',
+);
+$expectShapeFailure(
+    'ALTER TABLE sm_tenant_account_policy ADD CONSTRAINT chk_account_policy_hostile CHECK (version >= 1)',
+    'ALTER TABLE sm_tenant_account_policy DROP CHECK chk_account_policy_hostile',
+    'unexpected policy check constraint',
+);
+$expectShapeFailure(
+    'ALTER TABLE sm_tenant_account_policy ADD CONSTRAINT fk_account_policy_hostile FOREIGN KEY (organization) REFERENCES sm_system_organization(id)',
+    'ALTER TABLE sm_tenant_account_policy DROP FOREIGN KEY fk_account_policy_hostile',
+    'unexpected policy foreign key',
+);
+Db::execute('UPDATE sm_tenant_account_policy SET id=9223372036854775808 WHERE organization=1');
+$oversizedIdDefault = $columnDefault();
+$oversizedIdFailure = null;
+try {
+    $registrationCloseMigration->up();
+} catch (Throwable $throwable) {
+    $oversizedIdFailure = $throwable;
+} finally {
+    Db::execute('UPDATE sm_tenant_account_policy SET id=1 WHERE id=9223372036854775808');
+    Db::execute('ALTER TABLE sm_tenant_account_policy AUTO_INCREMENT=2');
+}
+$assert($oversizedIdFailure instanceof Throwable, 'PHP-integer-unsafe policy id was accepted');
+$assert($columnDefault() === $oversizedIdDefault, 'PHP-integer-unsafe policy id mutated the default before failing');
+$expectDataFailure = static function (int $enabled, string $version, string $message) use (
+    $registrationCloseMigration, $columnDefault, $assert,
+): void {
+    Db::table('sm_tenant_account_policy')->where('organization', 1)->update([
+        'register_enabled' => $enabled, 'version' => $version,
+    ]);
+    $failure = null;
+    try {
+        $registrationCloseMigration->up();
+    } catch (Throwable $throwable) {
+        $failure = $throwable;
+    }
+    $assert($failure instanceof Throwable, $message . ' was accepted');
+    $assert($columnDefault() === 1, $message . ' mutated the default before failing');
+};
+$expectDataFailure(0, '0', 'zero policy version');
+$expectDataFailure(1, '9007199254740991', 'non-incrementable policy version');
+$expectDataFailure(0, '9007199254740992', 'JS-unsafe policy version');
+Db::table('sm_tenant_account_policy')->where('organization', 1)->update([
+    'register_enabled' => 1,
+    'version' => 41,
+]);
+$legacyPolicy = Db::table('sm_tenant_account_policy')->where('organization', 1)->find();
+unset($legacyPolicy['id']);
+Db::table('sm_tenant_account_policy')->insert(array_replace($legacyPolicy, [
+    'organization' => 2,
+    'register_enabled' => 2,
+    'version' => 51,
+]));
+Db::table('sm_tenant_account_policy')->insert(array_replace($legacyPolicy, [
+    'organization' => 3,
+    'register_enabled' => 0,
+    'version' => 61,
+]));
+$registrationCloseMigration->up();
+$assert($columnDefault() === 0, 'destructive migration did not restore the closed schema default');
+$assert((int) Db::table('sm_tenant_account_policy')->where('organization', 1)->value('register_enabled') === 0, 'legacy open policy was not closed');
+$assert((int) Db::table('sm_tenant_account_policy')->where('organization', 1)->value('version') === 42, 'legacy open policy version was not advanced once');
+$assert((int) Db::table('sm_tenant_account_policy')->where('organization', 2)->value('register_enabled') === 0, 'invalid non-zero policy was not closed');
+$assert((int) Db::table('sm_tenant_account_policy')->where('organization', 2)->value('version') === 52, 'invalid non-zero policy version was not advanced once');
+$assert((int) Db::table('sm_tenant_account_policy')->where('organization', 3)->value('version') === 61, 'already closed policy version changed');
+$registrationCloseMigration->up();
+$assert((int) Db::table('sm_tenant_account_policy')->where('organization', 1)->value('version') === 42, 'forward replay advanced a closed policy version');
+$registrationCloseMigration->down();
+$assert($columnDefault() === 0, 'failed rollback reopened the schema default');
+$assert((int) Db::table('sm_tenant_account_policy')->where('organization', 1)->value('register_enabled') === 0, 'failed rollback reopened an existing policy');
+$assert((int) Db::table('sm_tenant_account_policy')->where('organization', 1)->value('version') === 42, 'fail-closed rollback changed an already closed policy version');
 $assert((int) Db::table('im_web_qr_login')->count() === 0, 'QR table was not created cleanly');
 Db::table('sm_tenant_quota')->where('organization', 1)->where('quota_key', 'im_user_seats')->update([
     'quota_value' => 2,
@@ -85,7 +345,7 @@ $tokens = new WebTokenService(str_repeat('integration-secret-', 4));
 $auth = new WebImAuthService(
     new ThinkOrmWebImAuthStore(),
     $tokens,
-    null,
+    new ImChallengeTokenService(base64_encode(random_bytes(48)), 300),
     static function () use (&$now): int { return $now; },
     null,
     null,
@@ -110,10 +370,56 @@ $inputData = [
     'code' => 'ABCD',
 ];
 
-Db::table('sm_tenant_account_policy')->where('organization', 1)->update(['register_enabled' => 0]);
 $expectCode(403, static fn () => $registration->register($organization, $inputData, '203.0.113.1'));
-Db::table('sm_tenant_account_policy')->where('organization', 1)->update(['register_enabled' => 1]);
+$currentPolicy = $policy->read(1);
+$policy->update(1, ['register_enabled' => true, 'version' => $currentPolicy['version']]);
 $expectCode(422, static fn () => $registration->register($organization, array_replace($inputData, ['code' => 'WXYZ']), '203.0.113.1'));
+
+$registrationAtomicTables = [
+    'im_user',
+    'im_user_profile',
+    'im_user_privacy_setting',
+    'im_user_security_policy',
+    'im_user_group_access_state',
+    'im_web_access_session',
+    'im_user_login_audit',
+];
+$registrationAtomicCounts = [];
+foreach ($registrationAtomicTables as $table) {
+    $registrationAtomicCounts[$table] = (int) Db::table($table)->count();
+}
+$quotaBeforeAtomicRegistration = (int) Db::table('sm_tenant_quota')
+    ->where('organization', 1)
+    ->where('quota_key', 'im_user_seats')
+    ->value('used_value');
+Db::execute(
+    "CREATE TRIGGER web_registration_login_audit_fail_test
+     BEFORE INSERT ON im_user_login_audit
+     FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'forced registration login audit failure'",
+);
+$registrationAtomicFailure = null;
+try {
+    $registration->register($organization, array_replace($inputData, [
+        'account' => 'web_register_atomic_failure',
+        'nickname' => 'Web Register Atomic Failure',
+        'device_id' => 'browser-register-atomic-failure',
+    ]), '203.0.113.9');
+} catch (Throwable $throwable) {
+    $registrationAtomicFailure = $throwable;
+} finally {
+    Db::execute('DROP TRIGGER IF EXISTS web_registration_login_audit_fail_test');
+}
+$assert($registrationAtomicFailure instanceof Throwable, 'Forced registration login audit failure did not abort registration.');
+foreach ($registrationAtomicCounts as $table => $count) {
+    $assert((int) Db::table($table)->count() === $count, "Registration rollback left rows in {$table}.");
+}
+$assert(
+    (int) Db::table('sm_tenant_quota')
+        ->where('organization', 1)
+        ->where('quota_key', 'im_user_seats')
+        ->value('used_value') === $quotaBeforeAtomicRegistration,
+    'Registration rollback changed the seat quota.',
+);
 
 $registered = $registration->register($organization, $inputData, '203.0.113.1');
 $assert($registered['organization'] === 1 && $registered['deployment_id'] === 'b8im-local', 'request-body organization affected registration scope');
@@ -125,6 +431,13 @@ $imUserId = (int) $claims['id'];
 $assert((int) Db::table('im_user_profile')->where('organization', 1)->where('user_id', $userId)->count() === 1, 'registration profile missing');
 $assert((int) Db::table('im_user_privacy_setting')->where('organization', 1)->where('user_id', $userId)->count() === 1, 'registration privacy defaults missing');
 $assert((int) Db::table('im_user_security_policy')->where('organization', 1)->where('user_id', $userId)->count() === 1, 'registration security defaults missing');
+$registrationGroupAccessState = Db::table('im_user_group_access_state')
+    ->where('organization', 1)
+    ->where('user_id', $userId)
+    ->select()
+    ->toArray();
+$assert(count($registrationGroupAccessState) === 1, 'registration group access state missing or duplicated');
+$assert((string) $registrationGroupAccessState[0]['access_snapshot_id'] === '1', 'registration group access snapshot must start at 1');
 $assert((int) Db::table('sm_tenant_quota')->where('organization', 1)->where('quota_key', 'im_user_seats')->value('used_value') === 1, 'registration seat usage was not synchronized');
 $assert(Db::table('im_user_login_audit')->where('organization', 1)->where('user_id', $userId)->where('audit_scope', 'register')->where('login_result', 'success')->count() === 1, 'registration audit method missing');
 $expectCode(422, static fn () => $registration->register($organization, $inputData, '203.0.113.1'));

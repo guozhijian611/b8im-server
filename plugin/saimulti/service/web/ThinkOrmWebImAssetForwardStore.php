@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace plugin\saimulti\service\web;
 
 use plugin\saimulti\exception\ApiException;
+use plugin\saimulti\service\quota\CanonicalPhysicalStoragePath;
+use plugin\saimulti\service\quota\StorageQuotaAuthority;
 use support\think\Db;
 
 final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInterface
@@ -15,6 +17,8 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
         'voice' => 4,
         'video' => 11,
     ];
+
+    private ?MessageShardRouteValidator $messageShardRoutes = null;
 
     public function accessibleAsset(
         int $organization,
@@ -30,7 +34,7 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
             $conversationId,
             $messageId,
         ): array {
-            $owned = $this->activeAsset($organization, $fileId, $userId);
+            $owned = $this->activeAsset($organization, $fileId, $userId, false);
             if ($owned !== null) {
                 return $owned;
             }
@@ -45,6 +49,7 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
                 $messageId,
                 $fileId,
                 null,
+                false,
             );
         });
     }
@@ -69,6 +74,14 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
             $derivedFileId,
             $now,
         ): array {
+            // This global derive fence is the transaction's first lock. It
+            // prevents reverse A->B/B->A derives from holding each target's
+            // assets while waiting on the peer source asset.
+            CrossOrganizationSocialPolicy::lockAssetDeriveExclusiveInsideTransaction();
+            // Quota authority remains the first organization-scoped lock in
+            // every target-organization asset write.
+            $authority = new StorageQuotaAuthority();
+            $quota = $authority->lock($organization);
             $asset = $this->visibleMessageAsset(
                 $organization,
                 $userId,
@@ -76,7 +89,32 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
                 $messageId,
                 $sourceFileId,
                 $kind,
+                true,
             );
+            $storagePath = (new CanonicalPhysicalStoragePath())->assert(
+                (string) $asset['storage_path'],
+            );
+            $size = $this->authoritativeSize($asset['size_byte'] ?? null);
+            if (isset($quota['held_paths'][$storagePath])) {
+                throw new ApiException('目标机构附件路径仍受上传或清理预留保护。', 503);
+            }
+            $knownSize = $quota['physical_paths'][$storagePath] ?? null;
+            if ($knownSize !== null && (int) $knownSize !== $size) {
+                throw new ApiException('同一物理附件路径存在冲突尺寸。', 503);
+            }
+            $newPhysicalPath = $knownSize === null;
+            $newUsed = (int) $quota['used_value'];
+            if ($newPhysicalPath) {
+                $newUsed = $this->checkedUsageAdd($newUsed, $size);
+                $newOccupancy = $this->checkedUsageAdd(
+                    (int) $quota['occupancy_value'],
+                    $size,
+                );
+                if ((int) $quota['quota_value'] > 0
+                    && $newOccupancy > (int) $quota['quota_value']) {
+                    throw new ApiException('机构存储配额不足。', 422);
+                }
+            }
 
             Db::execute(
                 'INSERT INTO im_upload_asset
@@ -91,8 +129,8 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
                     $kind,
                     (string) $asset['name'],
                     '',
-                    (string) $asset['storage_path'],
-                    (int) $asset['size_byte'],
+                    $storagePath,
+                    $size,
                     (string) $asset['mime_type'],
                     (string) $asset['extension'],
                     $now,
@@ -103,7 +141,7 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
                 'SELECT file_id, user_id, kind, name, url, storage_path, size_byte, mime_type, extension,
                         status, delete_time
                    FROM im_upload_asset
-                  WHERE organization = ? AND file_id = ?
+                  WHERE organization = ? AND BINARY file_id = BINARY ?
                   LIMIT 1
                   FOR UPDATE',
                 [$organization, $derivedFileId],
@@ -111,24 +149,45 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
             if ($derived === null || !$this->sameDerivedAsset($derived, $userId, $asset)) {
                 throw new ApiException('派生附件标识冲突，请稍后重试。', 409);
             }
+            if ($newPhysicalPath) {
+                $quotaRow = $quota['row'];
+                $updated = Db::table('sm_tenant_quota')
+                    ->where('id', (int) $quotaRow['id'])
+                    ->where('version', (int) $quotaRow['version'])
+                    ->update([
+                        'used_value' => $newUsed,
+                        'version' => (int) $quotaRow['version'] + 1,
+                        'update_time' => $now,
+                    ]);
+                if ((int) $updated !== 1) {
+                    throw new ApiException('机构存储配额版本冲突。', 409);
+                }
+            }
 
             return $this->response($derived, $kind);
         });
     }
 
     /** @return array<string, mixed>|null */
-    private function activeAsset(int $organization, string $fileId, ?string $ownerUserId = null): ?array
-    {
+    private function activeAsset(
+        int $organization,
+        string $fileId,
+        ?string $ownerUserId,
+        bool $lock,
+    ): ?array {
         $sql = 'SELECT file_id, user_id, kind, name, url, storage_path, size_byte, mime_type, extension
                   FROM im_upload_asset
-                 WHERE organization = ? AND file_id = ?
+                 WHERE organization = ? AND BINARY file_id = BINARY ?
                    AND status = 1 AND delete_time IS NULL';
         $params = [$organization, $fileId];
         if ($ownerUserId !== null) {
-            $sql .= ' AND user_id = ?';
+            $sql .= ' AND BINARY user_id = BINARY ?';
             $params[] = $ownerUserId;
         }
-        $sql .= ' LIMIT 1 FOR UPDATE';
+        $sql .= ' LIMIT 1';
+        if ($lock) {
+            $sql .= ' FOR UPDATE';
+        }
 
         return Db::query($sql, $params)[0] ?? null;
     }
@@ -141,30 +200,57 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
         string $messageId,
         string $fileId,
         ?string $expectedKind,
+        bool $requireActive,
     ): array {
+        CrossOrganizationSocialPolicy::lockSharedInsideTransaction();
+        $viewerMembership = Db::query(
+            'SELECT 1 AS present FROM im_conversation_member
+              WHERE organization = ? AND BINARY conversation_id = BINARY ?
+                AND member_organization = ? AND BINARY user_id = BINARY ?
+                AND delete_time IS NULL LIMIT 1',
+            [$organization, $conversationId, $organization, $userId],
+        )[0] ?? null;
+        if ($viewerMembership === null) {
+            throw new ApiException('原附件消息不存在或不可见。', 404);
+        }
+        $guard = new WebImConversationAccessGuard();
+        if ($requireActive) {
+            $access = $guard->assertAccessible($organization, $userId, $conversationId, true);
+        } else {
+            $access = $guard->assertReadable($organization, $userId, $conversationId, true);
+        }
+        $membershipClause = $requireActive
+            ? 'cm.status = 1 AND (c.conversation_type <> 2 OR cm.access_state = "active")'
+            : '((c.conversation_type = 2 AND cm.access_state IN ("active", "history_only"))
+                OR (c.conversation_type <> 2 AND cm.status = 1))';
         $source = Db::query(
-            'SELECT i.message_seq, i.shard_table
+            'SELECT i.organization, i.conversation_id, i.message_id, i.message_seq, i.shard_table,
+                    i.client_msg_id, i.storage_node, i.sender_id, i.sender_organization,
+                    i.create_time AS index_create_time,
+                    c.conversation_type AS authoritative_conversation_type
                FROM im_message_index i
          INNER JOIN im_conversation c
                  ON c.organization = i.organization
-                AND c.conversation_id = i.conversation_id
+                AND BINARY c.conversation_id = BINARY i.conversation_id
                 AND c.status = 1
                 AND c.delete_time IS NULL
          INNER JOIN im_conversation_member cm
-                 ON cm.organization = i.organization
-                AND cm.conversation_id = i.conversation_id
-                AND cm.user_id = ?
-                AND cm.status = 1
+                ON cm.organization = i.organization
+                AND BINARY cm.conversation_id = BINARY i.conversation_id
+                AND cm.member_organization = ?
+                AND BINARY cm.user_id = BINARY ?
                 AND cm.delete_time IS NULL
+                AND ' . $membershipClause . '
               WHERE i.organization = ?
-                AND i.conversation_id = ?
-                AND i.message_id = ?
+                AND BINARY i.conversation_id = BINARY ?
+                AND BINARY i.message_id = BINARY ?
                 AND EXISTS (
                     SELECT 1
                       FROM im_conversation_membership_period mp
                      WHERE mp.organization = i.organization
-                       AND mp.conversation_id = i.conversation_id
-                       AND mp.user_id = ?
+                       AND BINARY mp.conversation_id = BINARY i.conversation_id
+                       AND mp.member_organization = ?
+                       AND BINARY mp.user_id = BINARY ?
                        AND mp.status = 1
                        AND i.message_seq >= mp.visible_from_message_seq
                        AND (mp.visible_until_message_seq IS NULL OR i.message_seq <= mp.visible_until_message_seq)
@@ -173,22 +259,42 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
                     SELECT 1
                       FROM im_message_user_delete ud
                      WHERE ud.organization = i.organization
-                       AND ud.conversation_id = i.conversation_id
-                       AND ud.message_id = i.message_id
-                       AND ud.user_id = ?
+                       AND BINARY ud.conversation_id = BINARY i.conversation_id
+                       AND BINARY ud.message_id = BINARY i.message_id
+                       AND ud.user_organization = ?
+                       AND BINARY ud.user_id = BINARY ?
                 )
               LIMIT 1
               FOR UPDATE',
-            [$userId, $organization, $conversationId, $messageId, $userId, $userId],
+            [
+                $organization,
+                $userId,
+                $organization,
+                $conversationId,
+                $messageId,
+                $organization,
+                $userId,
+                $organization,
+                $userId,
+            ],
         )[0] ?? null;
         if ($source === null) {
             throw new ApiException('原附件消息不存在或不可见。', 404);
         }
 
+        $expectedShardTable = $this->messageShardRoutes()->assertIndexRoute(
+            $source,
+            $organization,
+            $conversationId,
+        );
+
         $message = Db::query(
-            'SELECT sender_id, message_type, content, status, delete_time
-               FROM ' . $this->quoteShard((string) $source['shard_table']) . '
-              WHERE organization = ? AND conversation_id = ? AND message_id = ?
+            'SELECT organization, conversation_id, conversation_type, message_id, message_seq,
+                    client_msg_id, sender_id, sender_organization, message_type, content,
+                    status, create_time, delete_time
+               FROM ' . $this->quoteShard($expectedShardTable) . '
+              WHERE organization = ? AND BINARY conversation_id = BINARY ?
+                AND BINARY message_id = BINARY ?
               LIMIT 1
               FOR UPDATE',
             [$organization, $conversationId, $messageId],
@@ -201,6 +307,29 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
             || ($expectedKind !== null && $kind !== $expectedKind)) {
             throw new ApiException('原附件消息不存在或不可见。', 404);
         }
+        $sourceOrganization = (int) ($source['sender_organization'] ?? 0);
+        $clientMessageId = (string) ($source['client_msg_id'] ?? '');
+        if (
+            $sourceOrganization <= 0
+            || $clientMessageId === ''
+            || (int) ($message['organization'] ?? 0) !== $organization
+            || !hash_equals((string) $source['conversation_id'], (string) $message['conversation_id'])
+            || !hash_equals((string) $source['message_id'], (string) $message['message_id'])
+            || (string) $source['message_seq'] !== (string) $message['message_seq']
+            || !hash_equals($clientMessageId, (string) ($message['client_msg_id'] ?? ''))
+            || !hash_equals(
+                (string) ($source['index_create_time'] ?? ''),
+                (string) ($message['create_time'] ?? ''),
+            )
+            || (int) ($source['authoritative_conversation_type'] ?? 0)
+                !== (int) ($access['conversation_type'] ?? 0)
+            || (int) ($message['conversation_type'] ?? 0)
+                !== (int) ($access['conversation_type'] ?? 0)
+            || (int) ($message['sender_organization'] ?? 0) !== $sourceOrganization
+            || !hash_equals((string) $source['sender_id'], (string) $message['sender_id'])
+        ) {
+            throw new \RuntimeException('Attachment source index and shard body binding is inconsistent.');
+        }
 
         $content = json_decode((string) ($message['content'] ?? ''), true);
         if (!is_array($content)
@@ -209,7 +338,7 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
             throw new ApiException('原附件消息与 file_id 不匹配。', 404);
         }
 
-        $asset = $this->activeAsset($organization, $fileId);
+        $asset = $this->activeAsset($sourceOrganization, $fileId, null, true);
         if ($asset === null || (string) $asset['kind'] !== $kind) {
             throw new ApiException('原附件不存在或已失效。', 404);
         }
@@ -240,7 +369,8 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
             && (string) $derived['name'] === (string) $source['name']
             && (string) $derived['url'] === ''
             && (string) $derived['storage_path'] === (string) $source['storage_path']
-            && (int) $derived['size_byte'] === (int) $source['size_byte']
+            && $this->authoritativeSize($derived['size_byte'] ?? null)
+                === $this->authoritativeSize($source['size_byte'] ?? null)
             && (string) $derived['mime_type'] === (string) $source['mime_type']
             && (string) $derived['extension'] === (string) $source['extension']
             && (int) $derived['status'] === 1
@@ -257,10 +387,40 @@ final class ThinkOrmWebImAssetForwardStore implements WebImAssetForwardStoreInte
             'file_id' => (string) $asset['file_id'],
             'kind' => $kind,
             'name' => (string) $asset['name'],
-            'size' => (int) $asset['size_byte'],
+            'size' => $this->authoritativeSize($asset['size_byte'] ?? null),
             'mime_type' => (string) $asset['mime_type'],
             'extension' => (string) $asset['extension'],
         ];
+    }
+
+    private function messageShardRoutes(): MessageShardRouteValidator
+    {
+        return $this->messageShardRoutes ??= new MessageShardRouteValidator();
+    }
+
+    private function authoritativeSize(mixed $value): int
+    {
+        if (is_int($value) && $value > 0) {
+            return $value;
+        }
+        if (is_string($value) && preg_match('/^[1-9]\d*$/', $value) === 1) {
+            $maximum = (string) PHP_INT_MAX;
+            if (strlen($value) < strlen($maximum)
+                || (strlen($value) === strlen($maximum)
+                    && strcmp($value, $maximum) <= 0)) {
+                return (int) $value;
+            }
+        }
+        throw new ApiException('权威物理附件大小非法或超出服务端整数范围。', 503);
+    }
+
+    private function checkedUsageAdd(int $usage, int $size): int
+    {
+        if ($usage < 0 || $size <= 0 || $usage > PHP_INT_MAX - $size) {
+            throw new ApiException('机构存储用量超出服务端整数范围。', 503);
+        }
+
+        return $usage + $size;
     }
 
     private function quoteShard(string $table): string

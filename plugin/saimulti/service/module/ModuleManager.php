@@ -263,21 +263,48 @@ final class ModuleManager
                 fn () => $this->authCaches->systemStateChanged(),
             ]);
 
-            $migrationOutput = $this->migrations->migrate($manifest, $entry['path']);
             $hook = $this->runNonTransactionalHook(
                 $manifest,
                 LifecycleOperation::UPGRADE,
                 fromVersion: (string) $row['version'],
                 options: ['actor' => $actor],
             );
+            $migrationOutput = $this->migrations->migrate($manifest, $entry['path']);
+            $restoreHook = null;
+            if ($previousStatus === SystemModuleStatus::ENABLED) {
+                // Destructive migrations are allowed to leave runtime state
+                // fenced. An explicitly enabled module is restored only after
+                // its normal enable readiness contract succeeds.
+                $restoreHook = $this->runNonTransactionalHook(
+                    $manifest,
+                    LifecycleOperation::ENABLE,
+                    options: ['actor' => $actor, 'reason' => 'post_upgrade_restore'],
+                );
+            }
 
-            $this->transactions->run(function () use ($row, $previousStatus, $manifest, $entry, $actor, $migrationOutput, &$hook): void {
+            $this->transactions->run(function () use (
+                $row,
+                $previousStatus,
+                $manifest,
+                $entry,
+                $actor,
+                $migrationOutput,
+                &$hook,
+                &$restoreHook,
+            ): void {
                 $hook ??= $this->hooks->run(
                     $manifest,
                     LifecycleOperation::UPGRADE,
                     fromVersion: (string) $row['version'],
                     options: ['actor' => $actor],
                 );
+                if ($previousStatus === SystemModuleStatus::ENABLED) {
+                    $restoreHook ??= $this->hooks->run(
+                        $manifest,
+                        LifecycleOperation::ENABLE,
+                        options: ['actor' => $actor, 'reason' => 'post_upgrade_restore'],
+                    );
+                }
                 $this->menus->register($manifest);
                 $this->transitionSystem($row, $previousStatus, $this->manifestData($manifest, $entry['path']) + [
                     'version' => $manifest->version(),
@@ -294,7 +321,11 @@ final class ModuleManager
                     $manifest->version(),
                     true,
                     $actor,
-                    context: ['migration_output' => $migrationOutput, 'hook' => $hook],
+                    context: [
+                        'migration_output' => $migrationOutput,
+                        'hook' => $hook,
+                        'post_upgrade_restore_hook' => $restoreHook,
+                    ],
                 );
             }, [
                 fn () => $this->access->invalidateModule($manifest->moduleKey()),

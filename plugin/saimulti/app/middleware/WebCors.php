@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace plugin\saimulti\app\middleware;
 
 use plugin\saimulti\exception\ApiException;
+use plugin\saimulti\exception\SearchProjectionIntegrityException;
 use plugin\saimulti\service\WebOrganizationResolver;
 use support\Log;
 use Throwable;
@@ -29,6 +30,16 @@ final class WebCors implements MiddlewareInterface
             $organization = $resolver->fromRequest($request);
             $allowedOrigin = $resolver->assertOrganizationOrigin($organization, $origin);
             $response = $handler($request);
+        } catch (SearchProjectionIntegrityException $exception) {
+            Log::error('Web search projection integrity failed', [
+                'path' => $request->path(),
+                'message' => $exception->getMessage(),
+                'exception' => $exception::class,
+            ]);
+            $response = json([
+                'code' => 503,
+                'message' => '搜索数据暂时不可用。',
+            ])->withStatus(503);
         } catch (ApiException $exception) {
             $response = json([
                 'code' => $exception->getCode() ?: 400,
@@ -70,7 +81,7 @@ final class WebCors implements MiddlewareInterface
             409 => 409,
             422 => 422,
             429 => 429,
-            50301 => 503,
+            503, 50301 => 503,
             default => 400,
         };
     }

@@ -203,7 +203,13 @@ SQL);
              1, 1, NOW(), NOW())',
     );
 
-    $configPath = dirname(__DIR__, 2) . '/b8im-im/phinx.php';
+    $imRoot = trim((string) (getenv('B8IM_IM_ROOT') ?: dirname(__DIR__, 2) . '/b8im-im'));
+    $configPath = $imRoot . '/phinx.php';
+    if (!is_file($configPath)) {
+        throw new RuntimeException(
+            'b8im-im phinx.php was not found for the isolated web access database.',
+        );
+    }
     $input = new ArrayInput([]);
     $input->setInteractive(false);
     $migrationOutput = new BufferedOutput();

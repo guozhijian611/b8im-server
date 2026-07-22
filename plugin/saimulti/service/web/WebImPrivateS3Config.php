@@ -99,8 +99,23 @@ final class WebImPrivateS3Config
     /** @param array{dirname: string} $config */
     public function assertObjectKey(array $config, int $organization, string $storagePath): string
     {
-        if ($organization <= 0
-            || $storagePath === ''
+        if ($organization <= 0) {
+            throw new ApiException('附件存储路径无效。', 409);
+        }
+        $storagePath = $this->assertCanonicalObjectKey($config, $storagePath);
+        $tenantRoot = ($config['dirname'] !== '' ? $config['dirname'] . '/' : '')
+            . sprintf('organizations/%d/im/', $organization);
+        if (!str_starts_with($storagePath, $tenantRoot)) {
+            throw new ApiException('附件存储路径与当前机构不一致。', 409);
+        }
+
+        return $storagePath;
+    }
+
+    /** @param array{dirname: string} $config */
+    public function assertCanonicalObjectKey(array $config, string $storagePath): string
+    {
+        if ($storagePath === ''
             || strlen($storagePath) > 512
             || trim($storagePath, '/') !== $storagePath
             || str_contains($storagePath, '\\')
@@ -111,13 +126,16 @@ final class WebImPrivateS3Config
         if (in_array('', $segments, true) || in_array('.', $segments, true) || in_array('..', $segments, true)) {
             throw new ApiException('附件存储路径无效。', 409);
         }
-        $tenantRoot = ($config['dirname'] !== '' ? $config['dirname'] . '/' : '')
-            . sprintf('organizations/%d/im/', $organization);
-        if (!str_starts_with($storagePath, $tenantRoot)) {
-            throw new ApiException('附件存储路径与当前机构不一致。', 409);
+        $root = ($config['dirname'] !== '' ? $config['dirname'] . '/' : '')
+            . 'organizations/';
+        if (!str_starts_with($storagePath, $root)) {
+            throw new ApiException('附件存储路径不符合可信上传格式。', 409);
         }
-        $suffix = substr($storagePath, strlen($tenantRoot));
-        if (preg_match('#^[0-9]{6}/[a-f0-9]{32,64}\.[A-Za-z0-9]{1,32}$#', $suffix) !== 1) {
+        $suffix = substr($storagePath, strlen($root));
+        if (preg_match(
+            '#^[1-9]\d*/im/[0-9]{6}/[a-f0-9]{32,64}\.[A-Za-z0-9]{1,32}$#',
+            $suffix,
+        ) !== 1) {
             throw new ApiException('附件存储路径不符合可信上传格式。', 409);
         }
 

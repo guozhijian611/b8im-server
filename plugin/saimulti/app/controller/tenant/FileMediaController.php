@@ -9,24 +9,34 @@ use plugin\saimulti\exception\ApiException;
 use plugin\saimulti\service\ModuleRequired;
 use plugin\saimulti\service\module\FileMediaService;
 use plugin\saimulti\service\Permission;
+use plugin\saimulti\utils\CanonicalInteger;
 use support\Request;
 use support\Response;
 
 #[ModuleRequired('file_media', 'server', 'file_media.tenant.manage')]
 final class FileMediaController extends TenantController
 {
-    #[Permission('租户配额', 'saimulti:tenant:file_media:quota')]
-    public function quotaRead(Request $request): Response
+    #[Permission('文件媒体策略读取', 'saimulti:tenant:file_media:quota')]
+    public function policyRead(Request $request): Response
     {
-        return $this->success((new FileMediaService())->quotaRead((int) $this->organization, true));
+        return $this->success((new FileMediaService())->policyRead((int) $this->organization));
     }
 
-    #[Permission('更新租户配额策略', 'saimulti:tenant:file_media:quota')]
-    public function quotaUpdate(Request $request): Response
+    #[Permission('文件媒体策略更新', 'saimulti:tenant:file_media:quota')]
+    public function policyUpdate(Request $request): Response
     {
-        return $this->success((new FileMediaService())->quotaUpdate(
+        $input = $request->post();
+        $expected = ['max_file_bytes', 'preview_enabled', 'large_file_enabled', 'status'];
+        if (!is_array($input)
+            || count($input) !== count($expected)
+            || array_diff(array_keys($input), $expected) !== []
+            || array_diff($expected, array_keys($input)) !== []) {
+            throw new ApiException('请求体必须且只能包含完整策略字段。', 422);
+        }
+
+        return $this->success((new FileMediaService())->policyUpdate(
             (int) $this->organization,
-            is_array($request->post()) ? $request->post() : [],
+            $input,
             $this->tenantId,
         ));
     }
@@ -112,11 +122,7 @@ final class FileMediaController extends TenantController
     private function id(Request $request): int
     {
         $id = $request->input('id') ?? $request->get('id');
-        if (!is_int($id) && (!is_string($id) || !preg_match('/^\d+$/', $id))) {
-            throw new ApiException('编号无效。', 422);
-        }
-
-        return (int) $id;
+        return CanonicalInteger::positive($id, '编号');
     }
 
     /** @return list<int> */
@@ -128,11 +134,7 @@ final class FileMediaController extends TenantController
         }
 
         return array_map(function (mixed $id): int {
-            if (!is_int($id) && (!is_string($id) || !preg_match('/^\d+$/', $id))) {
-                throw new ApiException('编号列表无效。', 422);
-            }
-
-            return (int) $id;
+            return CanonicalInteger::positive($id, '编号');
         }, $ids);
     }
 }

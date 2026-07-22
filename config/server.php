@@ -12,7 +12,18 @@
  * @license   http://www.opensource.org/licenses/mit-license.php MIT License
  */
 
-$maxPackageSize = (int) env('WEBMAN_MAX_PACKAGE_SIZE_BYTES', 2 * 1024 * 1024 * 1024);
+$expectedMaxPackageSize = 2148532224;
+$configuredMaxPackageSize = env('WEBMAN_MAX_PACKAGE_SIZE_BYTES');
+if ($configuredMaxPackageSize === null) {
+    $maxPackageSize = $expectedMaxPackageSize;
+} elseif (($configuredMaxPackageSize !== $expectedMaxPackageSize)
+    && ($configuredMaxPackageSize !== (string) $expectedMaxPackageSize)) {
+    throw new RuntimeException(
+        'WEBMAN_MAX_PACKAGE_SIZE_BYTES must equal canonical value 2148532224.',
+    );
+} else {
+    $maxPackageSize = $expectedMaxPackageSize;
+}
 
 return [
     'event_loop' => '',

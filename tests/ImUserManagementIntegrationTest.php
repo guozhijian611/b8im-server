@@ -25,6 +25,7 @@ use Phinx\Config\Config;
 use Phinx\Migration\Manager;
 use plugin\saimulti\exception\ApiException;
 use plugin\saimulti\service\imUser\ImUserManagementService;
+use plugin\saimulti\service\qa\QaFixtureService;
 use support\think\Db;
 use Symfony\Component\Console\Input\ArrayInput;
 use Symfony\Component\Console\Output\BufferedOutput;
@@ -51,7 +52,11 @@ $expectCode = static function (int $code, callable $callback) use ($assert): voi
     throw new RuntimeException('Expected ApiException was not thrown.');
 };
 
-$imConfigPath = dirname(__DIR__, 2) . '/b8im-im/phinx.php';
+$imRoot = trim((string) (getenv('B8IM_IM_ROOT') ?: dirname(__DIR__, 2) . '/b8im-im'));
+$imConfigPath = $imRoot . '/phinx.php';
+if (!is_file($imConfigPath)) {
+    throw new RuntimeException('b8im-im phinx.php was not found for the isolated integration database.');
+}
 $input = new ArrayInput([]);
 $input->setInteractive(false);
 (new Manager(new Config(require $imConfigPath, $imConfigPath), $input, new BufferedOutput()))->migrate('development');
@@ -86,7 +91,52 @@ $assert((int) $first['organization'] === 1 && $first['account'] === 'im_manageme
 $assert((int) Db::table('im_user_profile')->where('user_id', $first['user_id'])->count() === 1, 'Profile was not initialized.');
 $assert((int) Db::table('im_user_privacy_setting')->where('user_id', $first['user_id'])->count() === 1, 'Privacy settings were not initialized.');
 $assert((int) Db::table('im_user_security_policy')->where('user_id', $first['user_id'])->count() === 1, 'Security policy was not initialized.');
+$groupAccessState = Db::table('im_user_group_access_state')
+    ->where('organization', 1)
+    ->where('user_id', (string) $first['user_id'])
+    ->select()
+    ->toArray();
+$assert(count($groupAccessState) === 1, 'Group access state was not initialized exactly once.');
+$assert((string) $groupAccessState[0]['access_snapshot_id'] === '1', 'Initial group access snapshot must be 1.');
 $expectCode(404, static fn () => $service->read((int) $first['id'], 2));
+
+$atomicTables = [
+    'im_user',
+    'im_user_profile',
+    'im_user_privacy_setting',
+    'im_user_security_policy',
+    'im_user_group_access_state',
+];
+$atomicCounts = [];
+foreach ($atomicTables as $table) {
+    $atomicCounts[$table] = (int) Db::table($table)->count();
+}
+Db::execute(
+    "CREATE TRIGGER im_user_group_access_state_fail_test
+     BEFORE INSERT ON im_user_group_access_state
+     FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'forced group access state failure'",
+);
+$atomicFailure = null;
+try {
+    $service->create(1, [
+        'account' => 'im_management_atomic_rollback',
+        'password' => 'Password123!',
+        'nickname' => '原子回滚测试',
+        'status' => 2,
+    ], $actor);
+} catch (Throwable $throwable) {
+    $atomicFailure = $throwable;
+} finally {
+    Db::execute('DROP TRIGGER IF EXISTS im_user_group_access_state_fail_test');
+}
+$assert($atomicFailure instanceof Throwable, 'Forced group access state failure did not abort provisioning.');
+$assert(
+    (int) Db::table('im_user')->where('organization', 1)->where('account', 'im_management_atomic_rollback')->count() === 0,
+    'Failed group access state initialization left the IM user visible.',
+);
+foreach ($atomicCounts as $table => $count) {
+    $assert((int) Db::table($table)->count() === $count, "Provision rollback left rows in {$table}.");
+}
 
 $expectCode(422, static fn () => $service->create(1, [
     'account' => 'im_management_b',
@@ -129,5 +179,214 @@ $assert((int) Db::table('sm_tool_oper_log')->where('remark', 'IM 用户管理操
 
 $page = $service->index(['keyword' => 'management', 'page' => 1, 'limit' => 20], 1);
 $assert($page['total'] === 2 && count($page['data']) === 2, 'Tenant-scoped user list is incorrect.');
+
+$qaFixture = new QaFixtureService();
+$upsertQaUser = new ReflectionMethod(QaFixtureService::class, 'upsertImUser');
+$qaNow = date('Y-m-d H:i:s');
+$upsertQaUser->invoke($qaFixture, 1, 'qa-state-user', 'qa_state_user', 'QA State User', '99009991', $qaNow);
+$assert(
+    (string) Db::table('im_user_group_access_state')
+        ->where('organization', 1)
+        ->where('user_id', 'qa-state-user')
+        ->value('access_snapshot_id') === '1',
+    'QA fixture did not initialize a missing group access state.',
+);
+Db::table('im_user_group_access_state')
+    ->where('organization', 1)
+    ->where('user_id', 'qa-state-user')
+    ->update(['access_snapshot_id' => 7]);
+$upsertQaUser->invoke($qaFixture, 1, 'qa-state-user', 'qa_state_user', 'QA State User', '99009991', $qaNow);
+$assert(
+    (string) Db::table('im_user_group_access_state')
+        ->where('organization', 1)
+        ->where('user_id', 'qa-state-user')
+        ->value('access_snapshot_id') === '7',
+    'QA fixture reset an existing positive group access snapshot.',
+);
+Db::table('im_group_member_access_audit')->insert([
+    'event_id' => hash('sha256', 'qa-state-user-access-snapshot-7'),
+    'organization' => 1,
+    'conversation_id' => 'group_qa_state_recovery',
+    'member_organization' => 1,
+    'user_id' => 'qa-state-user',
+    'access_snapshot_id' => 7,
+    'access_version' => 1,
+    'access_state' => 'revoked',
+    'last_message_seq' => 0,
+    'last_change_seq' => 0,
+    'periods_json' => '[]',
+    'reason' => 'history_revoke',
+    'actor_organization' => 1,
+    'actor_user_id' => 'system',
+    'create_time' => $qaNow,
+]);
+Db::table('im_user_group_access_state')
+    ->where('organization', 1)
+    ->where('user_id', 'qa-state-user')
+    ->delete();
+$upsertQaUser->invoke($qaFixture, 1, 'qa-state-user', 'qa_state_user', 'QA State User', '99009991', $qaNow);
+$assert(
+    (string) Db::table('im_user_group_access_state')
+        ->where('organization', 1)
+        ->where('user_id', 'qa-state-user')
+        ->value('access_snapshot_id') === '7',
+    'QA fixture did not recover the immutable audited group access snapshot.',
+);
+
+$upsertQaUser->invoke(
+    $qaFixture,
+    1,
+    'qa-orphan-state-user',
+    'qa_orphan_state_user',
+    'QA Orphan State User',
+    '99009994',
+    $qaNow,
+);
+Db::table('im_user_group_access_state')
+    ->where('organization', 1)
+    ->where('user_id', 'qa-orphan-state-user')
+    ->delete();
+$orphanUserBefore = Db::table('im_user')
+    ->where('organization', 1)
+    ->where('user_id', 'qa-orphan-state-user')
+    ->find();
+Db::table('im_conversation_member')->insert([
+    'organization' => 1,
+    'conversation_id' => 'orphan_group_member_state',
+    'member_organization' => 1,
+    'user_id' => 'qa-orphan-state-user',
+    'member_role' => 'member',
+    'status' => 3,
+    'access_version' => 1,
+    'access_state' => 'revoked',
+    'join_at' => $qaNow,
+    'create_time' => $qaNow,
+    'update_time' => $qaNow,
+]);
+$orphanMemberFailure = null;
+try {
+    Db::transaction(static function () use ($upsertQaUser, $qaFixture, $qaNow): void {
+        $upsertQaUser->invoke(
+            $qaFixture,
+            1,
+            'qa-orphan-state-user',
+            'qa_orphan_state_user',
+            'Must Roll Back',
+            '99009994',
+            $qaNow,
+        );
+    });
+} catch (Throwable $throwable) {
+    $orphanMemberFailure = $throwable;
+}
+$assert($orphanMemberFailure instanceof RuntimeException, 'QA fixture trusted an orphan group member without audit.');
+$assert(
+    (int) Db::table('im_user_group_access_state')
+        ->where('organization', 1)
+        ->where('user_id', 'qa-orphan-state-user')
+        ->count() === 0,
+    'Failed orphan-member recovery left a new group access state.',
+);
+$orphanUserAfter = Db::table('im_user')
+    ->where('organization', 1)
+    ->where('user_id', 'qa-orphan-state-user')
+    ->find();
+$assert(
+    is_array($orphanUserBefore)
+        && is_array($orphanUserAfter)
+        && hash_equals((string) $orphanUserBefore['nickname'], (string) $orphanUserAfter['nickname'])
+        && hash_equals((string) $orphanUserBefore['password_hash'], (string) $orphanUserAfter['password_hash']),
+    'Failed orphan-member recovery did not roll back the QA user update.',
+);
+Db::table('im_conversation_member')
+    ->where('organization', 1)
+    ->where('conversation_id', 'orphan_group_member_state')
+    ->where('user_id', 'qa-orphan-state-user')
+    ->delete();
+Db::table('im_conversation_membership_period')->insert([
+    'organization' => 1,
+    'conversation_id' => 'orphan_group_period_state',
+    'member_organization' => 1,
+    'user_id' => 'qa-orphan-state-user',
+    'period_no' => 1,
+    'visible_from_message_seq' => 1,
+    'visible_until_message_seq' => 1,
+    'join_at' => $qaNow,
+    'leave_at' => $qaNow,
+    'status' => 1,
+    'create_time' => $qaNow,
+    'update_time' => $qaNow,
+]);
+$orphanPeriodFailure = null;
+try {
+    Db::transaction(static function () use ($upsertQaUser, $qaFixture, $qaNow): void {
+        $upsertQaUser->invoke(
+            $qaFixture,
+            1,
+            'qa-orphan-state-user',
+            'qa_orphan_state_user',
+            'Must Also Roll Back',
+            '99009994',
+            $qaNow,
+        );
+    });
+} catch (Throwable $throwable) {
+    $orphanPeriodFailure = $throwable;
+}
+$assert($orphanPeriodFailure instanceof RuntimeException, 'QA fixture trusted an orphan group period without audit.');
+$assert(
+    (int) Db::table('im_user_group_access_state')
+        ->where('organization', 1)
+        ->where('user_id', 'qa-orphan-state-user')
+        ->count() === 0,
+    'Failed orphan-period recovery left a new group access state.',
+);
+$assert(
+    (string) Db::table('im_user')
+        ->where('organization', 1)
+        ->where('user_id', 'qa-orphan-state-user')
+        ->value('nickname') === 'QA Orphan State User',
+    'Failed orphan-period recovery did not roll back the QA user update.',
+);
+
+$qaCollisionFailure = null;
+try {
+    $upsertQaUser->invoke(
+        $qaFixture,
+        1,
+        (string) $first['user_id'],
+        'im_management_a2',
+        'Must Not Overwrite',
+        '99009992',
+        $qaNow,
+    );
+} catch (ReflectionException|RuntimeException $throwable) {
+    $qaCollisionFailure = $throwable;
+}
+$assert($qaCollisionFailure instanceof RuntimeException, 'QA fixture overwrote a non-QA account.');
+$assert(
+    (string) Db::table('im_user')->where('id', (int) $first['id'])->value('nickname') === '管理测试 A2',
+    'Rejected QA collision changed non-QA user data.',
+);
+
+$qaIdentityFailure = null;
+try {
+    $upsertQaUser->invoke(
+        $qaFixture,
+        1,
+        (string) $first['user_id'],
+        'qa_identity_collision',
+        'Must Not Reuse Identity',
+        '99009993',
+        $qaNow,
+    );
+} catch (ReflectionException|RuntimeException $throwable) {
+    $qaIdentityFailure = $throwable;
+}
+$assert($qaIdentityFailure instanceof RuntimeException, 'QA fixture reused an occupied user identity.');
+$assert(
+    (int) Db::table('im_user')->where('organization', 1)->where('account', 'qa_identity_collision')->count() === 0,
+    'Rejected QA identity collision left a user row.',
+);
 
 fwrite(STDOUT, sprintf("IM user management integration (%s): %d assertions passed.\n", $database, $assertions));

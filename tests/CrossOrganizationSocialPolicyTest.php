@@ -53,6 +53,10 @@ $assert(
     CrossOrganizationSocialPolicy::CONFIG_GROUP === 'social_config',
     'config group stable',
 );
+$assert(
+    CrossOrganizationSocialPolicy::SNAPSHOT_CONFIG_KEY === 'cross_org_access_snapshot_id',
+    'access snapshot config key stable',
+);
 
 // Live DB policy read when available
 try {
@@ -70,15 +74,35 @@ try {
             $pdo->exec("INSERT INTO sm_system_config (group_id, `key`, `value`, name, input_type, sort, remark, create_time, update_time)
                 VALUES ({$groupId}, 'cross_org_social_enabled', '0', '允许跨租户好友与单聊', 'switch', 100, 'test', NOW(), NOW())");
         }
-        $pdo->exec("UPDATE sm_system_config SET value = '0' WHERE group_id = {$groupId} AND `key` = 'cross_org_social_enabled'");
+        $snapshotExists = $pdo->query("SELECT id FROM sm_system_config WHERE group_id = {$groupId} AND `key` = 'cross_org_access_snapshot_id' AND delete_time IS NULL LIMIT 1")->fetchColumn();
+        if (!$snapshotExists) {
+            $pdo->exec("INSERT INTO sm_system_config (group_id, `key`, `value`, name, input_type, sort, remark, create_time, update_time)
+                VALUES ({$groupId}, 'cross_org_access_snapshot_id', '0', '跨租户社交访问快照序号', 'hidden', 99, 'test', NOW(), NOW())");
+        }
+        $pdo->exec("UPDATE sm_system_config SET value = CASE `key`
+            WHEN 'cross_org_social_enabled' THEN '0'
+            WHEN 'cross_org_access_snapshot_id' THEN '0'
+            ELSE value END
+            WHERE group_id = {$groupId}
+              AND `key` IN ('cross_org_social_enabled', 'cross_org_access_snapshot_id')");
 
         // Bootstrap webman Db if needed is heavy; assert key/value via PDO as structural proof of shipped migration path.
         $value = $pdo->query("SELECT value FROM sm_system_config WHERE group_id = {$groupId} AND `key` = 'cross_org_social_enabled' LIMIT 1")->fetchColumn();
         $assert((string) $value === '0', 'persisted switch default off');
-        $pdo->exec("UPDATE sm_system_config SET value = '1' WHERE group_id = {$groupId} AND `key` = 'cross_org_social_enabled'");
+        $pdo->exec("UPDATE sm_system_config SET value = CASE `key`
+            WHEN 'cross_org_social_enabled' THEN '1'
+            WHEN 'cross_org_access_snapshot_id' THEN '1'
+            ELSE value END
+            WHERE group_id = {$groupId}
+              AND `key` IN ('cross_org_social_enabled', 'cross_org_access_snapshot_id')");
         $valueOn = $pdo->query("SELECT value FROM sm_system_config WHERE group_id = {$groupId} AND `key` = 'cross_org_social_enabled' LIMIT 1")->fetchColumn();
         $assert((string) $valueOn === '1', 'persisted switch on');
-        $pdo->exec("UPDATE sm_system_config SET value = '0' WHERE group_id = {$groupId} AND `key` = 'cross_org_social_enabled'");
+        $pdo->exec("UPDATE sm_system_config SET value = CASE `key`
+            WHEN 'cross_org_social_enabled' THEN '0'
+            WHEN 'cross_org_access_snapshot_id' THEN '2'
+            ELSE value END
+            WHERE group_id = {$groupId}
+              AND `key` IN ('cross_org_social_enabled', 'cross_org_access_snapshot_id')");
         $valueOff = $pdo->query("SELECT value FROM sm_system_config WHERE group_id = {$groupId} AND `key` = 'cross_org_social_enabled' LIMIT 1")->fetchColumn();
         $assert((string) $valueOff === '0', 'persisted switch off again');
     }

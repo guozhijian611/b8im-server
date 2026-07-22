@@ -7,13 +7,11 @@ namespace plugin\saimulti\service\web;
 use plugin\saimulti\exception\ApiException;
 use SplFileInfo;
 use support\Request;
+use Throwable;
 
 final class WebImUploadService
 {
-    private const MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024;
-
     private const KINDS = ['image', 'file', 'voice', 'video'];
-
     private const EXTENSIONS = [
         'image' => ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic', 'heif'],
         'voice' => ['mp3', 'm4a', 'aac', 'wav', 'ogg', 'webm', 'amr', 'flac'],
@@ -30,70 +28,271 @@ final class WebImUploadService
     ];
 
     private WebImUploadStorageInterface $storage;
-
-    private WebImUploadAssetStoreInterface $assets;
+    private WebImUploadPolicyInterface $policy;
+    private WebImUploadReservationServiceInterface $reservations;
 
     public function __construct(
         ?WebImUploadStorageInterface $storage = null,
-        ?WebImUploadAssetStoreInterface $assets = null,
+        ?WebImUploadReservationServiceInterface $reservations = null,
+        ?WebImUploadPolicyInterface $policy = null,
     ) {
         $this->storage = $storage ?? new S3WebImUploadStorage();
-        $this->assets = $assets ?? new ThinkOrmWebImUploadAssetStore();
+        $this->policy = $policy ?? new AuthoritativeWebImUploadPolicy();
+        $this->reservations = $reservations
+            ?? new ThinkOrmWebImUploadReservationService($this->policy);
     }
 
-    /**
-     * Web and native App IM use an authenticated proxy endpoint so no object-store URL or
-     * credential is disclosed during preparation.
-     *
-     * @param array<string, mixed> $identity
-     * @return array{mode: string, upload_path: string, method: string, filename: string, size: int, mime_type: string, extension: string}
-     */
+    /** @param array<string,mixed> $identity @return array<string,mixed> */
     public function prepare(
         array $identity,
+        string $idempotencyKey,
         string $kind,
         string $filename,
         int $size,
         string $mimeType,
     ): array {
         $this->identity($identity);
-        $this->storage->assertReady();
+        if (preg_match('/^[a-f0-9]{32}$/', $idempotencyKey) !== 1) {
+            throw new ApiException('idempotency_key 必须是 32 位小写十六进制。', 422);
+        }
         $kind = $this->kind($kind);
         $filename = $this->filename($filename);
+        if ($size <= 0) {
+            throw new ApiException('文件大小无效。', 422);
+        }
         $extension = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
-        $this->assertFile($kind, $extension, $size);
+        $this->assertExtension($kind, $extension);
         $mimeType = $this->mimeType($mimeType);
+
+        $intentHash = hash('sha256', implode("\0", [
+            (string) $identity['organization'],
+            (string) $identity['user_id'],
+            (string) $identity['client_family'],
+            $kind,
+            $filename,
+            (string) $size,
+            $mimeType,
+            $extension,
+        ]));
+        $intent = [
+            'organization' => (int) $identity['organization'],
+            'idempotency_key' => $idempotencyKey,
+            'intent_hash' => $intentHash,
+            'user_id' => (string) $identity['user_id'],
+            'client_family' => (string) $identity['client_family'],
+        ];
+        $existing = $this->reservations->findPrepare($intent);
+        if (is_array($existing)
+            && in_array((string) $existing['state'], ['confirmed', 'object_uploaded'], true)) {
+            return $this->prepareResponse($identity, $existing);
+        }
+
+        $this->storage->assertReady();
+        $this->policy->assertAllowed((int) $identity['organization'], $size);
+        if (is_array($existing)) {
+            return $this->prepareResponse(
+                $identity,
+                $this->reservations->refreshPrepare($intent),
+            );
+        }
+        $uploadId = bin2hex(random_bytes(32));
+        $fileId = sha1(bin2hex(random_bytes(32)));
+        $storagePath = $this->storage->reservePath(
+            (int) $identity['organization'],
+            $extension,
+            bin2hex(random_bytes(24)),
+        );
+        $now = date('Y-m-d H:i:s');
+        $row = $this->reservations->prepare([
+            'organization' => (int) $identity['organization'],
+            'upload_id' => $uploadId,
+            'idempotency_key' => $idempotencyKey,
+            'intent_hash' => $intentHash,
+            'file_id' => $fileId,
+            'storage_path' => $storagePath,
+            'user_id' => (string) $identity['user_id'],
+            'client_family' => (string) $identity['client_family'],
+            'kind' => $kind,
+            'filename' => $filename,
+            'size_bytes' => $size,
+            'mime_type' => $mimeType,
+            'extension' => $extension,
+            'state' => 'reserved',
+            'expires_at' => date('Y-m-d H:i:s', time() + 900),
+            'create_time' => $now,
+            'update_time' => $now,
+        ]);
+
+        return $this->prepareResponse($identity, $row);
+    }
+
+    /** @param array<string,mixed> $identity @return array<string,mixed> */
+    public function upload(array $identity, Request $request, string $uploadId): array
+    {
+        $this->identity($identity);
+        $uploadId = $this->uploadId($uploadId);
+        $this->assertUploadPost($request, $uploadId);
+        $reservation = $this->reservations->claim($identity, $uploadId);
+        try {
+            $file = $this->requestFile($request);
+            $this->assertExactFile($reservation, $file);
+        } catch (Throwable $failure) {
+            if ((string) $reservation['state'] === 'uploading') {
+                $this->reservations->releaseBeforeObject(
+                    (int) $reservation['id'],
+                    (string) $reservation['upload_lease_token'],
+                    'invalid_multipart',
+                );
+            }
+            throw $failure;
+        }
+        if ((string) $reservation['state'] === 'confirmed') {
+            return $this->metadata($reservation);
+        }
+        if ((string) $reservation['state'] === 'object_uploaded') {
+            return $this->reservations->confirm($identity, $uploadId);
+        }
+        $reservationId = (int) $reservation['id'];
+        $leaseToken = (string) $reservation['upload_lease_token'];
+
+        try {
+            $this->storage->assertReady();
+            $this->policy->assertAllowed(
+                (int) $identity['organization'],
+                (int) $reservation['size_bytes'],
+            );
+        } catch (Throwable $failure) {
+            $this->reservations->releaseBeforeObject(
+                $reservationId,
+                $leaseToken,
+                'pre_object_failure',
+            );
+            throw $failure;
+        }
+
+        $heartbeat = function () use ($reservationId, $leaseToken): void {
+            if (!$this->reservations->renewUploadLease($reservationId, $leaseToken)) {
+                throw new \RuntimeException('Upload writer lease was fenced.');
+            }
+        };
+        try {
+            $this->storage->uploadExact(
+                (int) $identity['organization'],
+                $file,
+                (string) $reservation['storage_path'],
+                (string) $reservation['mime_type'],
+                $heartbeat,
+            );
+            $heartbeat();
+            $inspected = $this->storage->inspect(
+                (int) $identity['organization'],
+                (string) $reservation['storage_path'],
+            );
+            if ((string) ($inspected['storage_path'] ?? '') !== (string) $reservation['storage_path']
+                || (int) ($inspected['size_byte'] ?? 0) !== (int) $reservation['size_bytes']
+                || trim((string) ($inspected['mime_type'] ?? '')) !== (string) $reservation['mime_type']) {
+                throw new \RuntimeException('Stored object metadata differs from the reservation.');
+            }
+            $heartbeat();
+            $this->reservations->markObjectUploaded($reservationId, $leaseToken);
+        } catch (Throwable $failure) {
+            $this->reservations->registerObjectCleanup(
+                $reservationId,
+                $failure::class,
+            );
+            throw $failure;
+        }
+
+        // markObjectUploaded is the durable object commit point. A subsequent
+        // database failure must preserve object_uploaded so a retry can confirm
+        // without touching object storage again.
+        return $this->reservations->confirm($identity, $uploadId);
+    }
+
+    /** @param array<string,mixed> $identity @return array{released:bool,state:string} */
+    public function release(array $identity, string $uploadId): array
+    {
+        $this->identity($identity);
+        return $this->reservations->release($identity, $this->uploadId($uploadId));
+    }
+
+    /** @param array<string,mixed> $identity */
+    private function identity(array $identity): void
+    {
+        if ((int) ($identity['organization'] ?? 0) <= 0
+            || trim((string) ($identity['user_id'] ?? '')) === ''
+            || !in_array((string) ($identity['client_family'] ?? ''), ['web', 'app'], true)) {
+            throw new ApiException('客户端登录上下文无效。', 401);
+        }
+    }
+
+    /** @param array<string,mixed> $identity */
+    private function uploadPath(array $identity): string
+    {
+        return (string) $identity['client_family'] === 'web'
+            ? '/saimulti/web/im/upload'
+            : '/saimulti/app/im/upload';
+    }
+
+    /** @param array<string,mixed> $identity @param array<string,mixed> $row */
+    private function prepareResponse(array $identity, array $row): array
+    {
+        $expiresAt = strtotime((string) ($row['expires_at'] ?? ''));
+        if ($expiresAt === false || $expiresAt <= time()) {
+            throw new ApiException('上传预留有效期不可信。', 503);
+        }
 
         return [
             'mode' => 'proxy',
             'upload_path' => $this->uploadPath($identity),
             'method' => 'POST',
-            'filename' => $filename,
-            'size' => $size,
-            'mime_type' => $mimeType,
-            'extension' => $extension,
+            'upload_id' => (string) $row['upload_id'],
+            'expires_at' => $expiresAt,
+            'filename' => (string) $row['filename'],
+            'size' => (int) $row['size_bytes'],
+            'mime_type' => (string) $row['mime_type'],
+            'extension' => (string) $row['extension'],
         ];
     }
 
-    /** @param array<string, mixed> $identity @return array<string, mixed> */
-    public function upload(array $identity, Request $request, string $kind): array
+    private function uploadId(string $uploadId): string
     {
-        $this->identity($identity);
-        $organization = (int) $identity['organization'];
-        $userId = trim((string) $identity['user_id']);
-        $kind = $this->kind($kind);
+        if (preg_match('/^[a-f0-9]{64}$/', $uploadId) !== 1) {
+            throw new ApiException('upload_id 无效。', 422);
+        }
+        return $uploadId;
+    }
 
-        // Configuration must fail closed before Request::file() parses or any
-        // temporary upload content is inspected.
-        $this->storage->assertReady();
+    private function requestFile(Request $request): SplFileInfo
+    {
         $files = $request->file();
         if (!$files) {
             throw new ApiException('请选择上传文件。', 422);
         }
-        $file = current($files);
+        if (!is_array($files) || count($files) !== 1 || !array_key_exists('file', $files)) {
+            throw new ApiException('上传请求必须且只能包含 file 文件字段。', 422);
+        }
+        $file = $files['file'];
         if (!$file instanceof SplFileInfo
             || (method_exists($file, 'isValid') && !$file->isValid())) {
             throw new ApiException('上传文件无效。', 422);
         }
+        return $file;
+    }
+
+    private function assertUploadPost(Request $request, string $uploadId): void
+    {
+        $post = $request->post();
+        if (!is_array($post) || count($post) !== 1
+            || !array_key_exists('upload_id', $post)
+            || $post['upload_id'] !== $uploadId) {
+            throw new ApiException('请求体必须且只能包含匹配的 upload_id。', 422);
+        }
+    }
+
+    /** @param array<string,mixed> $reservation */
+    private function assertExactFile(array $reservation, SplFileInfo $file): void
+    {
         $name = $this->filename(method_exists($file, 'getUploadName')
             ? (string) $file->getUploadName()
             : $file->getFilename());
@@ -101,84 +300,15 @@ final class WebImUploadService
             (method_exists($file, 'getUploadExtension') ? $file->getUploadExtension() : '')
             ?: pathinfo($name, PATHINFO_EXTENSION)
         ));
-        $size = (int) $file->getSize();
-        $this->assertFile($kind, $extension, $size);
-        $mimeType = $this->mimeType(method_exists($file, 'getUploadMimeType')
+        $mime = $this->mimeType(method_exists($file, 'getUploadMimeType')
             ? (string) $file->getUploadMimeType()
             : '');
-
-        $stored = $this->storage->upload(
-            $organization,
-            $file,
-            $extension,
-            $mimeType,
-        );
-        $storagePath = (string) ($stored['storage_path'] ?? '');
-        $storedSize = (int) ($stored['size_byte'] ?? 0);
-        if ($storagePath === '' || $storedSize !== $size) {
-            $this->rollbackObject($organization, $storagePath, new \RuntimeException(
-                'Web IM S3 upload result does not match the source file.',
-            ));
+        if ($name !== (string) $reservation['filename']
+            || $extension !== (string) $reservation['extension']
+            || $mime !== (string) $reservation['mime_type']
+            || (int) $file->getSize() !== (int) $reservation['size_bytes']) {
+            throw new ApiException('上传文件与预留元数据不一致。', 422);
         }
-
-        $fileId = sha1($organization . ':' . $userId . ':' . bin2hex(random_bytes(32)));
-        $now = date('Y-m-d H:i:s');
-        try {
-            $this->assets->create([
-                'organization' => $organization,
-                'file_id' => $fileId,
-                'user_id' => $userId,
-                'kind' => $kind,
-                'name' => $name,
-                // Private object access is always resolved and signed later.
-                'url' => '',
-                'storage_path' => $storagePath,
-                'size_byte' => $size,
-                'mime_type' => $mimeType,
-                'extension' => $extension,
-                'status' => 1,
-                'create_time' => $now,
-                'update_time' => $now,
-            ]);
-        } catch (\Throwable $exception) {
-            $this->rollbackObject($organization, $storagePath, $exception);
-        }
-
-        return [
-            'file_id' => $fileId,
-            'kind' => $kind,
-            'name' => $name,
-            'size' => $size,
-            'mime_type' => $mimeType,
-            'extension' => $extension,
-        ];
-    }
-
-    /** @param array<string, mixed> $identity */
-    public function confirm(array $identity): never
-    {
-        $this->identity($identity);
-
-        throw new ApiException('当前存储服务未提供 Web IM 直传预签名和服务端对象校验。', 409);
-    }
-
-    /** @param array<string, mixed> $identity */
-    private function identity(array $identity): void
-    {
-        if ((int) ($identity['organization'] ?? 0) <= 0
-            || trim((string) ($identity['user_id'] ?? '')) === '') {
-            throw new ApiException('客户端登录上下文无效。', 401);
-        }
-    }
-
-    /** @param array<string, mixed> $identity */
-    private function uploadPath(array $identity): string
-    {
-        return match ((string) ($identity['client_family'] ?? '')) {
-            'web' => '/saimulti/web/im/upload',
-            'app' => '/saimulti/app/im/upload',
-            default => throw new ApiException('上传客户端形态无效。', 401),
-        };
     }
 
     private function kind(string $kind): string
@@ -187,7 +317,6 @@ final class WebImUploadService
         if (!in_array($kind, self::KINDS, true)) {
             throw new ApiException('上传类型无效。', 422);
         }
-
         return $kind;
     }
 
@@ -195,11 +324,11 @@ final class WebImUploadService
     {
         $filename = trim($filename);
         if ($filename === ''
-            || mb_strlen($filename) > 255
+            || !mb_check_encoding($filename, 'UTF-8')
+            || mb_strlen($filename, 'UTF-8') > 255
             || preg_match('/[\x00-\x1F\x7F]/u', $filename) === 1) {
             throw new ApiException('文件名无效。', 422);
         }
-
         return $filename;
     }
 
@@ -209,44 +338,26 @@ final class WebImUploadService
         if (strlen($mimeType) > 255 || preg_match('/[\x00-\x1F\x7F]/', $mimeType) === 1) {
             throw new ApiException('mime_type 无效。', 422);
         }
-
-        return $mimeType;
+        return $mimeType === '' ? 'application/octet-stream' : $mimeType;
     }
 
-    private function assertFile(string $kind, string $extension, int $size): void
+    private function assertExtension(string $kind, string $extension): void
     {
         if ($extension === '' || !in_array($extension, self::EXTENSIONS[$kind], true)) {
             throw new ApiException('不支持该文件格式。', 422);
         }
-        if ($size <= 0 || $size > self::MAX_FILE_BYTES) {
-            throw new ApiException('文件大小必须在 2GB 以内。', 422);
-        }
     }
 
-    private function rollbackObject(int $organization, string $storagePath, \Throwable $failure): never
+    /** @param array<string,mixed> $row @return array<string,mixed> */
+    private function metadata(array $row): array
     {
-        if ($storagePath === '') {
-            throw $failure;
-        }
-        $cleanupFailure = null;
-        $cleaned = false;
-        for ($attempt = 0; $attempt < 3; $attempt++) {
-            try {
-                $this->storage->delete($organization, $storagePath);
-                $cleaned = true;
-                break;
-            } catch (\Throwable $exception) {
-                $cleanupFailure = $exception;
-            }
-        }
-        if ($cleaned) {
-            throw $failure;
-        }
-
-        throw new \RuntimeException(
-            'Web IM upload failed and private object cleanup did not complete.',
-            0,
-            $cleanupFailure ?? $failure,
-        );
+        return [
+            'file_id' => (string) $row['file_id'],
+            'kind' => (string) $row['kind'],
+            'name' => (string) $row['filename'],
+            'size' => (int) $row['size_bytes'],
+            'mime_type' => (string) $row['mime_type'],
+            'extension' => (string) $row['extension'],
+        ];
     }
 }

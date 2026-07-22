@@ -18,20 +18,15 @@ COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
 WORKDIR /app
 
-# b8im-server 在开发工作区中使用 Composer path 依赖。
-# docker-bake.hcl 通过 named context 提供模块目录。
-COPY --from=module-sdk / /b8im-module-sdk
-COPY --from=module-i18n / /b8im-module-i18n
-COPY --from=module-favorite / /b8im-module-favorite
-COPY --from=module-sticker / /b8im-module-sticker
-COPY --from=module-customer-service / /b8im-module-customer-service
-COPY --from=module-robot-single / /b8im-module-robot-single
-COPY --from=module-file-media / /b8im-module-file-media
-COPY --from=module-search / /b8im-module-search
-COPY --from=module-moments / /b8im-module-moments
 COPY composer.json composer.lock ./
 
 RUN --mount=type=cache,id=b8im-composer-cache,target=/tmp/composer-cache,sharing=locked \
+    --mount=type=secret,id=b8im_ci_read_token,required=true \
+    --mount=type=tmpfs,target=/tmp/composer-home \
+    test -s /run/secrets/b8im_ci_read_token \
+    && COMPOSER_HOME=/tmp/composer-home \
+       COMPOSER_AUTH="$(printf '{"github-oauth":{"github.com":"%s"}}' \
+           "$(cat /run/secrets/b8im_ci_read_token)")" \
     composer install \
         --no-dev \
         --no-interaction \

@@ -32,13 +32,14 @@ interface WebImControlStoreInterface
         int $organization,
         string $userId,
         string $conversationId,
+        int $peerOrganization,
         string $peerUserId,
         int $afterSeq,
         int $beforeSeq,
         int $limit,
     ): array;
 
-    /** @return array{updated: int} */
+    /** @return array{updated: int, user_organization: int, user_id: string} */
     public function markRead(
         int $organization,
         string $userId,
@@ -60,6 +61,7 @@ interface WebImControlStoreInterface
     public function sendFriendRequest(
         int $organization,
         string $fromUserId,
+        int $toOrganization,
         string $toUserId,
         string $message,
         string $now,
@@ -86,12 +88,13 @@ interface WebImControlStoreInterface
     /** @return list<array<string, mixed>> */
     public function groupMembers(int $organization, string $userId, string $conversationId): array;
 
-    /** @param list<string> $memberIds @return list<array<string, mixed>> */
+    /** @param list<string> $memberIds @param array<string,string> $expectedVersions Every target is required; "0" means absent. @return list<array<string, mixed>> */
     public function addGroupMembers(
         int $organization,
         string $operatorUserId,
         string $conversationId,
         array $memberIds,
+        array $expectedVersions,
         string $now,
     ): array;
 
@@ -133,6 +136,47 @@ interface WebImControlStoreInterface
         string $operatorUserId,
         string $conversationId,
         string $memberUserId,
+        string $expectedVersion,
+        string $now,
+    ): array;
+
+    /** @return array{conversation_id:string,left:bool,access_version:string,access_snapshot_id:string,access_state:string} */
+    public function leaveGroup(
+        int $organization,
+        string $userId,
+        string $conversationId,
+        string $expectedVersion,
+        string $now,
+    ): array;
+
+    /** @return list<array<string,mixed>> */
+    public function suspendGroupMember(
+        int $organization,
+        string $operatorUserId,
+        string $conversationId,
+        string $memberUserId,
+        string $expectedVersion,
+        string $now,
+    ): array;
+
+    /** @return list<array<string,mixed>> */
+    public function restoreGroupMember(
+        int $organization,
+        string $operatorUserId,
+        string $conversationId,
+        string $memberUserId,
+        string $expectedVersion,
+        string $now,
+    ): array;
+
+    /** @param list<string> $periodNumbers @return list<array<string,mixed>> */
+    public function revokeGroupMemberHistory(
+        int $organization,
+        string $operatorUserId,
+        string $conversationId,
+        string $memberUserId,
+        string $expectedVersion,
+        array $periodNumbers,
         string $now,
     ): array;
 
@@ -146,10 +190,11 @@ interface WebImControlStoreInterface
         string $now,
     ): array;
 
-    /** @return array{friend_user_id: string, remark: string} */
+    /** @return array{friend_organization: int, friend_user_id: string, remark: string} */
     public function updateFriendRemark(
         int $organization,
         string $userId,
+        int $friendOrganization,
         string $friendUserId,
         string $remark,
         string $now,

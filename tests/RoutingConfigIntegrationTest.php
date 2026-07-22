@@ -15,10 +15,15 @@ require dirname(__DIR__) . '/support/bootstrap.php';
 
 use plugin\saimulti\service\OrganizationDiscovery;
 use plugin\saimulti\service\WebOrganizationResolver;
+use plugin\saimulti\app\middleware\AppClientRequest;
+use plugin\saimulti\app\middleware\WebCors;
+use plugin\saimulti\exception\ApiException;
+use plugin\saimulti\exception\SearchProjectionIntegrityException;
 use plugin\saimulti\service\routing\CanonicalJson;
 use plugin\saimulti\service\routing\RoutingConfigService;
 use plugin\saimulti\service\routing\RoutingSnapshotSigner;
 use support\think\Db;
+use Webman\Http\Request;
 
 $config = config('think-orm');
 $connection = (string) ($config['default'] ?? 'mysql');
@@ -83,6 +88,67 @@ $assert(
     (new WebOrganizationResolver())->assertOrganizationOrigin($organization, 'http://127.0.0.1:16988') === 'http://127.0.0.1:16988',
     'Web Origin 未按当前机构发布线路校验',
 );
+$webRequest = new Request(
+    "GET /saimulti/web/search/messages HTTP/1.1\r\n"
+    . "Host: api.example.test\r\n"
+    . "App-Id: 1\r\n"
+    . "Origin: http://127.0.0.1:16988\r\n\r\n",
+);
+$appRequest = new Request(
+    "GET /saimulti/app/search/messages HTTP/1.1\r\n"
+    . "Host: api.example.test\r\n"
+    . "App-Id: 1\r\n\r\n",
+);
+$integrityFailure = static function (Request $_request): never {
+    throw new SearchProjectionIntegrityException('internal-search-integrity-sentinel');
+};
+$integrityResponses = [
+    'web' => (new WebCors())->process($webRequest, $integrityFailure),
+    'app' => (new AppClientRequest())->process($appRequest, $integrityFailure),
+];
+foreach ($integrityResponses as $client => $response) {
+    $payload = json_decode($response->rawBody(), true, 512, JSON_THROW_ON_ERROR);
+    $assert(
+        $response->getStatusCode() === 503 && ($payload['code'] ?? null) === 503,
+        '搜索投影完整性异常未在 Web/App 中间件映射为 HTTP/body 503',
+    );
+    $assert(
+        !str_contains($response->rawBody(), 'internal-search-integrity-sentinel'),
+        '搜索投影完整性内部详情泄漏到 Web/App 响应',
+    );
+    if ($client === 'web') {
+        $assert(
+            $response->getHeader('Access-Control-Allow-Origin')
+                === 'http://127.0.0.1:16988',
+            'Web 搜索 503 错误响应丢失可信 CORS Origin',
+        );
+    }
+}
+$ordinaryUnavailable = static function (Request $_request): never {
+    throw new ApiException('Search backend is unavailable.', 503);
+};
+$ordinaryResponses = [
+    'web' => (new WebCors())->process($webRequest, $ordinaryUnavailable),
+    'app' => (new AppClientRequest())->process($appRequest, $ordinaryUnavailable),
+];
+foreach ($ordinaryResponses as $client => $response) {
+    $payload = json_decode($response->rawBody(), true, 512, JSON_THROW_ON_ERROR);
+    $assert(
+        $response->getStatusCode() === 503 && ($payload['code'] ?? null) === 503,
+        '普通 ApiException(503) 未在 Web/App 中间件映射为 HTTP/body 503',
+    );
+    $assert(
+        ($payload['message'] ?? null) === 'Search backend is unavailable.',
+        '普通 ApiException(503) 丢失明确用户文案',
+    );
+    if ($client === 'web') {
+        $assert(
+            $response->getHeader('Access-Control-Allow-Origin')
+                === 'http://127.0.0.1:16988',
+            'Web ApiException(503) 错误响应丢失可信 CORS Origin',
+        );
+    }
+}
 $payload = [
     'organization' => 1,
     'deployment_id' => 'b8im-local',

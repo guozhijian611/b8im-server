@@ -9,6 +9,7 @@ namespace plugin\saimulti\app\event;
 use ReflectionClass;
 use ReflectionMethod;
 use plugin\saimulti\service\Permission;
+use plugin\saimulti\service\AuditLogRedactor;
 use plugin\saimulti\app\model\tool\LoginLog;
 use plugin\saimulti\app\model\tool\OperLog;
 
@@ -92,15 +93,9 @@ class SystemTenant
     /**
      * 过滤字段
      */
-    protected function filterParams($params): string
+    protected function filterParams(array $params): string
     {
-        $blackList = ['password', 'oldPassword', 'newPassword', 'content'];
-        foreach ($params as $key => $value) {
-            if (in_array($key, $blackList)) {
-                $params[$key] = '******';
-            }
-        }
-        return json_encode($params, JSON_UNESCAPED_UNICODE);
+        return (new AuditLogRedactor())->encode($params);
     }
 
     protected function getIpLocation($ip) {

@@ -4,6 +4,11 @@ declare(strict_types=1);
 
 namespace plugin\saimulti\service\module;
 
+use plugin\saimulti\service\web\AuthoritativeWebImUploadPolicy;
+use plugin\saimulti\service\web\S3WebImUploadStorage;
+use plugin\saimulti\service\web\ThinkOrmWebImUploadReservationService;
+use plugin\saimulti\service\web\WebImUploadCleanupService;
+
 final class ModuleServiceFactory
 {
     private static ?ManifestCatalog $catalog = null;
@@ -28,7 +33,7 @@ final class ModuleServiceFactory
         return new ModuleManager(
             self::catalog(),
             new ModuleMigrationRunner(),
-            new ModuleLifecycleHookRunner(),
+            self::lifecycleHookRunner(),
             new ModuleMenuRegistrar(),
             new ModuleDependencyGuard(),
             self::access(),
@@ -49,13 +54,31 @@ final class ModuleServiceFactory
             new RedisDistributedLock(),
             self::access(),
             new ModuleAuditWriter(),
-            new ModuleLifecycleHookRunner(),
+            self::lifecycleHookRunner(),
         );
     }
 
     public static function clientConfigProjection(): ClientConfigProjectionService
     {
         return new ClientConfigProjectionService(self::access());
+    }
+
+    public static function uploadCleanup(): WebImUploadCleanupService
+    {
+        $policy = new AuthoritativeWebImUploadPolicy(self::access());
+        return new WebImUploadCleanupService(
+            new ThinkOrmWebImUploadReservationService($policy),
+            new S3WebImUploadStorage(),
+        );
+    }
+
+    private static function lifecycleHookRunner(): ModuleLifecycleHookRunner
+    {
+        return new ModuleLifecycleHookRunner(
+            optionsEnricher: new SearchLifecycleContextOptionsEnricher(
+                new SearchLifecycleFence(),
+            ),
+        );
     }
 
     private function __construct()

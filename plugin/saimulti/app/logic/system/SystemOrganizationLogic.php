@@ -12,6 +12,8 @@ use plugin\saimulti\service\adminIm\OrganizationImAccessService;
 use plugin\saimulti\service\module\ModuleServiceFactory;
 use plugin\saimulti\service\tenantPolicy\TenantImPolicyService;
 use plugin\saimulti\service\tenantPolicy\ThinkOrmTenantImPolicyStore;
+use plugin\saimulti\service\web\CrossOrganizationSocialConfigService;
+use plugin\saimulti\service\web\CrossOrganizationSocialPolicy;
 use plugin\saimulti\service\web\TenantAccountPolicyService;
 use support\think\Db;
 
@@ -20,6 +22,8 @@ use support\think\Db;
  */
 class SystemOrganizationLogic extends BaseLogic
 {
+    private readonly OrganizationImAccessService $organizationImAccess;
+
     private const WRITABLE_FIELDS = [
         'group_id',
         'domain',
@@ -75,9 +79,10 @@ class SystemOrganizationLogic extends BaseLogic
         'remark',
     ];
 
-    public function __construct()
+    public function __construct(?OrganizationImAccessService $organizationImAccess = null)
     {
         $this->model = new SystemOrganization();
+        $this->organizationImAccess = $organizationImAccess ?? new OrganizationImAccessService();
     }
 
     public function initTenant($id)
@@ -166,6 +171,19 @@ class SystemOrganizationLogic extends BaseLogic
                 'create_time' => date('Y-m-d H:i:s'),
                 'update_time' => date('Y-m-d H:i:s'),
             ]);
+            Db::table('sm_tenant_quota')->insert([
+                'organization' => (int) $this->model->id,
+                'quota_key' => 'storage_bytes',
+                'quota_value' => 0,
+                'used_value' => 0,
+                'source' => 'system',
+                'status' => 'active',
+                'order_no' => 'organization-create',
+                'remark' => '机构存储容量，0 表示不限容量',
+                'version' => 1,
+                'create_time' => date('Y-m-d H:i:s'),
+                'update_time' => date('Y-m-d H:i:s'),
+            ]);
 
             return true;
         });
@@ -185,7 +203,8 @@ class SystemOrganizationLogic extends BaseLogic
         $input = (array) $data;
         $statusWasRequested = array_key_exists('status', $input);
         $groupWasRequested = array_key_exists('group_id', $input);
-        $access = new OrganizationImAccessService();
+        $access = $this->organizationImAccess;
+        $crossOrganizationAccess = new CrossOrganizationSocialConfigService();
         $now = date('Y-m-d H:i:s');
 
         $result = Db::transaction(function () use (
@@ -194,8 +213,12 @@ class SystemOrganizationLogic extends BaseLogic
             $statusWasRequested,
             $groupWasRequested,
             $access,
+            $crossOrganizationAccess,
             $now,
         ): array {
+            if ($statusWasRequested) {
+                $crossOrganizationAccess->lockOrganizationAvailabilityTransitionInsideTransaction();
+            }
             $locked = Db::table('sm_system_organization')
                 ->where('id', (int) $id)
                 ->whereNull('delete_time')
@@ -209,6 +232,8 @@ class SystemOrganizationLogic extends BaseLogic
             $previousStatus = (int) ($locked['status'] ?? 0);
             $nextStatus = (int) ($data['status'] ?? $previousStatus);
             $statusChanged = $previousStatus !== $nextStatus;
+            $availabilityChanged = $statusWasRequested
+                && (($previousStatus === 1) !== ($nextStatus === 1));
             $groupChanged = (int) ($locked['group_id'] ?? 0) !== (int) ($data['group_id'] ?? $locked['group_id'] ?? 0);
             $data['update_time'] = $now;
 
@@ -225,6 +250,12 @@ class SystemOrganizationLogic extends BaseLogic
             if (self::shouldRevokeImAccess($statusWasRequested, $nextStatus)) {
                 $credentialSessionIds = $access->revokeInsideTransaction((int) $id, $now);
             }
+            $crossOrgSnapshotId = $availabilityChanged
+                ? $crossOrganizationAccess->transitionOrganizationAvailabilityInsideTransaction(
+                    [(int) $id => $previousStatus === 1],
+                    $now,
+                )
+                : null;
 
             return compact(
                 'updated',
@@ -232,8 +263,12 @@ class SystemOrganizationLogic extends BaseLogic
                 'groupChanged',
                 'nextStatus',
                 'credentialSessionIds',
+                'crossOrgSnapshotId',
             );
         });
+        if ($result['crossOrgSnapshotId'] !== null) {
+            CrossOrganizationSocialPolicy::clearCache();
+        }
 
         // An explicit status write is also the retry contract for a failed
         // after-commit Redis synchronization. Re-sending status=1 must clear a
@@ -272,13 +307,23 @@ class SystemOrganizationLogic extends BaseLogic
             throw new ApiException('部分机构不存在。', 404);
         }
 
-        $access = new OrganizationImAccessService();
+        $access = $this->organizationImAccess;
+        $crossOrganizationAccess = new CrossOrganizationSocialConfigService();
         $now = date('Y-m-d H:i:s');
         $sessions = [];
-        $deleted = Db::transaction(function () use ($ids, $access, $now, &$sessions): bool {
+        $crossOrgSnapshotId = null;
+        $deleted = Db::transaction(function () use (
+            $ids,
+            $access,
+            $crossOrganizationAccess,
+            $now,
+            &$sessions,
+            &$crossOrgSnapshotId,
+        ): bool {
+            $crossOrganizationAccess->lockOrganizationAvailabilityTransitionInsideTransaction();
             $placeholders = implode(',', array_fill(0, count($ids), '?'));
             $lockedRows = Db::query(
-                'SELECT id FROM sm_system_organization '
+                'SELECT id, status FROM sm_system_organization '
                 . 'WHERE id IN (' . $placeholders . ') AND delete_time IS NULL '
                 . 'ORDER BY id ASC FOR UPDATE',
                 $ids,
@@ -298,9 +343,18 @@ class SystemOrganizationLogic extends BaseLogic
             foreach ($ids as $organization) {
                 $sessions[$organization] = $access->revokeInsideTransaction($organization, $now);
             }
+            $beforeActive = [];
+            foreach ($lockedRows as $row) {
+                $beforeActive[(int) $row['id']] = (int) ($row['status'] ?? 0) === 1;
+            }
+            $crossOrgSnapshotId = $crossOrganizationAccess
+                ->transitionOrganizationAvailabilityInsideTransaction($beforeActive, $now);
 
             return true;
         });
+        if ($crossOrgSnapshotId !== null) {
+            CrossOrganizationSocialPolicy::clearCache();
+        }
 
         if ($deleted) {
             foreach ($ids as $organization) {

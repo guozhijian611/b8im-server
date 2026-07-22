@@ -85,8 +85,17 @@ Route::group('/saimulti', function () {
 	Route::get('/app/im/requests', [\plugin\saimulti\app\controller\web\ImController::class, 'requests']);
 	Route::post('/app/im/sendFriendRequest', [\plugin\saimulti\app\controller\web\ImController::class, 'sendFriendRequest']);
 	Route::post('/app/im/handleFriendRequest', [\plugin\saimulti\app\controller\web\ImController::class, 'handleFriendRequest']);
+	Route::post('/app/im/createGroup', [\plugin\saimulti\app\controller\web\ImController::class, 'createGroup']);
+	Route::get('/app/im/groupMembers', [\plugin\saimulti\app\controller\web\ImController::class, 'groupMembers']);
+	Route::post('/app/im/addGroupMembers', [\plugin\saimulti\app\controller\web\ImController::class, 'addGroupMembers']);
+	Route::post('/app/im/removeGroupMember', [\plugin\saimulti\app\controller\web\ImController::class, 'removeGroupMember']);
+	Route::post('/app/im/leaveGroup', [\plugin\saimulti\app\controller\web\ImController::class, 'leaveGroup']);
+	Route::post('/app/im/suspendGroupMember', [\plugin\saimulti\app\controller\web\ImController::class, 'suspendGroupMember']);
+	Route::post('/app/im/restoreGroupMember', [\plugin\saimulti\app\controller\web\ImController::class, 'restoreGroupMember']);
+	Route::post('/app/im/revokeGroupMemberHistory', [\plugin\saimulti\app\controller\web\ImController::class, 'revokeGroupMemberHistory']);
 	Route::post('/app/im/prepareUpload', [\plugin\saimulti\app\controller\web\ImController::class, 'prepareUpload']);
 	Route::post('/app/im/upload', [\plugin\saimulti\app\controller\web\ImController::class, 'upload']);
+	Route::post('/app/im/releaseUpload', [\plugin\saimulti\app\controller\web\ImController::class, 'releaseUpload']);
 	Route::post('/app/im/resolveAssetUrl', [\plugin\saimulti\app\controller\web\ImController::class, 'resolveAssetUrl']);
 	Route::get('/app/announcement/index', [\plugin\saimulti\app\controller\app\AnnouncementController::class, 'index']);
 	Route::get('/app/announcement/read', [\plugin\saimulti\app\controller\app\AnnouncementController::class, 'read']);
@@ -130,8 +139,17 @@ Route::group('/saimulti', function () {
 	Route::options('/app/im/requests', static fn () => response('', 204));
 	Route::options('/app/im/sendFriendRequest', static fn () => response('', 204));
 	Route::options('/app/im/handleFriendRequest', static fn () => response('', 204));
+	Route::options('/app/im/createGroup', static fn () => response('', 204));
+	Route::options('/app/im/groupMembers', static fn () => response('', 204));
+	Route::options('/app/im/addGroupMembers', static fn () => response('', 204));
+	Route::options('/app/im/removeGroupMember', static fn () => response('', 204));
+	Route::options('/app/im/leaveGroup', static fn () => response('', 204));
+	Route::options('/app/im/suspendGroupMember', static fn () => response('', 204));
+	Route::options('/app/im/restoreGroupMember', static fn () => response('', 204));
+	Route::options('/app/im/revokeGroupMemberHistory', static fn () => response('', 204));
 	Route::options('/app/im/prepareUpload', static fn () => response('', 204));
 	Route::options('/app/im/upload', static fn () => response('', 204));
+	Route::options('/app/im/releaseUpload', static fn () => response('', 204));
 	Route::options('/app/im/resolveAssetUrl', static fn () => response('', 204));
 	Route::options('/app/file-media/usage', static fn () => response('', 204));
 	Route::options('/app/file-media/checkUpload', static fn () => response('', 204));
@@ -186,11 +204,15 @@ Route::group('/saimulti', function () {
 	Route::post('/web/im/updateGroupManagers', [\plugin\saimulti\app\controller\web\ImController::class, 'updateGroupManagers']);
 	Route::post('/web/im/updateGroupMemberStatus', [\plugin\saimulti\app\controller\web\ImController::class, 'updateGroupMemberStatus']);
 	Route::post('/web/im/removeGroupMember', [\plugin\saimulti\app\controller\web\ImController::class, 'removeGroupMember']);
+	Route::post('/web/im/leaveGroup', [\plugin\saimulti\app\controller\web\ImController::class, 'leaveGroup']);
+	Route::post('/web/im/suspendGroupMember', [\plugin\saimulti\app\controller\web\ImController::class, 'suspendGroupMember']);
+	Route::post('/web/im/restoreGroupMember', [\plugin\saimulti\app\controller\web\ImController::class, 'restoreGroupMember']);
+	Route::post('/web/im/revokeGroupMemberHistory', [\plugin\saimulti\app\controller\web\ImController::class, 'revokeGroupMemberHistory']);
 	Route::post('/web/im/updateFriendRemark', [\plugin\saimulti\app\controller\web\ImController::class, 'updateFriendRemark']);
 	Route::get('/web/im/searchMessages', [\plugin\saimulti\app\controller\web\ImController::class, 'searchMessages']);
 	Route::post('/web/im/prepareUpload', [\plugin\saimulti\app\controller\web\ImController::class, 'prepareUpload']);
 	Route::post('/web/im/upload', [\plugin\saimulti\app\controller\web\ImController::class, 'upload']);
-	Route::post('/web/im/confirmUpload', [\plugin\saimulti\app\controller\web\ImController::class, 'confirmUpload']);
+	Route::post('/web/im/releaseUpload', [\plugin\saimulti\app\controller\web\ImController::class, 'releaseUpload']);
 	Route::post('/web/im/deriveForwardAsset', [\plugin\saimulti\app\controller\web\ImController::class, 'deriveForwardAsset']);
 	Route::post('/web/im/resolveAssetUrl', [\plugin\saimulti\app\controller\web\ImController::class, 'resolveAssetUrl']);
 	Route::get('/web/announcement/index', [\plugin\saimulti\app\controller\web\AnnouncementController::class, 'index']);
@@ -255,11 +277,15 @@ Route::group('/saimulti', function () {
 		'/web/im/updateGroupManagers',
 		'/web/im/updateGroupMemberStatus',
 		'/web/im/removeGroupMember',
+		'/web/im/leaveGroup',
+		'/web/im/suspendGroupMember',
+		'/web/im/restoreGroupMember',
+		'/web/im/revokeGroupMemberHistory',
 		'/web/im/updateFriendRemark',
 		'/web/im/searchMessages',
 		'/web/im/prepareUpload',
 		'/web/im/upload',
-		'/web/im/confirmUpload',
+		'/web/im/releaseUpload',
 		'/web/im/deriveForwardAsset',
 		'/web/im/resolveAssetUrl',
 		'/web/announcement/index',
@@ -426,9 +452,12 @@ Route::group("/saimulti", function () {
 	Route::get('/admin/robot-single/kbIndex', [\plugin\saimulti\app\controller\admin\RobotSingleController::class, 'kbIndex']);
 
 	// 商业模块 file_media（平台）
-	Route::get('/admin/file-media/quotaIndex', [\plugin\saimulti\app\controller\admin\FileMediaController::class, 'quotaIndex']);
-	Route::get('/admin/file-media/quotaRead', [\plugin\saimulti\app\controller\admin\FileMediaController::class, 'quotaRead']);
-	Route::put('/admin/file-media/quotaUpdate', [\plugin\saimulti\app\controller\admin\FileMediaController::class, 'quotaUpdate']);
+	Route::get('/admin/storage-quota/index', [\plugin\saimulti\app\controller\admin\StorageQuotaController::class, 'index']);
+	Route::get('/admin/storage-quota/read', [\plugin\saimulti\app\controller\admin\StorageQuotaController::class, 'read']);
+	Route::put('/admin/storage-quota/update', [\plugin\saimulti\app\controller\admin\StorageQuotaController::class, 'update']);
+	Route::get('/admin/file-media/policyIndex', [\plugin\saimulti\app\controller\admin\FileMediaController::class, 'policyIndex']);
+	Route::get('/admin/file-media/policyRead', [\plugin\saimulti\app\controller\admin\FileMediaController::class, 'policyRead']);
+	Route::put('/admin/file-media/policyUpdate', [\plugin\saimulti\app\controller\admin\FileMediaController::class, 'policyUpdate']);
 	Route::get('/admin/file-media/itemIndex', [\plugin\saimulti\app\controller\admin\FileMediaController::class, 'itemIndex']);
 	Route::get('/admin/file-media/folderIndex', [\plugin\saimulti\app\controller\admin\FileMediaController::class, 'folderIndex']);
 
@@ -437,7 +466,6 @@ Route::group("/saimulti", function () {
 	Route::get('/admin/search/indexRead', [\plugin\saimulti\app\controller\admin\SearchController::class, 'indexRead']);
 	Route::post('/admin/search/rebuild', [\plugin\saimulti\app\controller\admin\SearchController::class, 'rebuild']);
 	Route::get('/admin/search/jobIndex', [\plugin\saimulti\app\controller\admin\SearchController::class, 'jobIndex']);
-	Route::post('/admin/search/docUpsert', [\plugin\saimulti\app\controller\admin\SearchController::class, 'docUpsert']);
 
 	// 商业模块 moments（平台）
 	Route::get('/admin/moments/index', [\plugin\saimulti\app\controller\admin\MomentsController::class, 'index']);
@@ -564,7 +592,6 @@ Route::group("/saimulti", function () {
 	Route::get('/tenant/search/indexRead', [$se, 'indexRead']);
 	Route::post('/tenant/search/rebuild', [$se, 'rebuild']);
 	Route::get('/tenant/search/jobIndex', [$se, 'jobIndex']);
-	Route::post('/tenant/search/docUpsert', [$se, 'docUpsert']);
 
 	// 租户 moments
 	Route::get('/tenant/moments/index', [\plugin\saimulti\app\controller\tenant\MomentsController::class, 'index']);
@@ -573,8 +600,9 @@ Route::group("/saimulti", function () {
 
 	// 租户 file_media
 	$fm = \plugin\saimulti\app\controller\tenant\FileMediaController::class;
-	Route::get('/tenant/file-media/quotaRead', [$fm, 'quotaRead']);
-	Route::put('/tenant/file-media/quotaUpdate', [$fm, 'quotaUpdate']);
+	Route::get('/tenant/storage-quota/read', [\plugin\saimulti\app\controller\tenant\StorageQuotaController::class, 'read']);
+	Route::get('/tenant/file-media/policyRead', [$fm, 'policyRead']);
+	Route::put('/tenant/file-media/policyUpdate', [$fm, 'policyUpdate']);
 	Route::get('/tenant/file-media/folderIndex', [$fm, 'folderIndex']);
 	Route::post('/tenant/file-media/folderSave', [$fm, 'folderSave']);
 	Route::put('/tenant/file-media/folderUpdate', [$fm, 'folderUpdate']);
@@ -621,6 +649,9 @@ Route::group("/saimulti", function () {
 	// 租户 IM 运行策略（organization 只取认证上下文）
 	Route::get('/tenant/im/policy/read', [\plugin\saimulti\app\controller\tenant\TenantImPolicyController::class, 'read']);
 	Route::put('/tenant/im/policy/update', [\plugin\saimulti\app\controller\tenant\TenantImPolicyController::class, 'update']);
+    // 租户账号注册策略（organization 只取认证上下文）
+    Route::get('/tenant/account/policy/read', [\plugin\saimulti\app\controller\tenant\TenantAccountPolicyController::class, 'read']);
+    Route::put('/tenant/account/policy/update', [\plugin\saimulti\app\controller\tenant\TenantAccountPolicyController::class, 'update']);
 	// IM 用户管理（organization 只取认证上下文）
 	Route::get('/tenant/im/user/index', [\plugin\saimulti\app\controller\tenant\TenantImUserController::class, 'index']);
 	Route::get('/tenant/im/user/read', [\plugin\saimulti\app\controller\tenant\TenantImUserController::class, 'read']);

@@ -13,19 +13,15 @@ final class WebImControlService
 
     private Closure $clock;
 
-    private WebImRealtimePublisherInterface $realtime;
-
     private WebImAvatarServiceInterface $avatars;
 
     public function __construct(
         ?WebImControlStoreInterface $store = null,
         ?Closure $clock = null,
-        ?WebImRealtimePublisherInterface $realtime = null,
         ?WebImAvatarServiceInterface $avatars = null,
     ) {
         $this->store = $store ?? new ThinkOrmWebImControlStore();
         $this->clock = $clock ?? static fn (): int => time();
-        $this->realtime = $realtime ?? new RedisWebImRealtimePublisher();
         $this->avatars = $avatars ?? new WebImAvatarService();
     }
 
@@ -90,6 +86,7 @@ final class WebImControlService
     public function messages(
         array $identity,
         string $conversationId,
+        int $peerOrganization,
         string $peerUserId,
         int $afterSeq,
         int $beforeSeq,
@@ -98,6 +95,12 @@ final class WebImControlService
         [$organization, $userId] = $this->identity($identity);
         $conversationId = $this->optionalIdentifier($conversationId, 'conversation_id', 64);
         $peerUserId = $this->optionalIdentifier($peerUserId, 'peer_user_id', 64);
+        if ($peerUserId !== '' && $peerOrganization <= 0) {
+            throw new ApiException('peer_organization 格式无效。', 422);
+        }
+        if ($peerUserId === '') {
+            $peerOrganization = 0;
+        }
         if ($afterSeq < 0 || $beforeSeq < 0 || ($afterSeq > 0 && $beforeSeq > 0)) {
             throw new ApiException('消息游标格式无效。', 422);
         }
@@ -106,6 +109,7 @@ final class WebImControlService
             $organization,
             $userId,
             $conversationId,
+            $peerOrganization,
             $peerUserId,
             $afterSeq,
             $beforeSeq,
@@ -113,7 +117,7 @@ final class WebImControlService
         );
         if (is_array($result['messages'] ?? null)) {
             $result['messages'] = array_map(
-                fn (array $message): array => $this->projectMessage($organization, $message),
+                fn (array $message): array => $this->projectMessage($message),
                 $result['messages'],
             );
         }
@@ -121,7 +125,7 @@ final class WebImControlService
         return $result;
     }
 
-    /** @param array<string, mixed> $identity @return array{updated: int} */
+    /** @param array<string, mixed> $identity @return array{updated: int, user_organization: int, user_id: string} */
     public function markRead(array $identity, string $conversationId, bool $all): array
     {
         [$organization, $userId] = $this->identity($identity);
@@ -146,7 +150,7 @@ final class WebImControlService
         $keyword = $this->text($keyword, '搜索关键词', 64, true);
 
         return array_map(
-            fn (array $user): array => $this->projectUser($organization, $user),
+            fn (array $user): array => $this->projectUser($user),
             $this->store->contacts($organization, $userId, $keyword),
         );
     }
@@ -161,7 +165,7 @@ final class WebImControlService
         }
 
         return array_map(
-            fn (array $user): array => $this->projectUser($organization, $user),
+            fn (array $user): array => $this->projectUser($user),
             $this->store->searchUsers($organization, $userId, $keyword),
         );
     }
@@ -172,46 +176,37 @@ final class WebImControlService
         [$organization, $userId] = $this->identity($identity);
 
         return array_map(
-            fn (array $request): array => $this->projectFriendRequest($organization, $request),
+            fn (array $request): array => $this->projectFriendRequest($request),
             $this->store->friendRequests($organization, $userId),
         );
     }
 
     /** @param array<string, mixed> $identity @return array{status: string, message: string} */
-    public function sendFriendRequest(array $identity, string $toUserId, string $message): array
+    public function sendFriendRequest(
+        array $identity,
+        int $toOrganization,
+        string $toUserId,
+        string $message,
+    ): array
     {
         [$organization, $userId] = $this->identity($identity);
+        if ($toOrganization <= 0) {
+            throw new ApiException('to_organization 格式无效。', 422);
+        }
         $toUserId = $this->identifier($toUserId, 'to_user_id', 64);
-        if (hash_equals($userId, $toUserId)) {
+        if ($organization === $toOrganization && hash_equals($userId, $toUserId)) {
             throw new ApiException('不能添加自己为好友。', 422);
         }
         $message = $this->text($message, '好友申请', 120, true);
 
-        $result = $this->store->sendFriendRequest(
+        return $this->store->sendFriendRequest(
             $organization,
             $userId,
+            $toOrganization,
             $toUserId,
             $message,
             $this->nowText(),
         );
-        if (is_array($result['_realtime_event'] ?? null)) {
-            $event = $result['_realtime_event'];
-            $eventOrganization = (int) ($result['_realtime_event_organization'] ?? $organization);
-            if (is_array($event['from_user'] ?? null)) {
-                $event['from_user'] = $this->projectUser($organization, $event['from_user']);
-            }
-            $this->publishRealtime(static function (WebImRealtimePublisherInterface $publisher) use (
-                $eventOrganization,
-                $event,
-            ): void {
-                $publisher->publishFriendRequestCreated($eventOrganization, $event);
-            });
-        }
-
-        return [
-            'status' => (string) $result['status'],
-            'message' => (string) $result['message'],
-        ];
     }
 
     /** @param array<string, mixed> $identity @return array{status: string} */
@@ -262,7 +257,7 @@ final class WebImControlService
         [$organization, $userId] = $this->identity($identity);
 
         return array_map(
-            fn (array $member): array => $this->projectGroupMember($organization, $member),
+            fn (array $member): array => $this->projectGroupMember($member),
             $this->store->groupMembers(
             $organization,
             $userId,
@@ -272,7 +267,12 @@ final class WebImControlService
     }
 
     /** @param array<string, mixed> $identity @return list<array<string, mixed>> */
-    public function addGroupMembers(array $identity, string $conversationId, mixed $memberIds): array
+    public function addGroupMembers(
+        array $identity,
+        string $conversationId,
+        mixed $memberIds,
+        mixed $expectedVersions,
+    ): array
     {
         [$organization, $userId] = $this->identity($identity);
         $members = array_values(array_filter(
@@ -284,12 +284,13 @@ final class WebImControlService
         }
 
         return array_map(
-            fn (array $member): array => $this->projectGroupMember($organization, $member),
+            fn (array $member): array => $this->projectGroupMember($member),
             $this->store->addGroupMembers(
             $organization,
             $userId,
             $this->identifier($conversationId, 'conversation_id', 64),
             $members,
+            $this->expectedVersionMap($expectedVersions, $members),
             $this->nowText(),
             ),
         );
@@ -330,7 +331,7 @@ final class WebImControlService
         // 这里不得再走 Redis 直推，否则客户端会对同一 message_id 执行两次副作用。
         unset($result['_notice_recipient_user_ids']);
         if (is_array($result['notice_message'] ?? null)) {
-            $result['notice_message'] = $this->projectMessage($organization, $result['notice_message']);
+            $result['notice_message'] = $this->projectMessage($result['notice_message']);
         }
 
         return $this->projectConversation($organization, $result);
@@ -346,7 +347,7 @@ final class WebImControlService
         ));
 
         return array_map(
-            fn (array $member): array => $this->projectGroupMember($organization, $member),
+            fn (array $member): array => $this->projectGroupMember($member),
             $this->store->updateGroupManagers(
             $organization,
             $userId,
@@ -379,7 +380,7 @@ final class WebImControlService
         }
 
         return array_map(
-            fn (array $member): array => $this->projectGroupMember($organization, $member),
+            fn (array $member): array => $this->projectGroupMember($member),
             $this->store->updateGroupMemberStatus(
             $organization,
             $userId,
@@ -393,20 +394,76 @@ final class WebImControlService
     }
 
     /** @param array<string, mixed> $identity @return list<array<string, mixed>> */
-    public function removeGroupMember(array $identity, string $conversationId, string $memberUserId): array
+    public function removeGroupMember(array $identity, string $conversationId, string $memberUserId, mixed $expectedVersion): array
     {
         [$organization, $userId] = $this->identity($identity);
 
         return array_map(
-            fn (array $member): array => $this->projectGroupMember($organization, $member),
+            fn (array $member): array => $this->projectGroupMember($member),
             $this->store->removeGroupMember(
             $organization,
             $userId,
             $this->identifier($conversationId, 'conversation_id', 64),
             $this->identifier($memberUserId, 'member_user_id', 64),
+            $this->positiveDecimal($expectedVersion, 'expected_access_version'),
             $this->nowText(),
             ),
         );
+    }
+
+    /** @param array<string,mixed> $identity @return array{conversation_id:string,left:bool,access_version:string,access_snapshot_id:string,access_state:string} */
+    public function leaveGroup(array $identity, string $conversationId, mixed $expectedVersion): array
+    {
+        [$organization, $userId] = $this->identity($identity);
+        return $this->store->leaveGroup(
+            $organization,
+            $userId,
+            $this->identifier($conversationId, 'conversation_id', 64),
+            $this->positiveDecimal($expectedVersion, 'expected_access_version'),
+            $this->nowText(),
+        );
+    }
+
+    /** @param array<string,mixed> $identity @return list<array<string,mixed>> */
+    public function suspendGroupMember(array $identity, string $conversationId, string $memberUserId, mixed $expectedVersion): array
+    {
+        return $this->manageGroupAccess($identity, $conversationId, $memberUserId, $expectedVersion, 'suspend');
+    }
+
+    /** @param array<string,mixed> $identity @return list<array<string,mixed>> */
+    public function restoreGroupMember(array $identity, string $conversationId, string $memberUserId, mixed $expectedVersion): array
+    {
+        return $this->manageGroupAccess($identity, $conversationId, $memberUserId, $expectedVersion, 'restore');
+    }
+
+    /** @param array<string,mixed> $identity @return list<array<string,mixed>> */
+    public function revokeGroupMemberHistory(
+        array $identity,
+        string $conversationId,
+        string $memberUserId,
+        mixed $expectedVersion,
+        mixed $periodNumbers,
+    ): array {
+        [$organization, $userId] = $this->identity($identity);
+        if (!is_array($periodNumbers)) {
+            throw new ApiException('period_numbers 格式无效。', 422);
+        }
+        $periods = [];
+        foreach ($periodNumbers as $periodNumber) {
+            $value = $this->positiveDecimal($periodNumber, 'period_no');
+            $periods[$value] = $value;
+        }
+        ksort($periods, SORT_STRING);
+        $rows = $this->store->revokeGroupMemberHistory(
+            $organization,
+            $userId,
+            $this->identifier($conversationId, 'conversation_id', 64),
+            $this->identifier($memberUserId, 'member_user_id', 64),
+            $this->positiveDecimal($expectedVersion, 'expected_access_version'),
+            array_values($periods),
+            $this->nowText(),
+        );
+        return array_map(fn (array $member): array => $this->projectGroupMember($member), $rows);
     }
 
     /** @param array<string, mixed> $identity @return array{conversation_id: string, is_pinned: bool, is_muted: bool} */
@@ -433,16 +490,25 @@ final class WebImControlService
         );
     }
 
-    /** @param array<string, mixed> $identity @return array{friend_user_id: string, remark: string} */
-    public function updateFriendRemark(array $identity, string $friendUserId, string $remark): array
+    /** @param array<string, mixed> $identity @return array{friend_organization: int, friend_user_id: string, remark: string} */
+    public function updateFriendRemark(
+        array $identity,
+        int $friendOrganization,
+        string $friendUserId,
+        string $remark,
+    ): array
     {
         [$organization, $userId] = $this->identity($identity);
+        if ($friendOrganization <= 0) {
+            throw new ApiException('friend_organization 格式无效。', 422);
+        }
         $friendUserId = $this->identifier($friendUserId, 'friend_user_id', 64);
         $remark = $this->text($remark, '好友备注', 64, true);
 
         return $this->store->updateFriendRemark(
             $organization,
             $userId,
+            $friendOrganization,
             $friendUserId,
             $remark,
             $this->nowText(),
@@ -464,7 +530,7 @@ final class WebImControlService
         }
 
         return array_map(
-            fn (array $message): array => $this->projectMessage($organization, $message),
+            fn (array $message): array => $this->projectMessage($message),
             $this->store->searchMessages(
             $organization,
             $userId,
@@ -474,6 +540,80 @@ final class WebImControlService
             min(max($limit, 1), 100),
             ),
         );
+    }
+
+    /** @param array<string,mixed> $identity @return list<array<string,mixed>> */
+    private function manageGroupAccess(
+        array $identity,
+        string $conversationId,
+        string $memberUserId,
+        mixed $expectedVersion,
+        string $action,
+    ): array {
+        [$organization, $userId] = $this->identity($identity);
+        $arguments = [
+            $organization,
+            $userId,
+            $this->identifier($conversationId, 'conversation_id', 64),
+            $this->identifier($memberUserId, 'member_user_id', 64),
+            $this->positiveDecimal($expectedVersion, 'expected_access_version'),
+            $this->nowText(),
+        ];
+        $rows = match ($action) {
+            'suspend' => $this->store->suspendGroupMember(...$arguments),
+            'restore' => $this->store->restoreGroupMember(...$arguments),
+            default => throw new \LogicException('Unknown group access action.'),
+        };
+        return array_map(fn (array $member): array => $this->projectGroupMember($member), $rows);
+    }
+
+    /** @param list<string> $memberIds @return array<string,string> */
+    private function expectedVersionMap(mixed $value, array $memberIds): array
+    {
+        if (!is_array($value)) {
+            throw new ApiException('expected_access_versions 格式无效。', 422);
+        }
+        $allowed = array_fill_keys($memberIds, true);
+        $result = [];
+        $seen = [];
+        foreach ($value as $userId => $version) {
+            if (!is_string($userId) && !is_int($userId)) {
+                throw new ApiException('expected_access_versions 格式无效。', 422);
+            }
+            $userId = $this->identifier((string) $userId, 'member_user_id', 64);
+            if (!isset($allowed[$userId])) {
+                throw new ApiException('expected_access_versions 含非目标成员。', 422);
+            }
+            $result[$userId] = $this->nonNegativeDecimal($version, 'expected_access_version');
+            $seen['user:' . $userId] = true;
+        }
+        foreach ($memberIds as $memberId) {
+            if (!isset($seen['user:' . $memberId])) {
+                throw new ApiException('expected_access_versions 缺少目标成员。', 422);
+            }
+        }
+        ksort($result, SORT_STRING);
+        return $result;
+    }
+
+    private function positiveDecimal(mixed $value, string $name): string
+    {
+        if (!is_string($value)
+            || preg_match('/^[1-9][0-9]{0,19}$/D', $value) !== 1
+            || (strlen($value) === 20 && strcmp($value, '18446744073709551615') > 0)) {
+            throw new ApiException($name . ' 必须是正规范正十进制字符串。', 422);
+        }
+        return $value;
+    }
+
+    private function nonNegativeDecimal(mixed $value, string $name): string
+    {
+        if (!is_string($value)
+            || preg_match('/^(0|[1-9][0-9]{0,19})$/D', $value) !== 1
+            || (strlen($value) === 20 && strcmp($value, '18446744073709551615') > 0)) {
+            throw new ApiException($name . ' 必须是正规范非负十进制字符串。', 422);
+        }
+        return $value;
     }
 
     /** @param array<string, mixed> $identity @return array{int, string} */
@@ -492,10 +632,12 @@ final class WebImControlService
 
     private function identifier(string $value, string $name, int $maxLength, int $code = 422): string
     {
-        $value = trim($value);
         if (
             $value === ''
+            || trim($value) !== $value
             || strlen($value) > $maxLength
+            || str_contains($value, "\0")
+            || str_contains($value, '|')
             || preg_match('/^[A-Za-z0-9][A-Za-z0-9_.:@-]*$/', $value) !== 1
         ) {
             throw new ApiException($name . ' 格式无效。', $code);
@@ -506,8 +648,6 @@ final class WebImControlService
 
     private function optionalIdentifier(string $value, string $name, int $maxLength): string
     {
-        $value = trim($value);
-
         return $value === '' ? '' : $this->identifier($value, $name, $maxLength);
     }
 
@@ -581,12 +721,16 @@ final class WebImControlService
     }
 
     /** @param array<string, mixed> $user @return array<string, mixed> */
-    private function projectUser(int $organization, array $user): array
+    private function projectUser(array $user): array
     {
+        $userOrganization = (int) ($user['organization'] ?? 0);
+        if ($userOrganization <= 0) {
+            throw new \RuntimeException('IM user projection requires organization.');
+        }
         $fileId = trim((string) ($user['avatar_file_id'] ?? $user['avatar'] ?? ''));
         unset($user['avatar'], $user['avatar_file_id'], $user['avatar_url'], $user['avatar_expires_at']);
 
-        return array_merge($user, $this->avatarProjection($organization, $fileId));
+        return array_merge($user, $this->avatarProjection($userOrganization, $fileId));
     }
 
     /** @param array<string, mixed> $conversation @return array<string, mixed> */
@@ -594,30 +738,36 @@ final class WebImControlService
     {
         $type = (int) ($conversation['conversation_type'] ?? 0);
         $peer = is_array($conversation['peer_user'] ?? null)
-            ? $this->projectUser($organization, $conversation['peer_user'])
+            ? $this->projectUser($conversation['peer_user'])
             : null;
         $members = is_array($conversation['avatar_members'] ?? null)
             ? array_map(
-                fn (array $user): array => $this->projectUser($organization, $user),
+                fn (array $user): array => $this->projectUser($user),
                 $conversation['avatar_members'],
             )
             : [];
         $fileId = $type === 1
             ? (string) ($peer['avatar_file_id'] ?? '')
             : trim((string) ($conversation['avatar'] ?? ''));
+        $avatarOrganization = $type === 1
+            ? (int) ($peer['organization'] ?? 0)
+            : $organization;
+        if ($type === 1 && $avatarOrganization <= 0) {
+            throw new \RuntimeException('Single conversation avatar requires the peer organization.');
+        }
         unset($conversation['avatar']);
         $conversation['peer_user'] = $peer;
         $conversation['avatar_members'] = $members;
 
-        return array_merge($conversation, $this->avatarProjection($organization, $fileId));
+        return array_merge($conversation, $this->avatarProjection($avatarOrganization, $fileId));
     }
 
     /** @param array<string, mixed> $request @return array<string, mixed> */
-    private function projectFriendRequest(int $organization, array $request): array
+    private function projectFriendRequest(array $request): array
     {
         foreach (['from_user', 'to_user'] as $key) {
             if (is_array($request[$key] ?? null)) {
-                $request[$key] = $this->projectUser($organization, $request[$key]);
+                $request[$key] = $this->projectUser($request[$key]);
             }
         }
 
@@ -625,25 +775,27 @@ final class WebImControlService
     }
 
     /** @param array<string, mixed> $member @return array<string, mixed> */
-    private function projectGroupMember(int $organization, array $member): array
+    private function projectGroupMember(array $member): array
     {
         if (is_array($member['user'] ?? null)) {
-            $member['user'] = $this->projectUser($organization, $member['user']);
+            $member['user'] = $this->projectUser($member['user']);
         }
 
         return $member;
     }
 
     /** @param array<string, mixed> $message @return array<string, mixed> */
-    private function projectMessage(int $organization, array $message): array
+    private function projectMessage(array $message): array
     {
         if (is_array($message['sender_user'] ?? null)) {
-            // Avatar assets are stored under the sender's home organization (may differ for dual-home).
-            $senderOrg = (int) ($message['sender_user']['organization'] ?? 0);
+            $senderOrg = (int) ($message['sender_organization'] ?? 0);
             if ($senderOrg <= 0) {
-                $senderOrg = $organization;
+                throw new \RuntimeException('IM message projection requires sender_organization.');
             }
-            $message['sender_user'] = $this->projectUser($senderOrg, $message['sender_user']);
+            if ((int) ($message['sender_user']['organization'] ?? 0) !== $senderOrg) {
+                throw new \RuntimeException('IM message sender identity is inconsistent.');
+            }
+            $message['sender_user'] = $this->projectUser($message['sender_user']);
         }
 
         return $message;
@@ -678,12 +830,4 @@ final class WebImControlService
         return date('Y-m-d H:i:s', $this->now());
     }
 
-    private function publishRealtime(Closure $publish): void
-    {
-        try {
-            $publish($this->realtime);
-        } catch (\Throwable $throwable) {
-            error_log('Web IM realtime event enqueue failed: ' . $throwable->getMessage());
-        }
-    }
 }

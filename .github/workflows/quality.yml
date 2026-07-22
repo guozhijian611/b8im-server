@@ -11,7 +11,33 @@ permissions:
   contents: read
 
 jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: b8im-server
+          persist-credentials: false
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: "8.3"
+          coverage: none
+
+      - name: Validate Composer metadata
+        working-directory: b8im-server
+        run: composer validate --no-check-publish
+
+      - name: Lint PHP without private dependencies
+        working-directory: b8im-server
+        run: php scripts/php-lint.php
+
   test:
+    needs: syntax
+    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
@@ -20,6 +46,7 @@ jobs:
         env:
           MYSQL_ROOT_PASSWORD: root
           MYSQL_DATABASE: nb8im
+          TZ: Asia/Shanghai
         ports:
           - 3306:3306
         options: >-
@@ -37,6 +64,7 @@ jobs:
           --health-timeout=5s
           --health-retries=20
     env:
+      TZ: Asia/Shanghai
       APP_DEBUG: "true"
       DB_HOST: 127.0.0.1
       DB_PORT: 3306
@@ -47,45 +75,69 @@ jobs:
       REDIS_HOST: 127.0.0.1
       REDIS_PORT: 6379
       CACHE_STORE: redis
+      IM_TOKEN_SECRET: b8im-ci-im-token-signing-secret-2026
+      B8IM_IM_ROOT: ${{ github.workspace }}/b8im-im
+      B8IM_SEARCH_MODULE_ROOT: ${{ github.workspace }}/b8im-module-search
 
     steps:
       - name: Checkout backend
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           path: b8im-server
+          persist-credentials: false
 
-      - name: Checkout module SDK path dependency
-        uses: actions/checkout@v4
+      - name: Verify private Composer credential
+        env:
+          B8IM_CI_READ_TOKEN: ${{ secrets.B8IM_CI_READ_TOKEN }}
+        run: |
+          if [ -z "$B8IM_CI_READ_TOKEN" ]; then
+            echo "::error::B8IM_CI_READ_TOKEN is required to read private Composer VCS dependencies."
+            exit 1
+          fi
+
+      - name: Checkout Search migration fixture
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          repository: guozhijian611/b8im-module-sdk
-          path: b8im-module-sdk
+          repository: guozhijian611/b8im-module-search
+          path: b8im-module-search
+          ref: 9c4ad85fc7c32f9c5dabd23ebc82ab9d2a7e1769
+          token: ${{ secrets.B8IM_CI_READ_TOKEN }}
+          persist-credentials: false
 
-      - name: Checkout IM migration dependency
-        uses: actions/checkout@v4
+      - name: Checkout IM migration fixture
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: guozhijian611/b8im-im
           path: b8im-im
+          ref: f9caf6ca65230e2e4edda9dab0f903df0cebb4db
+          persist-credentials: false
 
-      - name: Checkout IM shared path dependency
-        uses: actions/checkout@v4
+      - name: Checkout IM Shared fixture
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: guozhijian611/b8im-im-shared
           path: b8im-im-shared
+          ref: 727e0b16558369631d8acdc46a4a0d82d4c7d326
+          persist-credentials: false
 
       - name: Checkout admin generator target
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: guozhijian611/b8im-admin-vue
           path: b8im-admin-vue
+          ref: 73588cc73d90ae783ddf31c4a0ea319fb40e6a14
+          persist-credentials: false
 
       - name: Checkout tenant generator target
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: guozhijian611/b8im-tenant-vue
           path: b8im-tenant-vue
+          ref: 13d1ddb9c2e2deba25e8ec863c7501d23f14737f
+          persist-credentials: false
 
       - name: Set up PHP
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
         with:
           php-version: "8.3"
           extensions: pdo_mysql, redis, sodium, mbstring
@@ -93,7 +145,10 @@ jobs:
 
       - name: Install dependencies
         working-directory: b8im-server
-        run: composer install --no-interaction --prefer-dist
+        env:
+          COMPOSER_AUTH: >-
+            {"github-oauth":{"github.com":"${{ secrets.B8IM_CI_READ_TOKEN }}"}}
+        run: composer install --no-interaction --prefer-dist --no-scripts
 
       - name: Install IM migration dependencies
         working-directory: b8im-im/im-business
@@ -118,4 +173,9 @@ jobs:
       - name: Cleanup isolated databases
         if: always()
         working-directory: b8im-server
-        run: composer test:cleanup
+        run: |
+          if [[ -f vendor/autoload.php ]]; then
+            composer test:cleanup
+          else
+            echo "Skipping test database cleanup because Composer dependencies were not installed."
+          fi
