@@ -46,6 +46,7 @@ jobs:
         env:
           MYSQL_ROOT_PASSWORD: root
           MYSQL_DATABASE: nb8im
+          TZ: Asia/Shanghai
         ports:
           - 3306:3306
         options: >-
@@ -63,6 +64,7 @@ jobs:
           --health-timeout=5s
           --health-retries=20
     env:
+      TZ: Asia/Shanghai
       APP_DEBUG: "true"
       DB_HOST: 127.0.0.1
       DB_PORT: 3306

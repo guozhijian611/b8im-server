@@ -140,6 +140,21 @@ $assert = static function (bool $value, string $message) use (&$assertions): voi
     }
     $assertions++;
 };
+$databaseNow = (string) $pdo->query('SELECT NOW()')->fetchColumn();
+$databaseNowEpoch = strtotime($databaseNow);
+$phpNowEpoch = time();
+$clockSkewSeconds = $databaseNowEpoch === false
+    ? PHP_INT_MAX
+    : abs($databaseNowEpoch - $phpNowEpoch);
+$assert(
+    $clockSkewSeconds <= 60,
+    sprintf(
+        'Database/PHP timezone drift: DB_NOW=%s PHP_NOW=%s skew=%d seconds.',
+        $databaseNow,
+        date('Y-m-d H:i:s', $phpNowEpoch),
+        $clockSkewSeconds,
+    ),
+);
 $setReservationChecks = static function (array $names, bool $enforced) use ($pdo): void {
     $allowed = [
         'chk_im_upload_reservation_positive',
@@ -351,9 +366,47 @@ $retryActive = $active;
 $retryActive['upload_id'] = str_repeat('6', 64);
 $retryActive['file_id'] = str_repeat('7', 40);
 $retryActive['storage_path'] = 'private/organizations/1/im/202607/' . str_repeat('8', 48) . '.txt';
-$refreshedActive = $store->prepare($retryActive);
+$activeRowsStatement = $pdo->prepare(
+    'SELECT id,upload_id,intent_hash,user_id,client_family,state,version,expires_at,
+            upload_lease_token,upload_lease_expires_at,
+            expires_at<=NOW() AS prepare_expired,
+            upload_lease_expires_at>NOW() AS upload_lease_active
+       FROM sm_im_upload_reservation
+      WHERE organization=? AND idempotency_key=?',
+);
+$activeRowsStatement->execute([$active['organization'], $active['idempotency_key']]);
+$activeRowsBeforeRetry = $activeRowsStatement->fetchAll(PDO::FETCH_ASSOC);
+$activeBeforeRetry = $activeRowsBeforeRetry[0] ?? null;
 $assert(
-    $refreshedActive['upload_id'] === $active['upload_id']
+    count($activeRowsBeforeRetry) === 1
+    && is_array($activeBeforeRetry)
+    && (string) $activeBeforeRetry['intent_hash'] === $active['intent_hash']
+    && (string) $activeBeforeRetry['user_id'] === $active['user_id']
+    && (string) $activeBeforeRetry['client_family'] === $active['client_family']
+    && (string) $activeBeforeRetry['state'] === 'uploading'
+    && (int) $activeBeforeRetry['prepare_expired'] === 1
+    && (int) $activeBeforeRetry['upload_lease_active'] === 1,
+    'active uploading idempotency fixture does not isolate the live-lease contract',
+);
+$refreshedActive = $store->prepare($retryActive);
+$activeRowsStatement->execute([$active['organization'], $active['idempotency_key']]);
+$activeRowsAfterRetry = $activeRowsStatement->fetchAll(PDO::FETCH_ASSOC);
+$activeAfterRetry = $activeRowsAfterRetry[0] ?? null;
+$assert(
+    count($activeRowsAfterRetry) === 1
+    && is_array($activeAfterRetry)
+    && (int) $refreshedActive['id'] === (int) $activeBeforeRetry['id']
+    && (string) $refreshedActive['upload_id'] === $active['upload_id']
+    && (int) $refreshedActive['version'] === (int) $activeAfterRetry['version']
+    && strtotime((string) $refreshedActive['expires_at'])
+        === strtotime((string) $activeAfterRetry['expires_at'])
+    && (int) $activeAfterRetry['id'] === (int) $activeBeforeRetry['id']
+    && (string) $activeAfterRetry['upload_id'] === $active['upload_id']
+    && (string) $activeAfterRetry['state'] === 'uploading'
+    && (string) $activeAfterRetry['upload_lease_token']
+        === (string) $activeBeforeRetry['upload_lease_token']
+    && (string) $activeAfterRetry['upload_lease_expires_at']
+        === (string) $activeBeforeRetry['upload_lease_expires_at']
     && strtotime((string) $refreshedActive['expires_at']) > time() + 800,
     'active uploading idempotency did not return the original upload id',
 );

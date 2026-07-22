@@ -128,6 +128,14 @@ $pdo = new PDO(
         PDO::MYSQL_ATTR_MULTI_STATEMENTS => true,
     ],
 );
+$sessionSqlModes = array_values(array_filter(array_map(
+    static fn (string $mode): string => strtoupper(trim($mode)),
+    explode(',', (string) $pdo->query('SELECT @@SESSION.sql_mode')->fetchColumn()),
+)));
+if (array_intersect(['STRICT_TRANS_TABLES', 'STRICT_ALL_TABLES'], $sessionSqlModes) === []) {
+    $sessionSqlModes[] = 'STRICT_TRANS_TABLES';
+    $pdo->exec('SET SESSION sql_mode=' . $pdo->quote(implode(',', $sessionSqlModes)));
+}
 $snapshot = file_get_contents(dirname(__DIR__) . '/db/saimulti.sql');
 if (!is_string($snapshot) || $snapshot === '') {
     throw new RuntimeException('Server schema snapshot is unavailable.');
@@ -269,6 +277,7 @@ $assertV3JobSchema = static function (string $context) use (
     $expected = [
         'cursor_global_seq' => ['bigint unsigned', 'NO', '0'],
         'high_water_global_seq' => ['bigint unsigned', 'NO', null],
+        'source_event_cut' => ['bigint unsigned', 'NO', null],
         'worker_id' => ['varchar(64)', 'YES', null],
         'claim_token' => ['char(40)', 'YES', null],
         'locked_until' => ['datetime', 'YES', null],
@@ -1204,29 +1213,37 @@ SQL);
     $maxJob = $pdo->prepare(
         'INSERT INTO sm_search_job
             (organization,job_type,status,processed,total,cursor_global_seq,
-             high_water_global_seq,error_message)
-         VALUES (101,\'rebuild\',\'pending\',0,0,?,?,\'\')',
+             high_water_global_seq,source_event_cut,error_message)
+         VALUES (101,\'rebuild\',\'pending\',0,0,?,?,?,\'\')',
     );
-    $maxJob->execute([$uint64Max, $uint64Max]);
+    $maxJob->execute([$uint64Max, $uint64Max, $uint64Max]);
     $maxRoundTrip = $pdo->query(
-        'SELECT cursor_global_seq,high_water_global_seq
+        'SELECT cursor_global_seq,high_water_global_seq,source_event_cut
            FROM sm_search_job ORDER BY id DESC LIMIT 1',
     )->fetch();
     $assert(
         ($maxRoundTrip['cursor_global_seq'] ?? null) === $uint64Max
-        && ($maxRoundTrip['high_water_global_seq'] ?? null) === $uint64Max,
-        'Search job UINT64 cursor/high-water did not round-trip as decimal strings.',
+        && ($maxRoundTrip['high_water_global_seq'] ?? null) === $uint64Max
+        && ($maxRoundTrip['source_event_cut'] ?? null) === $uint64Max,
+        'Search job UINT64 cursor/high-water/source cut did not round-trip as decimal strings.',
     );
+    $cursorCheckRejected = false;
     try {
         $pdo->exec(
             'INSERT INTO sm_search_job
-                (organization,job_type,status,cursor_global_seq,high_water_global_seq)
-             VALUES (101,\'rebuild\',\'pending\',2,1)',
+                (organization,job_type,status,cursor_global_seq,
+                 high_water_global_seq,source_event_cut)
+             VALUES (102,\'rebuild\',\'pending\',2,1,0)',
         );
         throw new RuntimeException('Search job cursor/high-water CHECK accepted cursor overflow.');
-    } catch (PDOException) {
-        $assert(true, 'Search job cursor/high-water CHECK rejected cursor overflow.');
+    } catch (PDOException $exception) {
+        $cursorCheckRejected = (int) ($exception->errorInfo[1] ?? 0) === 3819
+            && str_contains($exception->getMessage(), 'chk_search_job_cursor_high_water');
     }
+    $assert(
+        $cursorCheckRejected,
+        'Search job cursor/high-water fixture was not rejected by its intended CHECK.',
+    );
     try {
         $pdo->exec(
             'INSERT INTO sm_search_doc
